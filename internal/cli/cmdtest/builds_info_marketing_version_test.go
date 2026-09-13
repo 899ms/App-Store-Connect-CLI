@@ -236,9 +236,10 @@ func TestBuildsInfoBuildNumberRequiresUniqueMatch(t *testing.T) {
 	if runErr == nil {
 		t.Fatal("expected unique build-number lookup error")
 	}
-	if stderr != "" {
-		t.Fatalf("expected empty stderr, got %q", stderr)
+	if !isUsageClassError(runErr) {
+		t.Fatalf("expected ambiguity to be a usage error, got %v", runErr)
 	}
+	assertUsageDiagnosticFirstLine(t, stderr, `multiple builds found for app 123456789 with build number "42" for platform IOS; add --version, or use --build-id`)
 	if !strings.Contains(runErr.Error(), `multiple builds found for app 123456789 with build number "42"`) {
 		t.Fatalf("expected ambiguity error, got %v", runErr)
 	}
