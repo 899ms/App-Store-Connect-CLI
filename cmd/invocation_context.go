@@ -147,6 +147,9 @@ func printConciseUnknownCommand(analysis invocationAnalysis, commandName string)
 
 func printConciseUnknownFlag(root *ffcli.Command, analysis invocationAnalysis, commandName string, args []string) {
 	flagName := unknownFlagName(analysis)
+	if printRemovedFlagHint(os.Stderr, commandName, flagName, analysis.command.FlagSet) {
+		return
+	}
 	fmt.Fprintf(os.Stderr, "Error: %s\n", unknownFlagError(analysis, commandName))
 	if printMetadataValidateFlagRecovery(flagName, commandName, analysis, args) {
 		return
