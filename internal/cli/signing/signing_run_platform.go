@@ -23,6 +23,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 
@@ -32,9 +33,10 @@ import (
 )
 
 const (
-	signingRunDiagnosticLimit  = 64 << 10
-	signingRunChildWaitDelay   = 5 * time.Second
-	signingRunLockPollInterval = 50 * time.Millisecond
+	signingRunDiagnosticLimit     = 64 << 10
+	signingUtilityDiagnosticLimit = 4 << 10
+	signingRunChildWaitDelay      = 5 * time.Second
+	signingRunLockPollInterval    = 50 * time.Millisecond
 )
 
 var (
@@ -421,7 +423,7 @@ func importSigningRunIdentity(ctx context.Context, keychainPath string, keychain
 	if err := withSigningRunPartitionPasswordInput(keychainPassword, func(stdin []byte) error {
 		_, stderr, err := runSigningUtility(ctx, stdin, "set-key-partition-list", "-S", "apple-tool:,apple:", "-s", "-t", "private", keychainPath)
 		if err != nil {
-			return utilityFailure("restrict key partition list", stderr, err)
+			return utilityFailure("restrict key partition list", stderr, err, keychainPassword)
 		}
 		return nil
 	}); err != nil {
@@ -471,13 +473,13 @@ func verifySigningRunIdentityUsable(ctx context.Context, tempDir, keychainPath, 
 			_ = rooted.Close()
 		}
 	}()
-	cmd := exec.CommandContext(ctx, "/usr/bin/codesign", "--force", "--sign", expectedSHA1, "--keychain", keychainPath, probePath)
+	cmd := signingRunCommandContext(ctx, "/usr/bin/codesign", "--force", "--sign", expectedSHA1, "--keychain", keychainPath, probePath)
 	stdout := &limitedSigningBuffer{limit: signingRunDiagnosticLimit}
 	stderr := &limitedSigningBuffer{limit: signingRunDiagnosticLimit}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("verify imported signing identity: %w", err)
+		return utilityFailure("verify imported signing identity", stderr.Bytes(), err)
 	}
 	return nil
 }
@@ -852,9 +854,41 @@ func (b *limitedSigningBuffer) Write(data []byte) (int, error) {
 
 func (b *limitedSigningBuffer) Bytes() []byte { return append([]byte(nil), b.data...) }
 
-func utilityFailure(operation string, stderr []byte, err error) error {
-	_ = stderr // Captured and bounded, but intentionally excluded from diagnostics.
-	return fmt.Errorf("%s: %w", operation, err)
+func utilityFailure(operation string, stderr []byte, err error, sensitive ...[]byte) error {
+	diagnostic := signingUtilityDiagnostic(stderr, sensitive...)
+	if diagnostic == "" {
+		return fmt.Errorf("%s: %w", operation, err)
+	}
+	return fmt.Errorf("%s: %s: %w", operation, diagnostic, err)
+}
+
+func signingUtilityDiagnostic(stderr []byte, sensitive ...[]byte) string {
+	diagnostic := string(stderr)
+	for _, secret := range sensitive {
+		if len(secret) == 0 {
+			continue
+		}
+		for _, representation := range []string{
+			string(secret),
+			hex.EncodeToString(secret),
+			strings.ToUpper(hex.EncodeToString(secret)),
+		} {
+			if representation == "" {
+				continue
+			}
+			diagnostic = strings.ReplaceAll(diagnostic, representation, "[REDACTED]")
+			diagnostic = strings.ReplaceAll(diagnostic, shared.SanitizeTerminal(representation), "[REDACTED]")
+		}
+	}
+	diagnostic = strings.TrimSpace(shared.SanitizeTerminal(diagnostic))
+	if len(diagnostic) <= signingUtilityDiagnosticLimit {
+		return diagnostic
+	}
+	diagnostic = diagnostic[:signingUtilityDiagnosticLimit]
+	for !utf8.ValidString(diagnostic) {
+		diagnostic = diagnostic[:len(diagnostic)-1]
+	}
+	return diagnostic + " [truncated]"
 }
 
 func systemSigningRunRoots() (*x509.CertPool, error) { return x509.SystemCertPool() }
