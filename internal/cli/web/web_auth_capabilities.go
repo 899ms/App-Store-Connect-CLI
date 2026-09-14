@@ -271,7 +271,7 @@ func wrapWebAuthCapabilitiesSessionError(err error) error {
 	if errors.Is(err, webcore.ErrCachedSessionExpired) || strings.Contains(err.Error(), webcore.ErrCachedSessionExpired.Error()) {
 		return webAuthCapabilitiesError("web auth capabilities failed: cached web session expired; run 'asc web auth login' and retry", err)
 	}
-	if strings.Contains(err.Error(), "no cached web session is available") {
+	if errors.Is(err, errNoCachedWebSession) {
 		// The session resolver returns a typed usage error and has already written
 		// its specific --apple-id guidance. Preserve it unchanged so the root
 		// renderer does not emit a second diagnostic.

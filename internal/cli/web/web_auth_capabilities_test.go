@@ -52,7 +52,7 @@ func TestWrapWebAuthCapabilitiesSessionErrorDistinguishesMissingAndExpired(t *te
 	}{
 		{
 			name:     "missing session",
-			err:      errors.New("--apple-id is required when no cached web session is available"),
+			err:      shared.NewErrorWithCause(errors.New("--apple-id is required when no cached web session is available"), errNoCachedWebSession),
 			want:     "no cached web session is available",
 			dontWant: "expired",
 		},
@@ -80,6 +80,63 @@ func TestWrapWebAuthCapabilitiesSessionErrorDistinguishesMissingAndExpired(t *te
 				t.Fatalf("expected diagnostic to preserve its cause, got %v", err)
 			}
 		})
+	}
+}
+
+func TestWebAuthCapabilitiesMissingSessionPreservesUsageDiagnostic(t *testing.T) {
+	origResolveSession := resolveSessionFn
+	t.Cleanup(func() { resolveSessionFn = origResolveSession })
+
+	resolveSessionFn = func(context.Context, string, string, string) (*webcore.AuthSession, string, error) {
+		return nil, "", shared.NewErrorWithCause(
+			shared.UsageError("--apple-id is required when no cached web session is available"),
+			errNoCachedWebSession,
+		)
+	}
+
+	cmd := WebAuthCapabilitiesCommand()
+	if err := cmd.FlagSet.Parse([]string{"--key-id", "KEY", "--output", "json"}); err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	var execErr error
+	stdout, stderr := captureOutput(t, func() {
+		execErr = cmd.Exec(context.Background(), nil)
+	})
+	if !errors.Is(execErr, flag.ErrHelp) {
+		t.Fatalf("expected usage error, got %v", execErr)
+	}
+	if got := shared.ClassifyUsageError(execErr); got != shared.UsageErrorMissingRequired {
+		t.Fatalf("usage classification = %q, want %q", got, shared.UsageErrorMissingRequired)
+	}
+	if stdout != "" {
+		t.Fatalf("expected empty stdout, got %q", stdout)
+	}
+	wantStderr := "Error: --apple-id is required when no cached web session is available\n"
+	if stderr != wantStderr {
+		t.Fatalf("stderr = %q, want one diagnostic %q", stderr, wantStderr)
+	}
+}
+
+func TestWebAuthCapabilitiesExpiredSessionGetsCommandDiagnostic(t *testing.T) {
+	origResolveSession := resolveSessionFn
+	t.Cleanup(func() { resolveSessionFn = origResolveSession })
+
+	resolveSessionFn = func(context.Context, string, string, string) (*webcore.AuthSession, string, error) {
+		return nil, "", webcore.ErrCachedSessionExpired
+	}
+
+	cmd := WebAuthCapabilitiesCommand()
+	if err := cmd.FlagSet.Parse([]string{"--key-id", "KEY", "--output", "json"}); err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	err := cmd.Exec(context.Background(), nil)
+	if err == nil || !strings.Contains(err.Error(), "cached web session expired") {
+		t.Fatalf("expected expired-session diagnostic, got %v", err)
+	}
+	if !errors.Is(err, webcore.ErrCachedSessionExpired) {
+		t.Fatalf("expected expired-session cause, got %v", err)
 	}
 }
 
