@@ -777,3 +777,41 @@ func TestReleaseWorkflowPushesWinGetBranchWithoutHistoryRewriteOrWorkflowScope(t
 		}
 	}
 }
+
+func TestReleaseWorkflowSignsMacOSBinariesWithStableCodeSigningIdentifier(t *testing.T) {
+	data, err := readReleaseWorkflow()
+	if err != nil {
+		t.Fatalf("read release workflow: %v", err)
+	}
+
+	workflow := string(data)
+	signStart := strings.Index(workflow, "- name: Sign and verify macOS binaries")
+	notarizeStart := strings.Index(workflow, "- name: Notarize macOS binaries")
+	if signStart == -1 || notarizeStart == -1 || signStart >= notarizeStart {
+		t.Fatal("release workflow must sign macOS binaries before notarizing them")
+	}
+	signStep := workflow[signStart:notarizeStart]
+
+	// codesign derives the identifier from the file name unless one is given,
+	// so unnamed signing gives every release a version-specific designated
+	// requirement. macOS keychain ACLs trust applications by that requirement,
+	// which re-prompts for stored credentials after every upgrade.
+	for _, want := range []string{
+		`ASC_CODESIGN_IDENTIFIER: com.rorkai.asc`,
+		`--identifier "${ASC_CODESIGN_IDENTIFIER}"`,
+		`sed -n 's/^Identifier=//p'`,
+		`unexpected code signing identifier`,
+	} {
+		if !strings.Contains(signStep, want) {
+			t.Errorf("sign step missing stable identifier contract %q", want)
+		}
+	}
+	for _, line := range strings.Split(signStep, "\n") {
+		if !strings.Contains(line, "codesign --force --sign") {
+			continue
+		}
+		if !strings.Contains(line, `--identifier "${ASC_CODESIGN_IDENTIFIER}"`) {
+			t.Errorf("codesign invocation must pin the identifier: %s", strings.TrimSpace(line))
+		}
+	}
+}

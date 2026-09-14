@@ -194,6 +194,11 @@ type APIError struct {
 	AppleRequestID string
 	CorrelationKey string
 	rawBody        []byte
+	// portalReason is populated only for review attachment mutations. Those
+	// endpoints return the actionable refusal reason in errors[].detail, while
+	// the general web API error contract intentionally keeps response details
+	// redacted.
+	portalReason string
 }
 
 type sessionInfoStatusError struct {
@@ -278,6 +283,9 @@ func (e *APIError) Error() string {
 	}
 	if codes := extractServiceErrorCodes(e.rawBody); len(codes) > 0 {
 		parts = append(parts, fmt.Sprintf("codes=%v", codes))
+	}
+	if reason := strings.TrimSpace(e.portalReason); reason != "" {
+		parts = append(parts, fmt.Sprintf("reason=%s", reason))
 	}
 	return strings.Join(parts, ", ")
 }
@@ -1620,6 +1628,59 @@ func extractServiceErrorCodes(respBody []byte) []string {
 	return codes
 }
 
+func isReviewAttachmentMutation(method, path string) bool {
+	if !strings.EqualFold(strings.TrimSpace(method), http.MethodPost) {
+		return false
+	}
+	switch strings.TrimSpace(path) {
+	case "/subscriptionSubmissions", "/inAppPurchaseSubmissions":
+		return true
+	default:
+		return false
+	}
+}
+
+// extractWebPortalErrorReason keeps the actionable refusal text from the
+// review attachment endpoints without exposing a raw response body. The
+// general web API error contract deliberately omits details because other
+// private endpoints can echo sensitive values.
+func extractWebPortalErrorReason(respBody []byte) string {
+	var payload struct {
+		Errors []struct {
+			Title  string `json:"title"`
+			Detail string `json:"detail"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(respBody, &payload); err != nil {
+		return ""
+	}
+
+	reasons := make([]string, 0, len(payload.Errors))
+	for _, responseError := range payload.Errors {
+		title := sanitizeWebPortalErrorText(responseError.Title)
+		detail := sanitizeWebPortalErrorText(responseError.Detail)
+		switch {
+		case title != "" && detail != "":
+			reasons = append(reasons, title+": "+detail)
+		case title != "":
+			reasons = append(reasons, title)
+		case detail != "":
+			reasons = append(reasons, detail)
+		}
+	}
+	return sanitizeWebPortalErrorText(strings.Join(reasons, "; "))
+}
+
+func sanitizeWebPortalErrorText(value string) string {
+	value = strings.TrimSpace(asc.SanitizeTerminalText(value))
+	const maxLength = 500
+	valueRunes := []rune(value)
+	if len(valueRunes) > maxLength {
+		return string(valueRunes[:maxLength]) + "..."
+	}
+	return value
+}
+
 // Apple currently returns -20101 when signin/complete rejects SRP credentials.
 func isInvalidAppleAccountCredentialsSigninComplete(status int, respBody []byte) bool {
 	if status != http.StatusUnauthorized {
@@ -1746,12 +1807,16 @@ func (c *Client) doRequestBaseWithHTTPClient(client *http.Client, ctx context.Co
 	correlationKey := strings.TrimSpace(resp.Header.Get("X-Apple-Jingle-Correlation-Key"))
 
 	if resp.StatusCode >= 400 {
-		return nil, &APIError{
+		apiErr := &APIError{
 			Status:         resp.StatusCode,
 			AppleRequestID: appleRequestID,
 			CorrelationKey: correlationKey,
 			rawBody:        respBody,
 		}
+		if isReviewAttachmentMutation(method, path) {
+			apiErr.portalReason = extractWebPortalErrorReason(respBody)
+		}
+		return nil, apiErr
 	}
 	return respBody, nil
 }
