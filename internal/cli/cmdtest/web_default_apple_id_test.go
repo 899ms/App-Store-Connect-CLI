@@ -78,6 +78,9 @@ func TestWebCommandsRequireAppleIDWithLoginHintWhenNothingIsCached(t *testing.T)
 			if strings.Contains(stderr, "Using cached web session") {
 				t.Fatalf("stderr = %q, did not expect a cached-session notice", stderr)
 			}
+			if got := strings.Count(stderr, "Error: "); got != 1 {
+				t.Fatalf("stderr = %q, want exactly one diagnostic, got %d", stderr, got)
+			}
 		})
 	}
 }
@@ -106,6 +109,9 @@ func TestWebCommandsRequireAppleIDWhenMultipleSessionsAreCached(t *testing.T) {
 			want := "Error: --apple-id is required: multiple cached web sessions are available (amy@example.com, zed@example.com); pass --apple-id to choose one\n"
 			if !strings.Contains(stderr, want) {
 				t.Fatalf("stderr = %q, want it to contain %q", stderr, want)
+			}
+			if got := strings.Count(stderr, "Error: "); got != 1 {
+				t.Fatalf("stderr = %q, want exactly one diagnostic, got %d", stderr, got)
 			}
 		})
 	}

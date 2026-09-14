@@ -239,3 +239,40 @@ func TestResolveWebSessionForCommandSessionFromEnvSkipsCachedDefault(t *testing.
 		t.Fatalf("error = %v, want unset ASC_WEB_SESSION usage error", err)
 	}
 }
+
+// TestWrapWebAuthCapabilitiesSessionErrorPreservesAppleIDUsageErrors pins the
+// interaction with the capability-specific session diagnostics: both --apple-id
+// usage errors are already printed with their own guidance, so the capabilities
+// wrapper must pass them through instead of restating them as a generic
+// session failure.
+func TestWrapWebAuthCapabilitiesSessionErrorPreservesAppleIDUsageErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		make func() error
+	}{
+		{name: "no cached session", make: missingAppleIDUsageError},
+		{
+			name: "ambiguous cache",
+			make: func() error {
+				return ambiguousAppleIDUsageError([]string{"amy@example.com", "zed@example.com"})
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var err, wrapped error
+			captureOutput(t, func() {
+				err = tc.make()
+				wrapped = wrapWebAuthCapabilitiesSessionError(err)
+			})
+			if got, want := wrapped.Error(), err.Error(); got != want {
+				t.Fatalf("wrapped error = %q, want the original guidance %q", got, want)
+			}
+			if !errors.Is(wrapped, flag.ErrHelp) {
+				t.Fatalf("wrapped error lost its usage classification: %v", wrapped)
+			}
+			if got := shared.ClassifyUsageError(wrapped); got != shared.UsageErrorMissingRequired {
+				t.Fatalf("usage classification = %q, want %q", got, shared.UsageErrorMissingRequired)
+			}
+		})
+	}
+}

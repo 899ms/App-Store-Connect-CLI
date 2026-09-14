@@ -506,12 +506,16 @@ func staleSessionDiscardWarning(err error) error {
 
 // missingAppleIDUsageError is the usage error for a web command that has no
 // Apple ID to work with: nothing was passed and the session cache holds
-// nothing to default to.
+// nothing to default to. It carries errNoCachedWebSession so command-specific
+// session diagnostics can tell a missing session from an expired one.
 func missingAppleIDUsageError() error {
-	return shared.WithDiagnostic(
-		shared.UsageError("--apple-id is required when no cached web session is available; run 'asc web auth login --apple-id EMAIL'"),
-		shared.DiagnosticRequiredInputMissing,
-		"--apple-id",
+	return shared.NewErrorWithCause(
+		shared.WithDiagnostic(
+			shared.UsageError("--apple-id is required when no cached web session is available; run 'asc web auth login --apple-id EMAIL'"),
+			shared.DiagnosticRequiredInputMissing,
+			"--apple-id",
+		),
+		errNoCachedWebSession,
 	)
 }
 
@@ -525,11 +529,11 @@ func ambiguousAppleIDUsageError(appleIDs []string) error {
 	)
 }
 
-// resolveDefaultCachedAppleID picks the Apple ID of the only cached web
-// session when --apple-id names none. The chosen account
-// is announced on stderr so a caller with several accounts can tell which one
-// served the request. An ambiguous cache is a usage error; a cache that
-// cannot be listed degrades to the plain missing-flag error with a warning.
+// resolveDefaultCachedAppleID picks the Apple ID of the only cached web session
+// when --apple-id names none. The chosen account is announced on stderr so a
+// caller who later caches several accounts can tell which one served the
+// request. An ambiguous cache is a usage error; a cache that cannot be listed
+// degrades to the plain missing-flag error with a warning.
 // The boolean reports the empty-cache case, the only one a command may still
 // answer with an interactive Apple ID prompt.
 func resolveDefaultCachedAppleID() (appleID string, cacheEmpty bool, err error) {

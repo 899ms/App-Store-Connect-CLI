@@ -481,7 +481,12 @@ func TestAuthLoginCommand(t *testing.T) {
 		}
 	})
 
-	t.Run("missing name", func(t *testing.T) {
+	t.Run("missing name with stored profiles", func(t *testing.T) {
+		t.Setenv("ASC_BYPASS_KEYCHAIN", "0")
+		restore := SetListCredentialSummaries(func() ([]authsvc.Credential, error) {
+			return []authsvc.Credential{{Name: "existing"}}, nil
+		})
+		t.Cleanup(restore)
 		cmd := AuthLoginCommand()
 		if err := cmd.FlagSet.Parse([]string{"--key-id", "KEY", "--issuer-id", "ISS", "--private-key", "/tmp/AuthKey.p8"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)

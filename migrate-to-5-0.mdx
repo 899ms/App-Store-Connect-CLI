@@ -4,11 +4,12 @@
 
 Version 5.0 removes every CLI-side compatibility surface that 4.x kept behind a
 deprecation warning, and turns the remaining "warns and continues" inputs into
-hard usage errors. Nothing in this release adds a new warning phase: a removed
-flag is simply not registered any more, so the CLI fails on stderr with
-``Error: unknown flag `--old` for `asc <command>` `` (followed by a `Try:`
-suggestion when a close canonical flag exists) and exit code `2`; a removed
-command fails with ``Error: unknown command `asc <command>` ``, also exit `2`.
+hard usage errors. A removed flag is not registered, so it exits with code `2`.
+Starting in 5.3.2, flags listed on this page also name the replacement or exact
+migration step when they were accepted by a published 4.x command; other
+unknown flags keep the generic diagnostic and optional `Try:` suggestion. A
+removed command fails with
+``Error: unknown command `asc <command>` ``, also exit `2`.
 
 If you have pinned CI jobs, shell scripts, or internal runbooks on 4.x, read
 this page before you cut over. Use `asc --help` and `asc <command> --help`
@@ -187,13 +188,18 @@ and `asc apps app-encryption-declarations list`.
 | `--subscription-id` | `asc subscriptions view ...` | `--id` |
 | `--image-limit`, `--localization-limit` | `asc subscriptions versions list|view ...` | `--images-limit`, `--localizations-limit` |
 | `--id` | `asc subscriptions review screenshots delete ...` | `--screenshot-id` |
-| `--price-id` | `asc offer-codes create ...` | `--prices` |
 | `--limit`, `--next`, `--paginate` | `asc game-center details list ...` | none; each app has a single Game Center detail |
 | `--challenge-enabled` | `asc game-center details create|update ...` | none; App Store Connect no longer accepts `challengeEnabled` |
-| `--two-factor-code` | every `asc web ...` command | `--two-factor-code-command` or `ASC_WEB_2FA_CODE_COMMAND` |
+| `--two-factor-code` | web commands present in 4.x that support session authentication | `--two-factor-code-command` or `ASC_WEB_2FA_CODE_COMMAND` |
 | `--id` | `asc xcode-cloud status ...` | `--run-id` |
 | `--password` | `asc signing sync push|pull ...` | `--password-file` or `ASC_SIGNING_SYNC_PASSWORD` |
 | `--keyword` | `asc ads v5 campaign-negative-keywords view ...`, `asc ads v5 ad-group-negative-keywords view ...` | `--negative-keyword` |
+
+The source-only `--price-id` compatibility code in the legacy offer-code
+package was never registered in the 4.x root command, so it is not part of the
+published migration surface. Use
+`asc subscriptions offers offer-codes create --prices "USA:PRICE_POINT_ID"`
+for subscription offer codes.
 
 ## Removed accepted values
 
