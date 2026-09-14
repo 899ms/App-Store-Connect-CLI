@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -119,6 +120,90 @@ func TestParseSigningRunCertificateFingerprints(t *testing.T) {
 	got := parseSigningRunCertificateFingerprints([]byte("SHA-256 hash: 0123456789\nSHA-1 hash: " + fingerprint + "\n"))
 	if !reflect.DeepEqual(got, []string{fingerprint}) {
 		t.Fatalf("fingerprints = %#v", got)
+	}
+}
+
+func TestUtilityFailureIncludesBoundedSanitizedDiagnostic(t *testing.T) {
+	wantErr := errors.New("exit status 1")
+	diagnostic := "security: keychain is locked\nsecond line should be rendered safely"
+	err := utilityFailure("import identity", []byte(diagnostic), wantErr)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("error = %v, want wrapped process error", err)
+	}
+	if got := err.Error(); !strings.Contains(got, "keychain is locked") || !strings.Contains(got, "second line") || strings.ContainsAny(got, "\r\n") {
+		t.Fatalf("error = %q, want bounded terminal-safe diagnostic", got)
+	}
+
+	longDiagnostic := strings.Repeat("x", 1024)
+	err = utilityFailure("import identity", []byte(longDiagnostic), wantErr)
+	if got := err.Error(); len(got) > signingUtilityDiagnosticLimit+128 {
+		t.Fatalf("error length = %d, want bounded diagnostic", len(got))
+	}
+}
+
+func TestRunSigningRunChildDoesNotInheritSigningSecrets(t *testing.T) {
+	t.Setenv("ASC_PRIVATE_KEY", "secret")
+	t.Setenv("ASC_PRIVATE_KEY_B64", "secret")
+	t.Setenv("ASC_ISSUER_ID", "issuer")
+	err := runSigningRunChild(context.Background(), []string{
+		"/bin/sh", "-c", "test -z \"$ASC_PRIVATE_KEY\" && test -z \"$ASC_PRIVATE_KEY_B64\" && test -z \"$ASC_ISSUER_ID\"",
+	})
+	if err != nil {
+		t.Fatalf("runSigningRunChild() error = %v, want secrets filtered from child environment", err)
+	}
+}
+
+func TestInstallSigningRunProfileRejectsCanceledContextBeforeDiscovery(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	discovered := false
+	previous := signingRunProfileInstallDirFn
+	signingRunProfileInstallDirFn = func(context.Context) (string, error) {
+		discovered = true
+		return t.TempDir(), nil
+	}
+	t.Cleanup(func() { signingRunProfileInstallDirFn = previous })
+
+	_, err := installSigningRunProfile(ctx, "A7EFEF21-3432-404F-A488-083800B570FF", []byte("profile"), strings.Repeat("A", sha256.Size*2), func(signingRunProfileInstall) error {
+		t.Fatal("canceled installation must not journal a profile")
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context canceled", err)
+	}
+	if discovered {
+		t.Fatal("profile directory discovery ran after cancellation")
+	}
+}
+
+func TestSigningRunProfileInstallDirDistinguishesUnavailableXcode(t *testing.T) {
+	previous := signingRunActiveXcodeMajorVersion
+	t.Cleanup(func() { signingRunActiveXcodeMajorVersion = previous })
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	signingRunActiveXcodeMajorVersion = func(context.Context) (int, error) {
+		return 0, &exec.Error{Name: "xcodebuild", Err: exec.ErrNotFound}
+	}
+	legacy, err := signingRunProfileInstallDir(context.Background())
+	if err != nil {
+		t.Fatalf("unavailable xcodebuild error = %v, want legacy fallback", err)
+	}
+	if want := filepath.Join(home, "Library", "MobileDevice", "Provisioning Profiles"); legacy != want {
+		t.Fatalf("legacy directory = %q, want %q", legacy, want)
+	}
+
+	failure := errors.New("xcodebuild exited unsuccessfully")
+	signingRunActiveXcodeMajorVersion = func(context.Context) (int, error) { return 0, failure }
+	if _, err := signingRunProfileInstallDir(context.Background()); !errors.Is(err, failure) {
+		t.Fatalf("xcodebuild failure = %v, want wrapped failure", err)
+	}
+}
+
+func TestSigningRunProfileInstallDirRejectsNilContext(t *testing.T) {
+	if _, err := signingRunProfileInstallDir(nil); !strings.Contains(err.Error(), "context is required") {
+		t.Fatalf("error = %v, want required context", err)
 	}
 }
 
@@ -310,7 +395,7 @@ func TestInstallSigningRunProfileReusesAndProtectsExistingFiles(t *testing.T) {
 	digestBytes := sha256.Sum256(data)
 	digest := strings.ToUpper(hex.EncodeToString(digestBytes[:]))
 	journaled := signingRunProfileInstall{}
-	installed, err := installSigningRunProfile(uuid, data, digest, func(planned signingRunProfileInstall) error {
+	installed, err := installSigningRunProfile(context.Background(), uuid, data, digest, func(planned signingRunProfileInstall) error {
 		journaled = planned
 		return nil
 	})
@@ -320,14 +405,14 @@ func TestInstallSigningRunProfileReusesAndProtectsExistingFiles(t *testing.T) {
 	if !installed.Created || journaled.StagedPath == "" || journaled.Device == 0 || journaled.Inode == 0 {
 		t.Fatalf("missing staged ownership proof: installed=%+v journaled=%+v", installed, journaled)
 	}
-	reused, err := installSigningRunProfile(uuid, data, digest, func(signingRunProfileInstall) error {
+	reused, err := installSigningRunProfile(context.Background(), uuid, data, digest, func(signingRunProfileInstall) error {
 		t.Fatal("reused profile must not create a new journal entry")
 		return nil
 	})
 	if err != nil || reused.Created {
 		t.Fatalf("reuse = %+v, %v", reused, err)
 	}
-	if _, err := installSigningRunProfile(uuid, []byte("different"), strings.Repeat("A", 64), func(signingRunProfileInstall) error { return nil }); err == nil {
+	if _, err := installSigningRunProfile(context.Background(), uuid, []byte("different"), strings.Repeat("A", 64), func(signingRunProfileInstall) error { return nil }); err == nil {
 		t.Fatal("expected different existing profile conflict")
 	}
 	if err := removeSigningRunProfile(installed); err != nil {
@@ -353,7 +438,7 @@ func TestInstallSigningRunProfileRejectsOversizedExistingFile(t *testing.T) {
 	if err := file.Close(); err != nil {
 		t.Fatalf("close oversized profile: %v", err)
 	}
-	_, err = installSigningRunProfile(uuid, []byte("profile"), strings.Repeat("A", sha256.Size*2), func(signingRunProfileInstall) error {
+	_, err = installSigningRunProfile(context.Background(), uuid, []byte("profile"), strings.Repeat("A", sha256.Size*2), func(signingRunProfileInstall) error {
 		t.Fatal("oversized existing profile must not create a journal entry")
 		return nil
 	})
@@ -371,7 +456,7 @@ func TestRemoveSigningRunProfileRefusesReplacement(t *testing.T) {
 	data := []byte("signed-profile")
 	digestBytes := sha256.Sum256(data)
 	digest := strings.ToUpper(hex.EncodeToString(digestBytes[:]))
-	installed, err := installSigningRunProfile(uuid, data, digest, func(signingRunProfileInstall) error { return nil })
+	installed, err := installSigningRunProfile(context.Background(), uuid, data, digest, func(signingRunProfileInstall) error { return nil })
 	if err != nil {
 		t.Fatalf("installSigningRunProfile: %v", err)
 	}
@@ -396,7 +481,7 @@ func TestRemoveSigningRunProfilePreservesReplacementDuringCleanup(t *testing.T) 
 	replacement := []byte("replacement")
 	digestBytes := sha256.Sum256(data)
 	digest := strings.ToUpper(hex.EncodeToString(digestBytes[:]))
-	installed, err := installSigningRunProfile(uuid, data, digest, func(signingRunProfileInstall) error { return nil })
+	installed, err := installSigningRunProfile(context.Background(), uuid, data, digest, func(signingRunProfileInstall) error { return nil })
 	if err != nil {
 		t.Fatalf("installSigningRunProfile: %v", err)
 	}
@@ -428,7 +513,7 @@ func TestRemoveSigningRunProfileRecoversQuarantinedProfile(t *testing.T) {
 	data := []byte("signed-profile")
 	digestBytes := sha256.Sum256(data)
 	digest := strings.ToUpper(hex.EncodeToString(digestBytes[:]))
-	installed, err := installSigningRunProfile(uuid, data, digest, func(signingRunProfileInstall) error { return nil })
+	installed, err := installSigningRunProfile(context.Background(), uuid, data, digest, func(signingRunProfileInstall) error { return nil })
 	if err != nil {
 		t.Fatalf("installSigningRunProfile: %v", err)
 	}

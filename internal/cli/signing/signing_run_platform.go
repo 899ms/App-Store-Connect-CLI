@@ -23,6 +23,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 
@@ -32,9 +33,10 @@ import (
 )
 
 const (
-	signingRunDiagnosticLimit  = 64 << 10
-	signingRunChildWaitDelay   = 5 * time.Second
-	signingRunLockPollInterval = 50 * time.Millisecond
+	signingRunDiagnosticLimit     = 64 << 10
+	signingUtilityDiagnosticLimit = 4 << 10
+	signingRunChildWaitDelay      = 5 * time.Second
+	signingRunLockPollInterval    = 50 * time.Millisecond
 )
 
 var (
@@ -111,42 +113,65 @@ func removeSigningRunTempDir(path string) error {
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return fmt.Errorf("refusing to remove unsafe signing directory %q", path)
 	}
-	rooted, err := os.OpenRoot(cleanPath)
+	directoryRoot, err := rootfs.New(cleanPath)
 	if err != nil {
 		return err
 	}
+	defer directoryRoot.Close()
+	rooted, err := directoryRoot.OpenRoot()
+	if err != nil {
+		return err
+	}
+	defer rooted.Close()
+	openedInfo, err := rooted.Stat(".")
+	if err != nil {
+		return err
+	}
+	openedStat, openedOK := openedInfo.Sys().(*syscall.Stat_t)
+	initialStat, initialOK := info.Sys().(*syscall.Stat_t)
+	if !openedOK || !initialOK || openedStat.Dev != initialStat.Dev || openedStat.Ino != initialStat.Ino {
+		return fmt.Errorf("refusing to remove signing directory because its identity changed")
+	}
+	parentRoot, err := rootfs.New(filepath.Dir(cleanPath))
+	if err != nil {
+		return err
+	}
+	defer parentRoot.Close()
+	parented, err := parentRoot.OpenRoot()
+	if err != nil {
+		return err
+	}
+	defer parented.Close()
 	directory, err := rooted.Open(".")
 	if err != nil {
-		_ = rooted.Close()
 		return err
 	}
 	entries, err := directory.ReadDir(-1)
-	_ = directory.Close()
+	closeErr := directory.Close()
 	if err != nil {
-		_ = rooted.Close()
 		return err
+	}
+	if closeErr != nil {
+		return closeErr
 	}
 	for _, entry := range entries {
 		info, err := entry.Info()
 		if err != nil {
-			_ = rooted.Close()
 			return err
 		}
 		if !info.Mode().IsRegular() {
-			_ = rooted.Close()
 			return fmt.Errorf("refusing to remove unexpected non-regular entry %q", entry.Name())
 		}
 	}
 	for _, entry := range entries {
 		if err := rooted.Remove(entry.Name()); err != nil && !errors.Is(err, os.ErrNotExist) {
-			_ = rooted.Close()
 			return err
 		}
 	}
 	if err := rooted.Close(); err != nil {
 		return err
 	}
-	return os.Remove(cleanPath)
+	return parented.Remove(filepath.Base(cleanPath))
 }
 
 func signingRunStateDir() (string, error) {
@@ -158,6 +183,7 @@ func signingRunStateDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	defer cacheRoot.Close()
 	const relative = "asc/signing-run/v1"
 	if err := cacheRoot.MkdirAll(relative, 0o700); err != nil {
 		return "", err
@@ -209,7 +235,12 @@ func removeSigningRunJournal() error {
 	if err != nil {
 		return err
 	}
-	rooted, err := os.OpenRoot(filepath.Dir(path))
+	parentRoot, err := rootfs.New(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer parentRoot.Close()
+	rooted, err := parentRoot.OpenRoot()
 	if err != nil {
 		return err
 	}
@@ -222,6 +253,9 @@ func removeSigningRunJournal() error {
 }
 
 func recoverSigningRunJournal(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("recover signing environment: context is required")
+	}
 	path, err := signingRunJournalPath()
 	if err != nil {
 		return err
@@ -230,6 +264,7 @@ func recoverSigningRunJournal(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	defer stateRoot.Close()
 	file, err := stateRoot.OpenFile(filepath.Base(path))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -344,6 +379,9 @@ func validateSigningRunJournal(journal signingRunJournal) error {
 }
 
 func acquireSigningRunLock(ctx context.Context) (func() error, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("acquire signing environment lock: context is required")
+	}
 	dir, err := signingRunStateDirFn()
 	if err != nil {
 		return nil, err
@@ -421,7 +459,7 @@ func importSigningRunIdentity(ctx context.Context, keychainPath string, keychain
 	if err := withSigningRunPartitionPasswordInput(keychainPassword, func(stdin []byte) error {
 		_, stderr, err := runSigningUtility(ctx, stdin, "set-key-partition-list", "-S", "apple-tool:,apple:", "-s", "-t", "private", keychainPath)
 		if err != nil {
-			return utilityFailure("restrict key partition list", stderr, err)
+			return utilityFailure("restrict key partition list", stderr, err, keychainPassword)
 		}
 		return nil
 	}); err != nil {
@@ -460,24 +498,26 @@ func verifySigningRunIdentityUsable(ctx context.Context, tempDir, keychainPath, 
 	if err != nil {
 		return err
 	}
+	defer tempRoot.Close()
 	const probeName = "codesign-probe"
 	if _, err := tempRoot.WriteFrom(probeName, io.LimitReader(source, signingRunInputLimit), 0o700); err != nil {
 		return fmt.Errorf("create codesign probe: %w", err)
 	}
 	probePath := filepath.Join(tempDir, probeName)
 	defer func() {
-		if rooted, openErr := os.OpenRoot(tempDir); openErr == nil {
+		if rooted, openErr := tempRoot.OpenRoot(); openErr == nil {
 			_ = rooted.Remove(probeName)
 			_ = rooted.Close()
 		}
 	}()
-	cmd := exec.CommandContext(ctx, "/usr/bin/codesign", "--force", "--sign", expectedSHA1, "--keychain", keychainPath, probePath)
+	cmd := signingRunCommandContext(ctx, "/usr/bin/codesign", "--force", "--sign", expectedSHA1, "--keychain", keychainPath, probePath)
+	cmd.Env = SanitizedChildEnvironment(os.Environ())
 	stdout := &limitedSigningBuffer{limit: signingRunDiagnosticLimit}
 	stderr := &limitedSigningBuffer{limit: signingRunDiagnosticLimit}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("verify imported signing identity: %w", err)
+		return utilityFailure("verify imported signing identity", stderr.Bytes(), err)
 	}
 	return nil
 }
@@ -536,13 +576,26 @@ func deleteSigningRunKeychain(ctx context.Context, keychainPath string) error {
 	return nil
 }
 
-func installSigningRunProfile(uuid string, data []byte, digest string, beforeCreate func(signingRunProfileInstall) error) (signingRunProfileInstall, error) {
-	installDir, err := signingRunProfileInstallDirFn(context.Background())
+func installSigningRunProfile(ctx context.Context, uuid string, data []byte, digest string, beforeCreate func(signingRunProfileInstall) error) (signingRunProfileInstall, error) {
+	if ctx == nil {
+		return signingRunProfileInstall{}, fmt.Errorf("install provisioning profile: context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return signingRunProfileInstall{}, err
+	}
+	installDir, err := signingRunProfileInstallDirFn(ctx)
 	if err != nil {
+		return signingRunProfileInstall{}, err
+	}
+	if err := ctx.Err(); err != nil {
 		return signingRunProfileInstall{}, err
 	}
 	installRoot, err := rootfs.New(installDir)
 	if err != nil {
+		return signingRunProfileInstall{}, err
+	}
+	defer installRoot.Close()
+	if err := ctx.Err(); err != nil {
 		return signingRunProfileInstall{}, err
 	}
 	if err := installRoot.MkdirAll(".", 0o755); err != nil {
@@ -552,6 +605,10 @@ func installSigningRunProfile(uuid string, data []byte, digest string, beforeCre
 	path := filepath.Join(installDir, name)
 	existingFile, err := installRoot.OpenFile(name)
 	if err == nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			_ = existingFile.Close()
+			return signingRunProfileInstall{}, ctxErr
+		}
 		info, statErr := existingFile.Stat()
 		if statErr != nil {
 			_ = existingFile.Close()
@@ -578,11 +635,14 @@ func installSigningRunProfile(uuid string, data []byte, digest string, beforeCre
 	if !errors.Is(err, os.ErrNotExist) {
 		return signingRunProfileInstall{}, err
 	}
-	rooted, err := os.OpenRoot(installDir)
+	rooted, err := installRoot.OpenRoot()
 	if err != nil {
 		return signingRunProfileInstall{}, err
 	}
 	defer rooted.Close()
+	if err := ctx.Err(); err != nil {
+		return signingRunProfileInstall{}, err
+	}
 	file, stagedName, err := secureopen.CreateTempNoFollowInRoot(rooted, ".", ".asc-signing-run-profile-*", 0o600)
 	if err != nil {
 		return signingRunProfileInstall{}, err
@@ -612,6 +672,10 @@ func installSigningRunProfile(uuid string, data []byte, digest string, beforeCre
 		_ = file.Close()
 		return signingRunProfileInstall{}, fmt.Errorf("journal profile installation: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		_ = file.Close()
+		return signingRunProfileInstall{}, err
+	}
 	if _, err := file.Write(data); err != nil {
 		_ = file.Close()
 		return signingRunProfileInstall{}, err
@@ -621,6 +685,9 @@ func installSigningRunProfile(uuid string, data []byte, digest string, beforeCre
 		return signingRunProfileInstall{}, err
 	}
 	if err := file.Close(); err != nil {
+		return signingRunProfileInstall{}, err
+	}
+	if err := ctx.Err(); err != nil {
 		return signingRunProfileInstall{}, err
 	}
 	if err := secureopen.RenameNoReplaceInRoot(rooted, stagedName, name); err != nil {
@@ -639,7 +706,12 @@ func removeSigningRunProfileWithHook(install signingRunProfileInstall, afterVeri
 	if !install.Created {
 		return nil
 	}
-	rooted, err := os.OpenRoot(filepath.Dir(install.Path))
+	parentRoot, err := rootfs.New(filepath.Dir(install.Path))
+	if err != nil {
+		return err
+	}
+	defer parentRoot.Close()
+	rooted, err := parentRoot.OpenRoot()
 	if err != nil {
 		return err
 	}
@@ -717,6 +789,7 @@ func removeSigningRunStagedProfile(path string, device, inode uint64) error {
 	if err != nil {
 		return err
 	}
+	defer installRoot.Close()
 	file, err := installRoot.OpenFile(filepath.Base(path))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -733,7 +806,7 @@ func removeSigningRunStagedProfile(path string, device, inode uint64) error {
 	if !ok || uint64(stat.Dev) != device || stat.Ino != inode {
 		return fmt.Errorf("refusing to remove staged profile because its file identity changed")
 	}
-	rooted, err := os.OpenRoot(filepath.Dir(path))
+	rooted, err := installRoot.OpenRoot()
 	if err != nil {
 		return err
 	}
@@ -744,6 +817,9 @@ func removeSigningRunStagedProfile(path string, device, inode uint64) error {
 var signingRunXcodeVersionPattern = regexp.MustCompile(`(?m)^Xcode[\t ]+([0-9]+)(?:[.][0-9]+)*(?:[\t ].*)?$`)
 
 func activeSigningRunXcodeMajorVersion(ctx context.Context) (int, error) {
+	if ctx == nil {
+		return 0, fmt.Errorf("inspect active Xcode version: context is required")
+	}
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -771,22 +847,40 @@ func activeSigningRunXcodeMajorVersion(ctx context.Context) (int, error) {
 }
 
 func signingRunProfileInstallDir(ctx context.Context) (string, error) {
+	if ctx == nil {
+		return "", fmt.Errorf("discover provisioning profile directory: context is required")
+	}
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
 	major, err := signingRunActiveXcodeMajorVersion(ctx)
-	if err == nil && major >= 16 {
-		return filepath.Join(homeDir, "Library", "Developer", "Xcode", "UserData", "Provisioning Profiles"), nil
+	if err == nil {
+		if major >= 16 {
+			return filepath.Join(homeDir, "Library", "Developer", "Xcode", "UserData", "Provisioning Profiles"), nil
+		}
+		return filepath.Join(homeDir, "Library", "MobileDevice", "Provisioning Profiles"), nil
 	}
+	if !errors.Is(err, exec.ErrNotFound) {
+		return "", fmt.Errorf("inspect active Xcode version: %w", err)
+	}
+	// xcodebuild is absent on machines without the Xcode command-line tools;
+	// the legacy profile directory remains the only useful destination.
 	return filepath.Join(homeDir, "Library", "MobileDevice", "Provisioning Profiles"), nil
 }
 
 func runSigningRunChild(ctx context.Context, argv []string) error {
+	if ctx == nil {
+		return fmt.Errorf("run signing child: context is required")
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if len(argv) == 0 || strings.TrimSpace(argv[0]) == "" {
+		return fmt.Errorf("run signing child: command is required")
+	}
 	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Env = SanitizedChildEnvironment(os.Environ())
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -827,7 +921,11 @@ func runSigningRunChild(ctx context.Context, argv []string) error {
 }
 
 func runSigningUtility(ctx context.Context, stdin []byte, args ...string) ([]byte, []byte, error) {
+	if ctx == nil {
+		return nil, nil, fmt.Errorf("run signing utility: context is required")
+	}
 	cmd := exec.CommandContext(ctx, "/usr/bin/security", args...)
+	cmd.Env = SanitizedChildEnvironment(os.Environ())
 	cmd.Stdin = bytes.NewReader(stdin)
 	stdout := &limitedSigningBuffer{limit: signingRunDiagnosticLimit}
 	stderr := &limitedSigningBuffer{limit: signingRunDiagnosticLimit}
@@ -852,9 +950,41 @@ func (b *limitedSigningBuffer) Write(data []byte) (int, error) {
 
 func (b *limitedSigningBuffer) Bytes() []byte { return append([]byte(nil), b.data...) }
 
-func utilityFailure(operation string, stderr []byte, err error) error {
-	_ = stderr // Captured and bounded, but intentionally excluded from diagnostics.
-	return fmt.Errorf("%s: %w", operation, err)
+func utilityFailure(operation string, stderr []byte, err error, sensitive ...[]byte) error {
+	diagnostic := signingUtilityDiagnostic(stderr, sensitive...)
+	if diagnostic == "" {
+		return fmt.Errorf("%s: %w", operation, err)
+	}
+	return fmt.Errorf("%s: %s: %w", operation, diagnostic, err)
+}
+
+func signingUtilityDiagnostic(stderr []byte, sensitive ...[]byte) string {
+	diagnostic := string(stderr)
+	for _, secret := range sensitive {
+		if len(secret) == 0 {
+			continue
+		}
+		for _, representation := range []string{
+			string(secret),
+			hex.EncodeToString(secret),
+			strings.ToUpper(hex.EncodeToString(secret)),
+		} {
+			if representation == "" {
+				continue
+			}
+			diagnostic = strings.ReplaceAll(diagnostic, representation, "[REDACTED]")
+			diagnostic = strings.ReplaceAll(diagnostic, shared.SanitizeTerminal(representation), "[REDACTED]")
+		}
+	}
+	diagnostic = strings.TrimSpace(shared.SanitizeTerminal(diagnostic))
+	if len(diagnostic) <= signingUtilityDiagnosticLimit {
+		return diagnostic
+	}
+	diagnostic = diagnostic[:signingUtilityDiagnosticLimit]
+	for !utf8.ValidString(diagnostic) {
+		diagnostic = diagnostic[:len(diagnostic)-1]
+	}
+	return diagnostic + " [truncated]"
 }
 
 func systemSigningRunRoots() (*x509.CertPool, error) { return x509.SystemCertPool() }

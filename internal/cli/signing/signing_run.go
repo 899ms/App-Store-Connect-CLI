@@ -124,7 +124,7 @@ type signingRunDeps struct {
 	SetKeychainSearchList     func(context.Context, []string) error
 	RemoveKeychainSearchEntry func(context.Context, string) error
 	DeleteKeychain            func(context.Context, string) error
-	InstallProfile            func(string, []byte, string, func(signingRunProfileInstall) error) (signingRunProfileInstall, error)
+	InstallProfile            func(context.Context, string, []byte, string, func(signingRunProfileInstall) error) (signingRunProfileInstall, error)
 	RemoveProfile             func(signingRunProfileInstall) error
 	RunChild                  func(context.Context, []string) error
 }
@@ -174,6 +174,7 @@ var (
 	executeSigningRunFn       = executeSigningRun
 	executeSigningOperationFn = executeSigningOperation
 	signingRunSystemRootsFn   = systemSigningRunRoots
+	signingRunProfileTrustFn  = verifySigningRunProfileTrust
 	signingRunEnvironmentFn   = runSigningEnvironment
 	signingRunNowFn           = time.Now
 )
@@ -194,9 +195,9 @@ var sanitizedSigningChildEnvironmentNames = map[string]struct{}{
 }
 
 // SanitizedChildEnvironment returns the strict environment allowlist for
-// Xcode build and export subprocesses started by an EphemeralRun callback.
-// Authentication, cloud-provider, Git-helper, signing-password, loader, and
-// unrecognized variables are intentionally excluded.
+// subprocesses started inside an ephemeral signing environment. Authentication,
+// cloud-provider, Git-helper, signing-password, loader, and unrecognized
+// variables are intentionally excluded.
 func SanitizedChildEnvironment(base []string) []string {
 	filtered := make([]string, 0, len(sanitizedSigningChildEnvironmentNames))
 	indexes := make(map[string]int, len(sanitizedSigningChildEnvironmentNames))
@@ -417,12 +418,18 @@ func executeSigningRun(ctx context.Context, options signingRunOptions) error {
 }
 
 func executeSigningOperation(ctx context.Context, options signingRunOptions, operation func(context.Context) error) error {
+	if ctx == nil {
+		return shared.NewValidationError(fmt.Errorf("signing run: context is required"))
+	}
 	if operation == nil {
 		return shared.NewValidationError(fmt.Errorf("signing run: callback is required"))
 	}
 	deps := platformSigningRunDeps()
 	if deps.GOOS != "darwin" {
 		return shared.NewValidationError(fmt.Errorf("signing run is supported only on macOS"))
+	}
+	if !signingRunSecurityAvailable() {
+		return shared.NewValidationError(fmt.Errorf("signing run requires a cgo-enabled macOS build"))
 	}
 	return withSigningRunInputData(options, readBoundedSigningRunFile, func(identityData, identityPassword, profileData []byte) error {
 		roots, err := signingRunSystemRootsFn()
@@ -601,6 +608,9 @@ func runSigningEnvironment(
 	inspection *signingRunInspection,
 	operation func(context.Context) error,
 ) (receipt signingRunReceipt, resultErr error) {
+	if ctx == nil {
+		return signingRunReceipt{}, fmt.Errorf("signing run context is required")
+	}
 	if operation == nil && deps.RunChild != nil {
 		operation = func(runCtx context.Context) error {
 			return deps.RunChild(runCtx, options.Child)
@@ -657,22 +667,28 @@ func runSigningEnvironment(
 	if err != nil {
 		return receipt, fmt.Errorf("create private signing directory: %w", err)
 	}
+	cleanupSetupFailure := func(primary error) error {
+		if deps.RemoveTempDir == nil {
+			return errors.Join(primary, fmt.Errorf("remove private signing directory: cleanup function is unavailable"))
+		}
+		if cleanupErr := deps.RemoveTempDir(tempDir); cleanupErr != nil {
+			return errors.Join(primary, fmt.Errorf("remove private signing directory: %w", cleanupErr))
+		}
+		return primary
+	}
 	keychainPath := filepath.Join(tempDir, "signing.keychain-db")
 	_, err = deps.KeychainSearchList(ctx)
 	if err != nil {
-		_ = deps.RemoveTempDir(tempDir)
-		return receipt, fmt.Errorf("read user keychain search list: %w", err)
+		return receipt, cleanupSetupFailure(fmt.Errorf("read user keychain search list: %w", err))
 	}
 	keychainPassword, err := deps.RandomBytes(32)
 	if err != nil {
-		_ = deps.RemoveTempDir(tempDir)
-		return receipt, fmt.Errorf("generate keychain password: %w", err)
+		return receipt, cleanupSetupFailure(fmt.Errorf("generate keychain password: %w", err))
 	}
 	defer clear(keychainPassword)
 	importPassword, err := deps.RandomBytes(32)
 	if err != nil {
-		_ = deps.RemoveTempDir(tempDir)
-		return receipt, fmt.Errorf("generate identity import password: %w", err)
+		return receipt, cleanupSetupFailure(fmt.Errorf("generate identity import password: %w", err))
 	}
 	importPasswordText := []byte(hex.EncodeToString(importPassword))
 	clear(importPassword)
@@ -685,15 +701,13 @@ func runSigningEnvironment(
 	)
 	if err != nil {
 		clear(importPasswordText)
-		_ = deps.RemoveTempDir(tempDir)
-		return receipt, fmt.Errorf("normalize identity for temporary import: %w", err)
+		return receipt, cleanupSetupFailure(fmt.Errorf("normalize identity for temporary import: %w", err))
 	}
 	defer clear(importPasswordText)
 	defer clear(normalizedIdentity)
 	journal := signingRunJournal{SchemaVersion: 1, TempDir: tempDir, KeychainPath: keychainPath}
 	if err := deps.WriteJournal(journal, false); err != nil {
-		_ = deps.RemoveTempDir(tempDir)
-		return receipt, fmt.Errorf("write signing environment recovery journal: %w", err)
+		return receipt, cleanupSetupFailure(fmt.Errorf("write signing environment recovery journal: %w", err))
 	}
 
 	keychainAttempted := false
@@ -766,7 +780,7 @@ func runSigningEnvironment(
 	if err := deps.ImportIdentity(ctx, keychainPath, keychainPassword, normalizedIdentity, importPasswordText, inspection.CertificateSHA1); err != nil {
 		return finish(fmt.Errorf("import identity into temporary keychain: %w", err))
 	}
-	profileInstall, err = deps.InstallProfile(inspection.ProfileUUID, profileData, inspection.ProfileSHA256, func(planned signingRunProfileInstall) error {
+	profileInstall, err = deps.InstallProfile(ctx, inspection.ProfileUUID, profileData, inspection.ProfileSHA256, func(planned signingRunProfileInstall) error {
 		journal.ProfilePath = planned.Path
 		journal.StagedProfilePath = planned.StagedPath
 		journal.ProfileDigest = planned.Digest
@@ -797,6 +811,9 @@ func runSigningEnvironment(
 	if err := deps.SetKeychainSearchList(ctx, expectedSearchList); err != nil {
 		return finish(fmt.Errorf("activate temporary keychain: %w", err))
 	}
+	if err := ctx.Err(); err != nil {
+		return finish(err)
+	}
 	childErr := operation(ctx)
 	if childErr != nil {
 		receipt.ChildExitCode = childExitCode(childErr)
@@ -820,7 +837,7 @@ func inspectSigningRunInputs(identityData, identityPassword, profileData []byte,
 	if roots == nil {
 		return nil, fmt.Errorf("load trusted roots for provisioning profile verification")
 	}
-	if err := p7.VerifyWithChainAtTime(roots, now); err != nil {
+	if err := signingRunProfileTrustFn(p7, roots, now); err != nil {
 		return nil, fmt.Errorf("verify profile signature: %w", err)
 	}
 	if len(p7.Content) == 0 {
@@ -913,6 +930,14 @@ func inspectSigningRunInputs(identityData, identityPassword, profileData []byte,
 	}, nil
 }
 
+// verifySigningRunProfileTrust reuses the same Apple signer and pinned-root
+// checks used by the resign workflow. The caller-provided system pool is kept
+// only for the test seam; production verification is pinned and does not
+// delegate trust to the mutable system pool.
+func verifySigningRunProfileTrust(profile *pkcs7.PKCS7, _ *x509.CertPool, now time.Time) error {
+	return verifySigningResignProfileTrust(profile, now)
+}
+
 func inspectSigningRunIdentity(identityData, identityPassword []byte, now time.Time) (*signingRunIdentity, error) {
 	privateKeys, certificates, err := pkcs12.DecodeAll(identityData, string(identityPassword))
 	if err != nil {
@@ -989,11 +1014,16 @@ func signingRunCertificateTeamID(certificate *x509.Certificate) (string, error) 
 
 func signingRunTeamID(values []string) (string, error) {
 	var teamID string
+	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
 		value = strings.TrimSpace(value)
 		if value == "" {
 			return "", fmt.Errorf("provisioning profile contains an empty team identifier")
 		}
+		if _, exists := seen[value]; exists {
+			return "", fmt.Errorf("provisioning profile contains duplicate team identifiers")
+		}
+		seen[value] = struct{}{}
 		if teamID == "" {
 			teamID = value
 			continue
@@ -1004,6 +1034,9 @@ func signingRunTeamID(values []string) (string, error) {
 	}
 	if teamID == "" {
 		return "", fmt.Errorf("provisioning profile team identifier is missing")
+	}
+	if err := validateSigningResignTeamID(teamID); err != nil {
+		return "", fmt.Errorf("provisioning profile: %w", err)
 	}
 	return teamID, nil
 }
@@ -1017,9 +1050,9 @@ func signingRunBundleID(profile signingRunMobileProvision, teamID string) (strin
 		return "", fmt.Errorf("provisioning profile application identifier is missing")
 	}
 	applicationID := strings.TrimSpace(value)
-	prefixes := append([]string(nil), profile.ApplicationIdentifierPrefix...)
-	if len(prefixes) == 0 {
-		prefixes = []string{teamID}
+	prefixes, err := signingRunApplicationIdentifierPrefixes(profile.ApplicationIdentifierPrefix, teamID)
+	if err != nil {
+		return "", err
 	}
 	slices.SortFunc(prefixes, func(left, right string) int { return len(right) - len(left) })
 	var bundleID string
@@ -1034,6 +1067,32 @@ func signingRunBundleID(profile signingRunMobileProvision, teamID string) (strin
 		return "", fmt.Errorf("provisioning profile bundle identifier pattern %q is invalid", bundleID)
 	}
 	return bundleID, nil
+}
+
+func signingRunApplicationIdentifierPrefixes(values []string, teamID string) ([]string, error) {
+	if len(values) == 0 {
+		if err := validateSigningResignTeamID(teamID); err != nil {
+			return nil, fmt.Errorf("provisioning profile: %w", err)
+		}
+		return []string{teamID}, nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	prefixes := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return nil, fmt.Errorf("provisioning profile contains an empty application identifier prefix")
+		}
+		if err := validateSigningResignTeamID(value); err != nil {
+			return nil, fmt.Errorf("provisioning profile application identifier prefix: %w", err)
+		}
+		if _, exists := seen[value]; exists {
+			return nil, fmt.Errorf("provisioning profile contains duplicate application identifier prefixes")
+		}
+		seen[value] = struct{}{}
+		prefixes = append(prefixes, value)
+	}
+	return prefixes, nil
 }
 
 func validSigningRunBundlePattern(value string) bool {
