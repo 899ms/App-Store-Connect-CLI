@@ -275,13 +275,12 @@ func findReviewSubscription(subscriptions []webcore.ReviewSubscription, selector
 				Name:      strings.TrimSpace(match.Name),
 			})
 		}
-		return nil, fmt.Errorf("%q matches %d subscriptions by id:\n  %s\nUse the explicit ASC ID to disambiguate", selector, len(idMatches), strings.Join(func() []string {
-			lines := make([]string, 0, len(candidates))
-			for _, candidate := range candidates {
-				lines = append(lines, fmt.Sprintf("%s, productId=%s, name=%s", candidate.ID, candidate.ProductID, candidate.Name))
-			}
-			return lines
-		}(), "\n  "))
+		return nil, &shared.AmbiguousSelectionError{
+			Kind:        "subscription",
+			Description: fmt.Sprintf("%q by id", selector),
+			Flag:        "--subscription-id",
+			Candidates:  shared.ExactSelectorAmbiguousCandidates(candidates),
+		}
 	}
 
 	candidates := make([]shared.ExactSelectorCandidate, 0, len(subscriptions))
