@@ -93,6 +93,36 @@ Common session commands:
 * `asc web auth import` - load a session bundle into the cache
 * `asc web auth logout` - clear the cached web session
 
+### Choosing the Apple Account
+
+Every `asc web` command that needs a session accepts `--apple-id`. When the
+flag is omitted, the account is resolved in this order:
+
+1. `--apple-id` on the command line.
+2. The last cached session, as recorded by `asc web auth login` or
+   `asc web auth import`.
+3. The only cached session, when exactly one account is cached and the
+   last-session pointer no longer resolves (for example after logging out of
+   the most recently used account while another account stays cached). The
+   CLI prints `Using cached web session for user@example.com; pass --apple-id
+   to override` on stderr so the chosen account is visible.
+
+With no cached session the command exits with code `2` and points to
+`asc web auth login --apple-id EMAIL`. With several cached sessions and no
+resolvable last-session pointer, the command exits with code `2` and lists the
+cached Apple IDs so you can pick one with `--apple-id`.
+
+```bash
+# One cached account: no flag needed
+asc web privacy pull --app "123456789"
+
+# Several cached accounts: name the one to use
+asc web review show --app "123456789" --apple-id "user@example.com"
+```
+
+`--session-from-env` never consults the cache and is unaffected by this
+resolution.
+
 ## Command families
 
 ### `asc web auth`
