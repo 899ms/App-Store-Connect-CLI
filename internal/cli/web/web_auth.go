@@ -958,7 +958,10 @@ func resolveWebSession(ctx context.Context, appleID, password, twoFactorCode str
 
 	if resolvedAppleID == "" {
 		if opts.promptAppleID == nil {
-			return nil, "", shared.UsageError("--apple-id is required when no cached web session is available")
+			return nil, "", shared.NewErrorWithCause(
+				shared.UsageError("--apple-id is required when no cached web session is available"),
+				errNoCachedWebSession,
+			)
 		}
 		if err := opts.promptAppleID(&resolvedAppleID); err != nil {
 			return nil, "", err
