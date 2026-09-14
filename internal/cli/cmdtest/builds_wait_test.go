@@ -690,9 +690,10 @@ func TestBuildsWaitByBuildNumberRequiresUniqueMatch(t *testing.T) {
 	if stdout != "" {
 		t.Fatalf("expected empty stdout on ambiguity error, got %q", stdout)
 	}
-	if stderr != "" {
-		t.Fatalf("expected empty stderr, got %q", stderr)
+	if !isUsageClassError(runErr) {
+		t.Fatalf("expected ambiguity to be a usage error, got %v", runErr)
 	}
+	assertUsageDiagnosticFirstLine(t, stderr, `multiple builds found for app 123456789 with build number "42" for platform IOS; add --version, or use --build-id`)
 }
 
 func TestBuildsWaitByBuildNumberDiscoveryPollsUntilTimeout(t *testing.T) {
