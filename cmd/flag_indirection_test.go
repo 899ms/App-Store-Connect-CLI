@@ -30,6 +30,7 @@ func newIndirectionTestTree() *ffcli.Command {
 	updateFlags.String("whats-new", "", "")
 	updateFlags.String("secret", "", "")
 	updateFlags.String("output", "", "")
+	updateFlags.String("format", "", "")
 	updateFlags.Bool("confirm", false, "")
 	updateFlags.Int("limit", 0, "")
 	shared.BindOnceCSVFlag(updateFlags, "events", "")
@@ -51,6 +52,7 @@ func TestResolveFlagValueIndirectionRewritesArgs(t *testing.T) {
 	t.Setenv("ASC_TEST_NOTES", "Fixed crashes")
 	t.Setenv("ASC_TEST_SECRET", "hunter2")
 	t.Setenv("ASC_TEST_EVENTS", "A,B")
+	t.Setenv("ASC_TEST_FORMAT", "json")
 	notesPath := filepath.Join(t.TempDir(), "notes.txt")
 	if err := os.WriteFile(notesPath, []byte("From file\n"), 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
@@ -110,6 +112,11 @@ func TestResolveFlagValueIndirectionRewritesArgs(t *testing.T) {
 			name: "output excluded on subcommand",
 			args: []string{"localizations", "update", "--output", "@env:ASC_TEST_SECRET", "--secret", "@env:ASC_TEST_SECRET"},
 			want: []string{"localizations", "update", "--output", "@env:ASC_TEST_SECRET", "--secret", "hunter2"},
+		},
+		{
+			name: "command-local format flag resolves",
+			args: []string{"localizations", "update", "--format", "@env:ASC_TEST_FORMAT"},
+			want: []string{"localizations", "update", "--format", "json"},
 		},
 		{
 			name: "terminator stops rewriting",

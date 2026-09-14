@@ -12,6 +12,11 @@ import (
 // values. They select how asc itself runs (output rendering, credential
 // profile, CI report plumbing) and the parse-failure paths read them from the
 // raw argv, so resolving them would create two sources of truth.
+//
+// Command-local flags are not excluded even when they select a format:
+// `--format` on `signing fetch`, `signing resign`, and the asset commands is
+// read only from its own parsed FlagSet, so a resolved value has exactly one
+// reader and the enum validation runs on the resolved text.
 var indirectionExcludedFlags = map[string]struct{}{
 	"output":      {},
 	"profile":     {},

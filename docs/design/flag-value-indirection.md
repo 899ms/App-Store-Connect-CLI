@@ -27,8 +27,16 @@ matching the Codemagic `cli-tools` convention that agents already know.
   `flag.Value` types receive the resolved text and validate it normally.
 - Exclusion list (never resolved): `--output`, `--profile`, `--report`,
   `--report-file`. These select how `asc` itself runs and are read from raw
-  `argv` on parse-failure paths, so resolving them would create two sources of
-  truth. Boolean flags never take an indirect value.
+  `argv` on parse-failure paths (`recoverCIReportFlags`, the usage renderers),
+  so resolving them would create two sources of truth. `--output` is excluded
+  under both of its meanings, the format enum and the output path on
+  `signing resign`, `profiles`, and the asset commands. Boolean flags never
+  take an indirect value.
+- Command-local flags stay resolvable even when they select a format:
+  `--format` on `signing fetch`, `signing resign`, `assets previews`, and
+  `assets screenshots download` is read only from its own parsed `FlagSet`, so
+  the resolved value has one reader and the enum validation runs on it. The
+  exclusion line is the raw-`argv` reader, not the flag's purpose.
 - Positional arguments and everything after `--` are never resolved.
 - Rewriting stops at the first unknown flag token so the unknown-flag
   diagnostic stays authoritative for that invocation.
