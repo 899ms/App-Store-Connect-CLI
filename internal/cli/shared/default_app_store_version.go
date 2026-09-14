@@ -22,12 +22,16 @@ const (
 
 // DefaultEditableAppStoreVersionStates lists the appVersionState values whose
 // metadata can still be edited in App Store Connect. The order is stable so
-// requests and help text are deterministic.
+// requests and help text are deterministic. READY_FOR_REVIEW belongs here: it
+// is the state a finished draft sits in before submission, so omitting it would
+// make an app holding a ready draft alongside an older release resolve to the
+// release instead of the draft being worked on.
 var DefaultEditableAppStoreVersionStates = []string{
 	"DEVELOPER_REJECTED",
 	"INVALID_BINARY",
 	"METADATA_REJECTED",
 	"PREPARE_FOR_SUBMISSION",
+	"READY_FOR_REVIEW",
 	"REJECTED",
 	"WAITING_FOR_REVIEW",
 }

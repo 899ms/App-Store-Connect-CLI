@@ -44,7 +44,8 @@ asc metadata pull --app "APP_ID" --version "1.2.3" --dir "./metadata" --force
 
 When `--version` is omitted, the app's newest editable App Store version
 (`PREPARE_FOR_SUBMISSION`, `DEVELOPER_REJECTED`, `REJECTED`,
-`METADATA_REJECTED`, `WAITING_FOR_REVIEW`, or `INVALID_BINARY`) is used,
+`METADATA_REJECTED`, `READY_FOR_REVIEW`, `WAITING_FOR_REVIEW`, or
+`INVALID_BINARY`) is used,
 falling back to the live version. The selected version is reported on stderr
 and its version string names the `version/<version>/` directory. Pass
 `--platform` when the app has candidate versions on more than one platform.

@@ -15,9 +15,10 @@ List localization metadata for an app or version.
 <ParamField path="--version" type="string">
   App Store version ID. When omitted for version localizations, the `--app`'s
   newest editable App Store version (`PREPARE_FOR_SUBMISSION`,
-  `DEVELOPER_REJECTED`, `REJECTED`, `METADATA_REJECTED`, `WAITING_FOR_REVIEW`,
-  or `INVALID_BINARY`) is used, falling back to the live version. The selected
-  version is reported on stderr.
+  `DEVELOPER_REJECTED`, `REJECTED`, `METADATA_REJECTED`, `READY_FOR_REVIEW`,
+  `WAITING_FOR_REVIEW`, or `INVALID_BINARY`) is used, falling back to the live
+  version. The selected version is reported on stderr. Ignored for `--next`
+  continuations, which already carry their version.
 </ParamField>
 
 <ParamField path="--app" type="string">
@@ -33,7 +34,7 @@ List localization metadata for an app or version.
   Platform used to pick the default version when `--version` is omitted:
   `IOS`, `MAC_OS`, `TV_OS`, or `VISION_OS`. Required when the app has candidate
   versions on more than one platform. Only valid with `--type version` and
-  without `--version`.
+  without `--version` or `--next`.
 </ParamField>
 
 <ParamField path="--type" type="string" default="version">

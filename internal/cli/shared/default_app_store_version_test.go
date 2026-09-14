@@ -29,7 +29,7 @@ func defaultVersionTestClient(t *testing.T, pages map[string]string, log *[]stri
 	})
 }
 
-const defaultVersionEditableFilter = "DEVELOPER_REJECTED,INVALID_BINARY,METADATA_REJECTED,PREPARE_FOR_SUBMISSION,REJECTED,WAITING_FOR_REVIEW"
+const defaultVersionEditableFilter = "DEVELOPER_REJECTED,INVALID_BINARY,METADATA_REJECTED,PREPARE_FOR_SUBMISSION,READY_FOR_REVIEW,REJECTED,WAITING_FOR_REVIEW"
 
 func TestResolveDefaultAppStoreVersionPrefersNewestEditableVersion(t *testing.T) {
 	var log []string
@@ -75,6 +75,31 @@ func TestResolveDefaultAppStoreVersionFallsBackToLiveVersion(t *testing.T) {
 	}
 	if len(log) != 2 {
 		t.Fatalf("expected editable then live requests, got %v", log)
+	}
+}
+
+// READY_FOR_REVIEW is a draft whose metadata is still editable, so it must beat
+// an older live version rather than losing to it.
+func TestResolveDefaultAppStoreVersionTreatsReadyForReviewAsEditable(t *testing.T) {
+	var log []string
+	client := defaultVersionTestClient(t, map[string]string{
+		"|" + defaultVersionEditableFilter + "|": `{"data":[
+			{"type":"appStoreVersions","id":"ver-draft","attributes":{"versionString":"2.0.0","platform":"IOS","appVersionState":"READY_FOR_REVIEW","createdDate":"2026-02-01T00:00:00Z"}}
+		],"links":{"next":""}}`,
+		"READY_FOR_SALE||": `{"data":[
+			{"type":"appStoreVersions","id":"ver-live","attributes":{"versionString":"1.0.0","platform":"IOS","appStoreState":"READY_FOR_SALE","appVersionState":"READY_FOR_DISTRIBUTION","createdDate":"2025-01-01T00:00:00Z"}}
+		],"links":{"next":""}}`,
+	}, &log)
+
+	resolved, err := ResolveDefaultAppStoreVersion(context.Background(), client, "app-1", "")
+	if err != nil {
+		t.Fatalf("ResolveDefaultAppStoreVersion() error: %v", err)
+	}
+	if resolved.ID != "ver-draft" || resolved.State != "READY_FOR_REVIEW" || resolved.Source != DefaultAppStoreVersionSourceEditable {
+		t.Fatalf("unexpected resolution: %+v", resolved)
+	}
+	if len(log) != 1 {
+		t.Fatalf("expected only the editable request, got %v", log)
 	}
 }
 

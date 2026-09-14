@@ -16,7 +16,8 @@ asc validate --app "APP_ID" [flags]
 Pass at most one version selector: `--version` or `--version-id`. When both
 are omitted, `validate` uses the app's newest editable App Store version
 (`PREPARE_FOR_SUBMISSION`, `DEVELOPER_REJECTED`, `REJECTED`,
-`METADATA_REJECTED`, `WAITING_FOR_REVIEW`, or `INVALID_BINARY`) and falls back
+`METADATA_REJECTED`, `READY_FOR_REVIEW`, `WAITING_FOR_REVIEW`, or
+`INVALID_BINARY`) and falls back
 to the live version when no editable version exists. The selection is reported
 on stderr, for example
 `Using version 1.2.0 (PREPARE_FOR_SUBMISSION) for platform IOS; pass --version to override`.

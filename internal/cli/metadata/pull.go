@@ -53,9 +53,9 @@ Phase 1 supports localization metadata for app-info and app-store versions.
 
 When --version is omitted, the app's newest editable App Store version is used
 (PREPARE_FOR_SUBMISSION, DEVELOPER_REJECTED, REJECTED, METADATA_REJECTED,
-WAITING_FOR_REVIEW, or INVALID_BINARY), falling back to the live version. The
-selected version is reported on stderr. Pass --platform when the app has
-candidate versions on more than one platform.
+READY_FOR_REVIEW, WAITING_FOR_REVIEW, or INVALID_BINARY), falling back to the
+live version. The selected version is reported on stderr. Pass --platform when
+the app has candidate versions on more than one platform.
 
 Examples:
   asc metadata pull --app "APP_ID" --dir "./metadata"

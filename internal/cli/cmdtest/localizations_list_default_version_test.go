@@ -128,6 +128,12 @@ func TestLocalizationsListDefaultVersionUsageErrors(t *testing.T) {
 			wantExit:   rootcmd.ExitUsage,
 		},
 		{
+			name:       "platform with next continuation",
+			args:       []string{"localizations", "list", "--app", "app-1", "--platform", "IOS", "--next", "https://api.appstoreconnect.apple.com/v1/appStoreVersions/ver-1/appStoreVersionLocalizations?cursor=NEXT"},
+			wantStderr: "--platform cannot be combined with --next",
+			wantExit:   rootcmd.ExitUsage,
+		},
+		{
 			name:       "ambiguous platforms",
 			args:       []string{"localizations", "list", "--app", "app-1"},
 			wantStderr: "IOS 1.2.3 (PREPARE_FOR_SUBMISSION), TV_OS 1.2.3 (PREPARE_FOR_SUBMISSION)",
@@ -151,5 +157,45 @@ func TestLocalizationsListDefaultVersionUsageErrors(t *testing.T) {
 			}
 			_ = errors.Is(runErr, flag.ErrHelp)
 		})
+	}
+}
+
+// A --next continuation already encodes its version, and the client ignores the
+// version ID when a next URL is set, so the default lookup must be skipped: it
+// would waste a request, could announce a version the page does not belong to,
+// and could fail a valid continuation when the app's defaults are ambiguous.
+func TestLocalizationsListNextContinuationSkipsDefaultVersionLookup(t *testing.T) {
+	var log []string
+	setupAuth(t)
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+	t.Setenv("ASC_APP_ID", "")
+
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() {
+		http.DefaultTransport = originalTransport
+	})
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		log = append(log, req.URL.Path)
+		if req.URL.Path != "/v1/appStoreVersions/ver-page2/appStoreVersionLocalizations" {
+			t.Fatalf("unexpected path: %s", req.URL.Path)
+		}
+		return jsonResponse(http.StatusOK, `{"data":[{"type":"appStoreVersionLocalizations","id":"loc-2","attributes":{"locale":"ja"}}],"links":{"next":""}}`)
+	})
+
+	nextURL := "https://api.appstoreconnect.apple.com/v1/appStoreVersions/ver-page2/appStoreVersionLocalizations?cursor=NEXT"
+	stdout, stderr, runErr := runLocalizationsList(t, "localizations", "list", "--app", "app-1", "--next", nextURL)
+	if runErr != nil {
+		t.Fatalf("Run() error = %v", runErr)
+	}
+	for _, path := range log {
+		if strings.HasSuffix(path, "/appStoreVersions") {
+			t.Fatalf("continuation must not resolve a default version, requests: %v", log)
+		}
+	}
+	if stderr != "" {
+		t.Fatalf("expected no default-version note for --next, got %q", stderr)
+	}
+	if !strings.Contains(stdout, "loc-2") {
+		t.Fatalf("expected the continuation page, got %q", stdout)
 	}
 }

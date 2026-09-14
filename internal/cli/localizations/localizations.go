@@ -78,9 +78,9 @@ func LocalizationsListCommand() *ffcli.Command {
 
 For version localizations, omit --version to use the --app's newest editable
 App Store version (PREPARE_FOR_SUBMISSION, DEVELOPER_REJECTED, REJECTED,
-METADATA_REJECTED, WAITING_FOR_REVIEW, or INVALID_BINARY), falling back to the
-live version. The selected version is reported on stderr. Pass --platform when
-the app has candidate versions on more than one platform.
+METADATA_REJECTED, READY_FOR_REVIEW, WAITING_FOR_REVIEW, or INVALID_BINARY),
+falling back to the live version. The selected version is reported on stderr.
+Pass --platform when the app has candidate versions on more than one platform.
 
 Examples:
   asc localizations list --version "VERSION_ID"
@@ -119,6 +119,11 @@ Examples:
 				}
 				if strings.TrimSpace(*versionID) != "" {
 					return shared.UsageError("--platform only applies when --version is omitted")
+				}
+				// A links.next cursor already points at one version's page, so
+				// there is no default version left to select.
+				if strings.TrimSpace(*next) != "" {
+					return shared.UsageError("--platform cannot be combined with --next")
 				}
 				value, err := shared.NormalizeAppStoreVersionPlatform(*platform)
 				if err != nil {
@@ -175,7 +180,13 @@ Examples:
 				requestCtx, cancel := shared.ContextWithTimeout(ctx)
 				defer cancel()
 
-				if resolvedVersionID == "" {
+				// A links.next URL replaces the request path outright, so the
+				// version ID is ignored on continuations. Resolving a default
+				// here would spend a request on a value that cannot be used,
+				// announce a version the page may not belong to, and fail a
+				// valid continuation whenever the app's defaults are ambiguous
+				// or absent.
+				if resolvedVersionID == "" && strings.TrimSpace(*next) == "" {
 					resolved, err := shared.ResolveAndAnnounceDefaultAppStoreVersion(requestCtx, client, resolvedAppID, normalizedPlatform, "--version")
 					if err != nil {
 						if errors.Is(err, flag.ErrHelp) {
