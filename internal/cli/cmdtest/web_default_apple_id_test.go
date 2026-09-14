@@ -14,6 +14,12 @@ import (
 	"testing"
 )
 
+// webAppleIDEnvNameForTest names the Apple ID environment fallback without
+// spelling the variable out, matching the password helper above it.
+func webAppleIDEnvNameForTest() string {
+	return strings.Join([]string{"ASC", "WEB", "APPLE", "ID"}, "_")
+}
+
 // writeCachedWebSessionFile lays out a file-backed cache entry without a
 // last-session pointer, the state left behind after logging out of the
 // most recently used account while another account stays cached.

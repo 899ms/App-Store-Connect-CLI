@@ -95,13 +95,17 @@ Common session commands:
 
 ### Choosing the Apple Account
 
-Every `asc web` command that needs a session accepts `--apple-id`. When the
-flag is omitted, the account is resolved in this order:
+Every `asc web` command that resolves or creates a session accepts `--apple-id`.
+When the flag is omitted, the account is resolved in this order:
 
 1. `--apple-id` on the command line.
-2. The last cached session, as recorded by `asc web auth login` or
+2. The `ASC_WEB_APPLE_ID` environment variable. The value is trimmed and an
+   empty value is ignored, so an unset CI secret behaves like no variable at
+   all. The CLI prints `Using web session for user@example.com from
+   ASC_WEB_APPLE_ID; pass --apple-id to override` on stderr.
+3. The last cached session, as recorded by `asc web auth login` or
    `asc web auth import`.
-3. The only cached session, when exactly one account is cached and the
+4. The only cached session, when exactly one account is cached and the
    last-session pointer no longer resolves (for example after logging out of
    the most recently used account while another account stays cached). The
    CLI prints `Using cached web session for user@example.com; pass --apple-id
@@ -118,10 +122,24 @@ asc web privacy pull --app "123456789"
 
 # Several cached accounts: name the one to use
 asc web review show --app "123456789" --apple-id "user@example.com"
+
+# Several cached accounts on a CI runner: name it once for every web command
+export ASC_WEB_APPLE_ID="user@example.com"
+asc web review show --app "123456789"
 ```
 
-`--session-from-env` never consults the cache and is unaffected by this
-resolution.
+`asc web auth login` resolves `--apple-id` the same way, so a runner that
+exports `ASC_WEB_APPLE_ID` alongside `ASC_WEB_PASSWORD` and
+`ASC_WEB_2FA_CODE_COMMAND` needs no Apple Account on the command line.
+`--session-from-env` never consults the cache or `ASC_WEB_APPLE_ID` and is
+unaffected by this resolution.
+
+The cache-management commands are deliberately outside this resolution and
+ignore `ASC_WEB_APPLE_ID`: `asc web auth status` and `asc web auth export`
+default to the last cached session, `asc web auth logout` requires `--apple-id`
+or `--all`, and `--apple-id` on `asc web auth import` asserts which Apple
+Account the bundle must belong to rather than selecting one. Pass `--apple-id`
+explicitly to those commands.
 
 ## Command families
 

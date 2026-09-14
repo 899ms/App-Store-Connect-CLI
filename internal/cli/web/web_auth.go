@@ -25,6 +25,7 @@ import (
 
 const (
 	webPasswordEnv             = "ASC_WEB_PASSWORD"
+	webAppleIDEnv              = "ASC_WEB_APPLE_ID"
 	webDontStorePasswordEnv    = "ASC_WEB_DONT_STORE_PASSWORD"
 	webTwoFactorCodeCommandEnv = "ASC_WEB_2FA_CODE_COMMAND"
 	webTwoFactorCommandTimeout = 60 * time.Second
@@ -529,6 +530,25 @@ func ambiguousAppleIDUsageError(appleIDs []string) error {
 	)
 }
 
+// envAppleID returns the Apple Account named by ASC_WEB_APPLE_ID, the
+// environment fallback for --apple-id. The value is trimmed and an empty one is
+// ignored, so an exported-but-unset CI secret behaves like no variable at all
+// instead of selecting a nameless account.
+func envAppleID() string {
+	return strings.TrimSpace(os.Getenv(webAppleIDEnv))
+}
+
+// printEnvAppleIDNotice announces the account the environment selected. The
+// cached-session default prints the same shape; naming the variable keeps a
+// caller who exported it in one shell profile from mistaking the choice for a
+// cache hit.
+func printEnvAppleIDNotice(appleID string) {
+	if sessionDefaultNoticeWriter == nil {
+		return
+	}
+	_, _ = fmt.Fprintf(sessionDefaultNoticeWriter, "Using web session for %s from %s; pass --apple-id to override\n", appleID, webAppleIDEnv)
+}
+
 // resolveDefaultCachedAppleID picks the Apple ID of the only cached web session
 // when --apple-id names none. The chosen account is announced on stderr so a
 // caller who later caches several accounts can tell which one served the
@@ -825,6 +845,16 @@ func resolveWebSession(ctx context.Context, appleID, password, twoFactorCode str
 	shared.ApplyRootLoggingOverrides()
 
 	resolvedAppleID := strings.TrimSpace(appleID)
+	// ASC_WEB_APPLE_ID sits between the flag and the cached-session default: it
+	// names the account before any cache lookup, so neither the last-session
+	// pointer nor an ambiguous cache can decide for a caller who already said
+	// which Apple Account this invocation belongs to.
+	if resolvedAppleID == "" {
+		if fromEnv := envAppleID(); fromEnv != "" {
+			resolvedAppleID = fromEnv
+			printEnvAppleIDNotice(resolvedAppleID)
+		}
+	}
 	twoFactorCode = strings.TrimSpace(twoFactorCode)
 	command := strings.TrimSpace(opts.twoFactorCodeCommand)
 	if command == "" {
@@ -1225,7 +1255,7 @@ Manage Apple web-session authentication used by "asc web" commands.
 func WebAuthLoginCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("web auth login", flag.ExitOnError)
 
-	appleID := fs.String("apple-id", "", "Apple Account email")
+	appleID := fs.String("apple-id", "", "Apple Account email (defaults to "+webAppleIDEnv+", then the last or only cached session)")
 	twoFactorCodeCommand := fs.String("two-factor-code-command", "", "Shell command that prints the 2FA code to stdout if verification is required")
 	providerID := fs.Int64("provider-id", 0, "Numeric App Store Connect provider ID to select for this web session")
 	publicProviderID := fs.String("public-provider-id", "", "Public App Store Connect provider/team ID to select for this web session")
@@ -1239,6 +1269,11 @@ func WebAuthLoginCommand() *ffcli.Command {
 			`WEB SESSION WORKFLOWS
 
 Authenticate using Apple web-session behavior for "asc web" workflows.
+
+Apple Account input options:
+  - --apple-id
+  - %s environment variable
+  - the last or only cached web session
 
 Password input options:
   - secure interactive prompt (default; saved in the native credential store after successful login)
@@ -1264,6 +1299,7 @@ Examples:
   asc web auth login --apple-id "user@example.com" --public-provider-id "Z4N6A5FQKW"
   %s asc web auth login --apple-id "user@example.com"
   %s='osascript /path/to/get-apple-2fa-code.scpt' asc web auth login --apple-id "user@example.com"`,
+			webAppleIDEnv,
 			webPasswordEnvDisplay(),
 			webDontStorePasswordEnv,
 			webTwoFactorCodeCommandEnv,
