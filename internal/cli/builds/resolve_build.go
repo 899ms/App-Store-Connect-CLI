@@ -2,6 +2,7 @@ package builds
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -73,6 +74,9 @@ func ResolveBuild(ctx context.Context, client *asc.Client, opts ResolveBuildOpti
 			ExcludeExpired:        opts.ExcludeExpired,
 		}, false)
 		if err != nil {
+			if errors.Is(err, asc.ErrNotFound) {
+				return nil, err
+			}
 			return nil, fmt.Errorf("failed to fetch latest build: %w", err)
 		}
 		return buildResp, nil
@@ -270,17 +274,26 @@ func resolveBuildByNumberSelectionSince(
 	}
 }
 
+// noBuildFoundForBuildNumber reports an empty build-number lookup. The error
+// carries asc.ErrNotFound so callers exit with the not-found code instead of a
+// generic failure.
 func noBuildFoundForBuildNumber(appID, buildNumber, version, platform string) error {
-	return fmt.Errorf(
-		"no build found for app %s with build number %q%s",
-		appID,
-		buildNumber,
-		describeBuildNumberSelectionFilters(version, platform),
+	return shared.NewErrorWithCause(
+		fmt.Errorf(
+			"no build found for app %s with build number %q%s; check --build-number, --version, and --platform, or use --build-id",
+			appID,
+			buildNumber,
+			describeBuildNumberSelectionFilters(version, platform),
+		),
+		asc.ErrNotFound,
 	)
 }
 
+// ambiguousBuildNumberSelection reports a build-number lookup that matched
+// more than one build. The caller has to narrow the selector, so this is a
+// usage error.
 func ambiguousBuildNumberSelection(appID, buildNumber, version, platform string) error {
-	return fmt.Errorf(
+	return shared.UsageErrorf(
 		"multiple builds found for app %s with build number %q%s; %s",
 		appID,
 		buildNumber,
