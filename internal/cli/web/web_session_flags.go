@@ -11,6 +11,8 @@ import (
 	webcore "github.com/rudrankriyam/App-Store-Connect-CLI/internal/web"
 )
 
+var errNoCachedWebSession = errors.New("no cached web session is available")
+
 type webSessionFlags struct {
 	flagSet              *flag.FlagSet
 	appleID              *string
