@@ -141,20 +141,30 @@ func TestWebAuthCapabilitiesExpiredSessionGetsCommandDiagnostic(t *testing.T) {
 }
 
 func TestWrapWebAuthCapabilitiesErrorDistinguishesUnauthorizedAndForbidden(t *testing.T) {
-	unauthorized := wrapWebAuthCapabilitiesError("KEY", &webcore.APIError{Status: 401})
+	unauthorizedCause := &webcore.APIError{Status: 401}
+	unauthorized := wrapWebAuthCapabilitiesError("KEY", unauthorizedCause)
 	if unauthorized == nil || !strings.Contains(unauthorized.Error(), "web session expired") {
 		t.Fatalf("expected expired-session diagnostic, got %v", unauthorized)
 	}
 	if strings.Contains(unauthorized.Error(), "not permitted") {
 		t.Fatalf("did not expect permission diagnostic for 401: %v", unauthorized)
 	}
+	var preservedUnauthorized *webcore.APIError
+	if !errors.As(unauthorized, &preservedUnauthorized) || preservedUnauthorized != unauthorizedCause {
+		t.Fatalf("expected 401 cause to remain available for classification, got %v", unauthorized)
+	}
 
-	forbidden := wrapWebAuthCapabilitiesError("KEY", &webcore.APIError{Status: 403})
+	forbiddenCause := &webcore.APIError{Status: 403}
+	forbidden := wrapWebAuthCapabilitiesError("KEY", forbiddenCause)
 	if forbidden == nil || !strings.Contains(forbidden.Error(), "capability discovery is not permitted") {
 		t.Fatalf("expected permission diagnostic, got %v", forbidden)
 	}
 	if strings.Contains(forbidden.Error(), "expired") {
 		t.Fatalf("did not expect expired-session diagnostic for 403: %v", forbidden)
+	}
+	var preservedForbidden *webcore.APIError
+	if !errors.As(forbidden, &preservedForbidden) || preservedForbidden != forbiddenCause {
+		t.Fatalf("expected 403 cause to remain available for classification, got %v", forbidden)
 	}
 }
 
@@ -168,6 +178,20 @@ func TestWebAuthCapabilitiesErrorsDoNotExposeSessionMaterial(t *testing.T) {
 		if strings.Contains(err.Error(), value) {
 			t.Fatalf("diagnostic exposed sensitive value %q: %v", value, err)
 		}
+	}
+}
+
+func TestWebAuthCapabilitiesTextLookalikeDoesNotBypassSessionRedaction(t *testing.T) {
+	cause := errors.New("cached web session expired: token=secret-token")
+	err := wrapWebAuthCapabilitiesSessionError(cause)
+	if err == nil || !strings.Contains(err.Error(), "unable to establish a web session") {
+		t.Fatalf("expected generic session diagnostic, got %v", err)
+	}
+	if strings.Contains(err.Error(), "secret-token") {
+		t.Fatalf("diagnostic exposed session material: %v", err)
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("expected underlying cause to remain available for classification, got %v", err)
 	}
 }
 

@@ -268,7 +268,7 @@ func wrapWebAuthCapabilitiesSessionError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, webcore.ErrCachedSessionExpired) || strings.Contains(err.Error(), webcore.ErrCachedSessionExpired.Error()) {
+	if errors.Is(err, webcore.ErrCachedSessionExpired) {
 		return webAuthCapabilitiesError("web auth capabilities failed: cached web session expired; run 'asc web auth login' and retry", err)
 	}
 	if errors.Is(err, errNoCachedWebSession) {
