@@ -162,7 +162,7 @@ compile paths verify the platform guard.
 
 A gated macOS integration test (`ASC_SIGNING_KEYCHAIN_INSTALL_LIVE_TEST=1`)
 creates a unique disposable keychain, imports a protected PKCS#12 containing a
-generated non-CA code-signing leaf plus a disposable test root, runs the real
+generated self-signed non-CA code-signing leaf, runs the real
 Security-framework import, partition-list update, and codesign probe, confirms
 search-list activation, removes the entry, deletes the keychain, and proves the
 exact original search list is restored. It uses no personal signing
