@@ -73,8 +73,11 @@ func TestWrapWebAuthCapabilitiesSessionErrorDistinguishesMissingAndExpired(t *te
 			if strings.Contains(err.Error(), tt.dontWant) {
 				t.Fatalf("did not expect %q in diagnostic: %v", tt.dontWant, err)
 			}
-			if !strings.Contains(err.Error(), "asc web auth login") {
+			if tt.name == "expired session" && !strings.Contains(err.Error(), "asc web auth login") {
 				t.Fatalf("expected login recovery guidance, got %v", err)
+			}
+			if !errors.Is(err, tt.err) {
+				t.Fatalf("expected diagnostic to preserve its cause, got %v", err)
 			}
 		})
 	}
