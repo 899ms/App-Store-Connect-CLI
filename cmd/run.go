@@ -49,9 +49,31 @@ func Run(args []string, versionInfo string) int {
 	runCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stopSignals()
 
+	// Resolve @env:/@file: flag values before parsing so every value-taking
+	// flag, including typed and repeat-safe values, validates the resolved
+	// text. Structural analyses keep using the original args: the rewrite is
+	// token-for-token, and resolved values must never reach diagnostics or
+	// telemetry. An explicit help request wins over an unresolvable value.
+	parseArgs := args
+	if !requestedHelp(root, args) {
+		resolvedArgs, err := resolveFlagValueIndirection(root, args)
+		if err != nil {
+			recoverCIReportFlags(root, args)
+			fmt.Fprint(os.Stderr, errfmt.FormatStderr(err))
+			commandName := getCommandName(root, args)
+			if reportErr := writeUsageJUnitReport(commandName, err); reportErr != nil {
+				printUsageJUnitReportFailure(commandName, versionInfo, analysis, reportErr)
+				return ExitError
+			}
+			emitImmediateTelemetry(args, root, versionInfo, validationFailureContext(analysis, err))
+			return ExitUsage
+		}
+		parseArgs = resolvedArgs
+	}
+
 	parseOutput := &parseOutputBuffer{}
 	restoreFlagOutputs := prepareFlagParsing(root, args, parseOutput)
-	parseErr := root.Parse(args)
+	parseErr := root.Parse(parseArgs)
 	restoreFlagOutputs()
 	if parseErr != nil {
 		if errors.Is(parseErr, flag.ErrHelp) {
