@@ -78,6 +78,37 @@ func TestResolveDefaultAppStoreVersionFallsBackToLiveVersion(t *testing.T) {
 	}
 }
 
+// The editable preference is app-wide: a single editable version resolves even
+// when another platform is live, because the editable version is the one being
+// worked on. Failing with an ambiguity error here would reintroduce the
+// friction this default exists to remove, so the live tier is never queried.
+func TestResolveDefaultAppStoreVersionPrefersEditableOverLiveOnAnotherPlatform(t *testing.T) {
+	var log []string
+	client := defaultVersionTestClient(t, map[string]string{
+		"|" + defaultVersionEditableFilter + "|": `{"data":[
+			{"type":"appStoreVersions","id":"ver-ios","attributes":{"versionString":"1.2.3","platform":"IOS","appVersionState":"PREPARE_FOR_SUBMISSION","createdDate":"2026-02-01T00:00:00Z"}}
+		],"links":{"next":""}}`,
+		"READY_FOR_SALE||": `{"data":[
+			{"type":"appStoreVersions","id":"ver-mac-live","attributes":{"versionString":"9.0.0","platform":"MAC_OS","appStoreState":"READY_FOR_SALE","appVersionState":"READY_FOR_DISTRIBUTION","createdDate":"2026-03-01T00:00:00Z"}}
+		],"links":{"next":""}}`,
+	}, &log)
+
+	resolved, err := ResolveDefaultAppStoreVersion(context.Background(), client, "app-1", "")
+	if err != nil {
+		t.Fatalf("ResolveDefaultAppStoreVersion() error: %v", err)
+	}
+	if resolved.ID != "ver-ios" || resolved.Platform != "IOS" || resolved.Source != DefaultAppStoreVersionSourceEditable {
+		t.Fatalf("unexpected resolution: %+v", resolved)
+	}
+	if len(log) != 1 {
+		t.Fatalf("expected only the editable request, got %v", log)
+	}
+	// The cross-platform choice is announced rather than silent.
+	if got := resolved.Note("--version"); !strings.Contains(got, "for platform IOS") {
+		t.Fatalf("Note() = %q, want it to name the resolved platform", got)
+	}
+}
+
 func TestResolveDefaultAppStoreVersionHonorsPlatformFilter(t *testing.T) {
 	client := defaultVersionTestClient(t, map[string]string{
 		"|" + defaultVersionEditableFilter + "|MAC_OS": `{"data":[

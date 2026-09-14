@@ -77,6 +77,15 @@ func (e *AmbiguousDefaultAppStoreVersionError) Error() string {
 // version, falling back to the newest live version. platform may be empty; when
 // candidates exist on more than one platform the returned error is an
 // *AmbiguousDefaultAppStoreVersionError.
+//
+// The editable preference is app-wide and is resolved before live versions are
+// considered, so ambiguity is decided within the selected tier rather than
+// across the union of both tiers. An app that is live on iOS and macOS but has
+// a single editable iOS version therefore resolves to that editable version
+// instead of failing: the editable version is the one being worked on, and
+// requiring --platform there would reintroduce the friction this default
+// exists to remove. The selection is never silent — callers announce the
+// resolved version and its platform on stderr through Note.
 func ResolveDefaultAppStoreVersion(ctx context.Context, client *asc.Client, appID, platform string) (DefaultAppStoreVersion, error) {
 	if client == nil {
 		return DefaultAppStoreVersion{}, fmt.Errorf("client is required")
