@@ -370,6 +370,55 @@ func TestLimitedSigningBufferBoundsOutput(t *testing.T) {
 	}
 }
 
+func TestUtilityFailureIncludesSanitizedBoundedStderrAndRedactsSecrets(t *testing.T) {
+	secret := []byte("keychain-password")
+	cause := errors.New("exit status 1")
+	stderr := append([]byte("security: failed to unlock \x1b[31m"), secret...)
+	stderr = append(stderr, " encoded=6b6579636861696e2d70617373776f7264\n"...)
+
+	err := utilityFailure("restrict key partition list", stderr, cause, secret)
+	if !errors.Is(err, cause) {
+		t.Fatalf("utilityFailure() error = %v, want injected cause", err)
+	}
+	message := err.Error()
+	if !strings.Contains(message, "security: failed to unlock [31m[REDACTED]") {
+		t.Fatalf("utilityFailure() = %q, want sanitized stderr diagnostic", message)
+	}
+	if strings.Contains(message, string(secret)) {
+		t.Fatalf("utilityFailure() leaked secret: %q", message)
+	}
+	if strings.ContainsAny(message, "\x1b\r\n") {
+		t.Fatalf("utilityFailure() contains terminal or line controls: %q", message)
+	}
+
+	large := bytes.Repeat([]byte("x"), signingUtilityDiagnosticLimit+1)
+	largeMessage := utilityFailure("verify imported signing identity", large, cause).Error()
+	if len(largeMessage) > signingUtilityDiagnosticLimit+128 {
+		t.Fatalf("utilityFailure() diagnostic is not bounded: %d bytes", len(largeMessage))
+	}
+	if !strings.Contains(largeMessage, "[truncated]") {
+		t.Fatalf("utilityFailure() = %q, want truncation marker", largeMessage)
+	}
+}
+
+func TestVerifySigningRunIdentityUsableIncludesInjectedCodesignStderr(t *testing.T) {
+	previous := signingRunCommandContext
+	signingRunCommandContext = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "printf 'codesign: injected diagnostic\\n' >&2; exit 1")
+	}
+	t.Cleanup(func() { signingRunCommandContext = previous })
+
+	err := verifySigningRunIdentityUsable(
+		context.Background(),
+		t.TempDir(),
+		filepath.Join(t.TempDir(), "signing.keychain-db"),
+		strings.Repeat("A", 40),
+	)
+	if err == nil || !strings.Contains(err.Error(), "codesign: injected diagnostic") {
+		t.Fatalf("verifySigningRunIdentityUsable() = %v, want injected codesign diagnostic", err)
+	}
+}
+
 func TestWithSigningRunPartitionPasswordInputClearsDerivedBuffer(t *testing.T) {
 	var captured []byte
 	wantErr := errors.New("stop")

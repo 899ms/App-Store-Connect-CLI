@@ -205,6 +205,8 @@ type signingRunFixtureOptions struct {
 	getTaskAllow                 bool
 	noDevices                    bool
 	allDevices                   bool
+	codeSigningLeaf              bool
+	selfSignedCodeSigningLeaf    bool
 	platforms                    []string
 	differentEmbeddedCertificate bool
 	certificateTeamID            string
@@ -220,6 +222,7 @@ type signingRunFixture struct {
 	teamID      string
 	bundleID    string
 	profileUUID string
+	trustAnchor []byte
 }
 
 func newSigningRunFixture(t *testing.T, options signingRunFixtureOptions) *signingRunFixture {
@@ -248,7 +251,14 @@ func newSigningRunFixture(t *testing.T, options signingRunFixtureOptions) *signi
 		profileExpiry = now.Add(-time.Hour)
 	}
 
-	identityKey, identityCert := makeSigningRunCertificate(t, "Distribution", certificateTeamID, now)
+	var identityKey *rsa.PrivateKey
+	var identityCert *x509.Certificate
+	var trustAnchor []byte
+	if options.codeSigningLeaf {
+		identityKey, identityCert, trustAnchor = makeSigningRunCodeSigningLeafCertificate(t, "Distribution", certificateTeamID, now, options.selfSignedCodeSigningLeaf)
+	} else {
+		identityKey, identityCert = makeSigningRunCertificate(t, "Distribution", certificateTeamID, now)
+	}
 	identity, err := certificateutil.NewCertificateInfo(*identityCert, identityKey).EncodeToP12("secret")
 	if err != nil {
 		t.Fatalf("encode P12: %v", err)
@@ -308,7 +318,76 @@ func newSigningRunFixture(t *testing.T, options signingRunFixtureOptions) *signi
 		teamID:      teamID,
 		bundleID:    bundleID,
 		profileUUID: profileUUID,
+		trustAnchor: trustAnchor,
 	}
+}
+
+func makeSigningRunCodeSigningLeafCertificate(t *testing.T, commonName, teamID string, now time.Time, selfSigned bool) (*rsa.PrivateKey, *x509.Certificate, []byte) {
+	t.Helper()
+	rootKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate test root key: %v", err)
+	}
+	rootSerial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 120))
+	if err != nil {
+		t.Fatalf("generate test root serial: %v", err)
+	}
+	rootTemplate := &x509.Certificate{
+		SerialNumber:          rootSerial,
+		Subject:               pkix.Name{CommonName: "ASC Signing Test Root"},
+		NotBefore:             now.Add(-24 * time.Hour),
+		NotAfter:              now.Add(365 * 24 * time.Hour),
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
+	}
+	rootDER, err := x509.CreateCertificate(rand.Reader, rootTemplate, rootTemplate, &rootKey.PublicKey, rootKey)
+	if err != nil {
+		t.Fatalf("create test root certificate: %v", err)
+	}
+	rootCertificate, err := x509.ParseCertificate(rootDER)
+	if err != nil {
+		t.Fatalf("parse test root certificate: %v", err)
+	}
+	leafKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate test leaf key: %v", err)
+	}
+	leafSerial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 120))
+	if err != nil {
+		t.Fatalf("generate test leaf serial: %v", err)
+	}
+	leafTemplate := &x509.Certificate{
+		SerialNumber:          leafSerial,
+		Subject:               pkix.Name{CommonName: commonName, OrganizationalUnit: nonEmptyStrings(teamID)},
+		NotBefore:             now.Add(-24 * time.Hour),
+		NotAfter:              now.Add(365 * 24 * time.Hour),
+		BasicConstraintsValid: true,
+		IsCA:                  false,
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageCodeSigning},
+	}
+	if selfSigned {
+		leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, leafTemplate, &leafKey.PublicKey, leafKey)
+		if err != nil {
+			t.Fatalf("create self-signed test leaf certificate: %v", err)
+		}
+		leafCertificate, err := x509.ParseCertificate(leafDER)
+		if err != nil {
+			t.Fatalf("parse self-signed test leaf certificate: %v", err)
+		}
+		return leafKey, leafCertificate, nil
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, rootCertificate, &leafKey.PublicKey, rootKey)
+	if err != nil {
+		t.Fatalf("create test leaf certificate: %v", err)
+	}
+	leafCertificate, err := x509.ParseCertificate(leafDER)
+	if err != nil {
+		t.Fatalf("parse test leaf certificate: %v", err)
+	}
+	return leafKey, leafCertificate, rootDER
 }
 
 func makeSigningRunCertificate(t *testing.T, commonName, teamID string, now time.Time) (*rsa.PrivateKey, *x509.Certificate) {
