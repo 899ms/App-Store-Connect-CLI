@@ -3,8 +3,6 @@
 package cmdtest
 
 import (
-	"context"
-	"io"
 	"strings"
 	"testing"
 
@@ -12,8 +10,6 @@ import (
 )
 
 func TestSigningRunUnsupportedPlatformRendersStderrAndErrorExit(t *testing.T) {
-	root := RootCommand("test")
-	root.FlagSet.SetOutput(io.Discard)
 	args := []string{
 		"signing", "run",
 		"--identity", "identity.p12",
@@ -21,18 +17,12 @@ func TestSigningRunUnsupportedPlatformRendersStderrAndErrorExit(t *testing.T) {
 		"--", "child-tool", "--child-flag",
 	}
 
-	var runErr error
+	var exitCode int
 	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse(args); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
+		exitCode = rootcmd.Run(args, "test")
 	})
-	if runErr == nil || !strings.Contains(runErr.Error(), "supported only on macOS") {
-		t.Fatalf("error = %v, want unsupported-platform diagnostic", runErr)
-	}
-	if got := rootcmd.ExitCodeFromError(runErr); got != rootcmd.ExitError {
-		t.Fatalf("exit code = %d, want %d", got, rootcmd.ExitError)
+	if exitCode != rootcmd.ExitError {
+		t.Fatalf("exit code = %d, want %d", exitCode, rootcmd.ExitError)
 	}
 	if stdout != "" {
 		t.Fatalf("stdout = %q, want empty", stdout)
