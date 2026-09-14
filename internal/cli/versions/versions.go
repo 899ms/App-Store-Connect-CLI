@@ -498,6 +498,7 @@ func VersionsCreateCommand() *ffcli.Command {
 	copyMetadataFrom := fs.String("copy-metadata-from", "", "Copy localization metadata from this source version string")
 	copyFields := shared.BindOnceCSVFlag(fs, "copy-fields", "Comma-separated metadata fields to copy: description, keywords, marketingUrl, promotionalText, supportUrl, whatsNew")
 	excludeFields := shared.BindOnceCSVFlag(fs, "exclude-fields", "Comma-separated metadata fields to exclude from copy")
+	ifExists := shared.BindIfExistsFlag(fs, shared.IfExistsSkip, shared.IfExistsUpdate)
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -511,7 +512,17 @@ Examples:
   asc versions create --app "123456789" --version "2.0.0" --platform IOS
   asc versions create --app "123456789" --version "2.0.0" --copyright "2026 My Company" --release-type MANUAL
   asc versions create --app "123456789" --version "2.4.0" --platform IOS --copy-metadata-from "2.3.2"
-  asc versions create --app "123456789" --version "2.4.0" --copy-metadata-from "2.3.2" --copy-fields "description,keywords,supportUrl" --exclude-fields "whatsNew"`,
+  asc versions create --app "123456789" --version "2.4.0" --copy-metadata-from "2.3.2" --copy-fields "description,keywords,supportUrl" --exclude-fields "whatsNew"
+  asc versions create --app "123456789" --version "2.0.0" --if-exists skip
+  asc versions create --app "123456789" --version "2.0.0" --copyright "2026 My Company" --if-exists update
+
+--if-exists controls what happens when App Store Connect answers 409 because
+the version already exists for that platform. fail (default) returns the
+error. skip reads the existing version back, exits 0, and reports
+"action":"skipped" without changing it. update applies --copyright and
+--release-type to the existing version with asc versions update and reports
+"action":"updated"; --copy-metadata-from still runs against the existing
+version. Any other 409 keeps failing.`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
@@ -561,6 +572,11 @@ Examples:
 				return shared.UsageErrorf("versions create: %v", err)
 			}
 
+			ifExistsMode, err := shared.ParseIfExistsMode(*ifExists, shared.IfExistsSkip, shared.IfExistsUpdate)
+			if err != nil {
+				return err
+			}
+
 			client, err := shared.GetASCClient()
 			if err != nil {
 				return fmt.Errorf("versions create: %w", err)
@@ -581,8 +597,43 @@ Examples:
 			}
 
 			resp, err := client.CreateAppStoreVersion(requestCtx, resolvedAppID, attrs)
+			action := asc.IdempotentWriteActionCreated
+			copyMetadata := copyMetadataFromValue != ""
 			if err != nil {
-				return fmt.Errorf("versions create: %w", err)
+				existing, handled, resolveErr := shared.ResolveIfExistsConflict(ifExistsMode, err, versionsCreateExistsCodes, func() (*asc.AppStoreVersionResponse, bool, error) {
+					return findExistingAppStoreVersion(requestCtx, client, resolvedAppID, attrs.VersionString, normalizedPlatform)
+				})
+				if resolveErr != nil {
+					return fmt.Errorf("versions create: %w", resolveErr)
+				}
+				if !handled {
+					return fmt.Errorf("versions create: %w", err)
+				}
+				resp = existing
+				action = asc.IdempotentWriteActionSkipped
+				// skip leaves the existing version untouched, including its
+				// localization metadata. update still carries the metadata
+				// forward onto the existing version.
+				copyMetadata = copyMetadata && ifExistsMode == shared.IfExistsUpdate
+				if ifExistsMode == shared.IfExistsUpdate {
+					updateAttrs := asc.AppStoreVersionUpdateAttributes{}
+					if *copyright != "" {
+						updateAttrs.Copyright = copyright
+					}
+					if normalizedReleaseType != "" {
+						updateAttrs.ReleaseType = &normalizedReleaseType
+					}
+					if updateAttrs.Copyright != nil || updateAttrs.ReleaseType != nil {
+						updated, updateErr := client.UpdateAppStoreVersion(requestCtx, existing.Data.ID, updateAttrs)
+						if updateErr != nil {
+							return fmt.Errorf("versions create: update existing version %s: %w", existing.Data.ID, updateErr)
+						}
+						resp = updated
+						action = asc.IdempotentWriteActionUpdated
+					}
+				}
+				fmt.Fprintf(os.Stderr, "versions create: version %s (%s, %s) already exists as %s; %s (--if-exists %s)\n",
+					attrs.VersionString, normalizedPlatform, resolvedAppID, resp.Data.ID, ifExistsOutcomeText(action), ifExistsMode)
 			}
 
 			result := &asc.AppStoreVersionDetailResult{
@@ -590,8 +641,12 @@ Examples:
 				VersionString: resp.Data.Attributes.VersionString,
 				Platform:      string(resp.Data.Attributes.Platform),
 				State:         shared.ResolveAppStoreVersionState(resp.Data.Attributes),
+				IdempotentWriteReceipt: asc.IdempotentWriteReceipt{
+					AlreadyExists: action != asc.IdempotentWriteActionCreated,
+					Action:        action,
+				},
 			}
-			if copyMetadataFromValue != "" {
+			if copyMetadata {
 				copySummary, err := copyVersionMetadataFromSource(
 					requestCtx,
 					client,
@@ -613,6 +668,44 @@ Examples:
 			return shared.PrintOutput(result, *output.Output, *output.Pretty)
 		},
 	}
+}
+
+// versionsCreateExistsCodes lists the Apple 409 codes that mean the version
+// string is already taken on POST /v1/appStoreVersions. Apple answers the
+// duplicate with ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE on the
+// /data/attributes/versionString pointer ("The version number has been
+// previously used."). The same endpoint also returns 409
+// ENTITY_ERROR.RELATIONSHIP.INVALID ("You cannot create a new version of the
+// App in the current state.") and STATE_ERROR.*; those are not existence
+// conflicts and keep failing.
+var versionsCreateExistsCodes = []string{"ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE"}
+
+// findExistingAppStoreVersion reads back the version a 409 conflict referred
+// to, keyed by version string and platform. It reports found=false when the
+// app has no such version so the caller can surface the original conflict.
+func findExistingAppStoreVersion(ctx context.Context, client *asc.Client, appID, versionString, platform string) (*asc.AppStoreVersionResponse, bool, error) {
+	versions, err := client.GetAppStoreVersions(
+		ctx, appID,
+		asc.WithAppStoreVersionsVersionStrings([]string{versionString}),
+		asc.WithAppStoreVersionsPlatforms([]string{platform}),
+		asc.WithAppStoreVersionsLimit(10),
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	for _, candidate := range versions.Data {
+		if candidate.Attributes.VersionString == versionString && strings.EqualFold(string(candidate.Attributes.Platform), platform) {
+			return &asc.AppStoreVersionResponse{Data: candidate}, true, nil
+		}
+	}
+	return nil, false, nil
+}
+
+func ifExistsOutcomeText(action string) string {
+	if action == asc.IdempotentWriteActionUpdated {
+		return "updated it in place"
+	}
+	return "left unchanged"
 }
 
 func VersionsUpdateCommand() *ffcli.Command {
