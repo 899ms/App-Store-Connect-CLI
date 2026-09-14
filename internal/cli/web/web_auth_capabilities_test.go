@@ -43,6 +43,89 @@ func TestWrapWebAuthCapabilitiesErrorFormatsLookupFailures(t *testing.T) {
 	}
 }
 
+func TestWrapWebAuthCapabilitiesSessionErrorDistinguishesMissingAndExpired(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		want     string
+		dontWant string
+	}{
+		{
+			name:     "missing session",
+			err:      errors.New("--apple-id is required when no cached web session is available"),
+			want:     "no cached web session is available",
+			dontWant: "expired",
+		},
+		{
+			name:     "expired session",
+			err:      webcore.ErrCachedSessionExpired,
+			want:     "cached web session expired",
+			dontWant: "no cached web session",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := wrapWebAuthCapabilitiesSessionError(tt.err)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %q diagnostic, got %v", tt.want, err)
+			}
+			if strings.Contains(err.Error(), tt.dontWant) {
+				t.Fatalf("did not expect %q in diagnostic: %v", tt.dontWant, err)
+			}
+			if !strings.Contains(err.Error(), "asc web auth login") {
+				t.Fatalf("expected login recovery guidance, got %v", err)
+			}
+		})
+	}
+}
+
+func TestWrapWebAuthCapabilitiesErrorDistinguishesUnauthorizedAndForbidden(t *testing.T) {
+	unauthorized := wrapWebAuthCapabilitiesError("KEY", &webcore.APIError{Status: 401})
+	if unauthorized == nil || !strings.Contains(unauthorized.Error(), "web session expired") {
+		t.Fatalf("expected expired-session diagnostic, got %v", unauthorized)
+	}
+	if strings.Contains(unauthorized.Error(), "not permitted") {
+		t.Fatalf("did not expect permission diagnostic for 401: %v", unauthorized)
+	}
+
+	forbidden := wrapWebAuthCapabilitiesError("KEY", &webcore.APIError{Status: 403})
+	if forbidden == nil || !strings.Contains(forbidden.Error(), "capability discovery is not permitted") {
+		t.Fatalf("expected permission diagnostic, got %v", forbidden)
+	}
+	if strings.Contains(forbidden.Error(), "expired") {
+		t.Fatalf("did not expect expired-session diagnostic for 403: %v", forbidden)
+	}
+}
+
+func TestWebAuthCapabilitiesErrorsDoNotExposeSessionMaterial(t *testing.T) {
+	secret := "cookie=secret-cookie token=secret-token sessionPayload=secret-session"
+	err := wrapWebAuthCapabilitiesError("KEY", fmt.Errorf("lookup failed: %s", secret))
+	if err == nil || !strings.Contains(err.Error(), "capability discovery is unavailable") {
+		t.Fatalf("expected unavailable diagnostic, got %v", err)
+	}
+	for _, value := range []string{"secret-cookie", "secret-token", "secret-session"} {
+		if strings.Contains(err.Error(), value) {
+			t.Fatalf("diagnostic exposed sensitive value %q: %v", value, err)
+		}
+	}
+}
+
+func TestWebAuthCapabilitiesEmptyCapabilitySetOutputsEmptyArray(t *testing.T) {
+	payload, err := json.Marshal(webAuthCapabilitiesResult{
+		KeyID:        "KEY",
+		Kind:         "team",
+		Roles:        []string{},
+		Capabilities: convertWebAuthCapabilities(nil),
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error: %v", err)
+	}
+	if !strings.Contains(string(payload), `"capabilities":[]`) {
+		t.Fatalf("expected explicit empty capability result, got %s", payload)
+	}
+}
+
 func TestWebAuthCapabilitiesMissingLocalAuthReturnsUsageError(t *testing.T) {
 	origResolveAuth := resolveWebAuthCredentialsFn
 	t.Cleanup(func() {
@@ -311,7 +394,7 @@ func TestWebAuthCapabilitiesAuthResolutionOutputsJSON(t *testing.T) {
 	}
 }
 
-func TestWebAuthCapabilitiesUnauthorizedLookupGetsWebHint(t *testing.T) {
+func TestWebAuthCapabilitiesUnauthorizedLookupGetsExpiredSessionDiagnostic(t *testing.T) {
 	labels := stubWebProgressLabels(t)
 
 	origResolveSession := resolveSessionFn
@@ -348,8 +431,8 @@ func TestWebAuthCapabilitiesUnauthorizedLookupGetsWebHint(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "web session is unauthorized or expired") {
-		t.Fatalf("expected web auth hint, got %v", err)
+	if !strings.Contains(err.Error(), "web session expired") {
+		t.Fatalf("expected expired-session diagnostic, got %v", err)
 	}
 	if !strings.Contains(err.Error(), "asc web auth login") {
 		t.Fatalf("expected login guidance, got %v", err)
