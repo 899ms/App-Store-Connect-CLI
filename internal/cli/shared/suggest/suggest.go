@@ -11,8 +11,10 @@ type candidate struct {
 	dist  int
 }
 
-// Commands returns up to a few likely command-name suggestions for the provided input.
-// It is intentionally conservative: if we aren't reasonably confident, it returns nil.
+// Commands returns up to three likely command-name suggestions for the provided
+// input, ranked by prefix relationship, then substring containment, then edit
+// distance. It is intentionally conservative: if we aren't reasonably
+// confident, it returns nil.
 func Commands(input string, candidates []string) []string {
 	in := strings.ToLower(strings.TrimSpace(input))
 	if in == "" {
@@ -26,17 +28,23 @@ func Commands(input string, candidates []string) []string {
 			continue
 		}
 
-		// Strong signal: prefix relationship.
-		if strings.HasPrefix(name, in) || strings.HasPrefix(in, name) {
-			collected = append(collected, candidate{name: name, score: 0, dist: levenshtein(in, name)})
-			continue
-		}
+		d := editDistance(in, name)
 
-		d := levenshtein(in, name)
-		if !withinThreshold(in, d) && !isAdjacentTransposition(in, name) {
+		// Strongest signal: prefix relationship.
+		if strings.HasPrefix(name, in) || strings.HasPrefix(in, name) {
+			collected = append(collected, candidate{name: name, score: 0, dist: d})
 			continue
 		}
-		collected = append(collected, candidate{name: name, score: 1, dist: d})
+		// A remembered fragment of a hyphenated name (`phased` for
+		// `phased-release`) or a name buried in a longer guess.
+		if isSubstringMatch(in, name) {
+			collected = append(collected, candidate{name: name, score: 1, dist: d})
+			continue
+		}
+		if !withinThreshold(in, d) {
+			continue
+		}
+		collected = append(collected, candidate{name: name, score: 2, dist: d})
 	}
 
 	if len(collected) == 0 {
@@ -93,8 +101,7 @@ func Flags(input string, candidates []string) []string {
 		if name == "" || name == in {
 			continue
 		}
-		identifierTypo := strings.HasSuffix(name, "-id") &&
-			(withinThreshold(in, levenshtein(in, "id")) || isAdjacentTransposition(in, "id"))
+		identifierTypo := strings.HasSuffix(name, "-id") && withinThreshold(in, editDistance(in, "id"))
 		if strings.HasSuffix(name, "-"+in) || strings.HasSuffix(in, "-"+name) || identifierTypo {
 			if _, ok := seen[name]; !ok {
 				suffixMatches = append(suffixMatches, name)
@@ -112,22 +119,15 @@ func Flags(input string, candidates []string) []string {
 	return suggestions
 }
 
-func isAdjacentTransposition(a, b string) bool {
-	if len(a) != len(b) || len(a) < 2 {
+// minSubstringMatchLength keeps two-letter fragments from matching half the
+// command tree: a substring needs at least this many characters to count.
+const minSubstringMatchLength = 3
+
+func isSubstringMatch(input, name string) bool {
+	if min(len(input), len(name)) < minSubstringMatchLength {
 		return false
 	}
-	first := -1
-	for i := range len(a) {
-		if a[i] == b[i] {
-			continue
-		}
-		if first == -1 {
-			first = i
-			continue
-		}
-		return i == first+1 && a[first] == b[i] && a[i] == b[first] && a[i+1:] == b[i+1:]
-	}
-	return false
+	return strings.Contains(name, input) || strings.Contains(input, name)
 }
 
 func withinThreshold(input string, dist int) bool {
@@ -143,9 +143,10 @@ func withinThreshold(input string, dist int) bool {
 	}
 }
 
-// levenshtein computes the Levenshtein distance between two strings.
-// For our command names (ASCII, short), this is fast enough.
-func levenshtein(a, b string) int {
+// editDistance computes the optimal string alignment distance (Levenshtein
+// plus adjacent transpositions counted as one edit), so `lsit` sits one edit
+// from `list`. Command names are short ASCII, so the full matrix is cheap.
+func editDistance(a, b string) int {
 	if a == b {
 		return 0
 	}
@@ -156,42 +157,28 @@ func levenshtein(a, b string) int {
 		return len(a)
 	}
 
-	// Ensure a is the shorter string to reduce memory.
-	if len(a) > len(b) {
-		a, b = b, a
+	rows := make([][]int, len(a)+1)
+	for i := range rows {
+		rows[i] = make([]int, len(b)+1)
+		rows[i][0] = i
+	}
+	for j := 0; j <= len(b); j++ {
+		rows[0][j] = j
 	}
 
-	prev := make([]int, len(a)+1)
-	cur := make([]int, len(a)+1)
-	for i := 0; i <= len(a); i++ {
-		prev[i] = i
-	}
-
-	for j := 1; j <= len(b); j++ {
-		cur[0] = j
-		bj := b[j-1]
-		for i := 1; i <= len(a); i++ {
+	for i := 1; i <= len(a); i++ {
+		for j := 1; j <= len(b); j++ {
 			cost := 0
-			if a[i-1] != bj {
+			if a[i-1] != b[j-1] {
 				cost = 1
 			}
-			del := prev[i] + 1
-			ins := cur[i-1] + 1
-			sub := prev[i-1] + cost
-			cur[i] = min3(del, ins, sub)
+			best := min(rows[i-1][j]+1, rows[i][j-1]+1, rows[i-1][j-1]+cost)
+			if i > 1 && j > 1 && a[i-1] == b[j-2] && a[i-2] == b[j-1] {
+				best = min(best, rows[i-2][j-2]+1)
+			}
+			rows[i][j] = best
 		}
-		prev, cur = cur, prev
 	}
 
-	return prev[len(a)]
-}
-
-func min3(a, b, c int) int {
-	if a <= b && a <= c {
-		return a
-	}
-	if b <= a && b <= c {
-		return b
-	}
-	return c
+	return rows[len(a)][len(b)]
 }
