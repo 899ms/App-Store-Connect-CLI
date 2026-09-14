@@ -30,6 +30,16 @@ export ASC_PRIVATE_KEY_B64="BASE64_ENCODED_KEY"
 
 If you intentionally use config storage, set `ASC_BYPASS_KEYCHAIN=1`. In bypass mode, the active config is tried before environment fallback.
 
+### Keychain Prompts Again After Upgrading
+
+**Problem**: After upgrading `asc`, macOS asks again for access to the stored `ASC API Key` item, and "Always Allow" from the previous version does not carry over.
+
+**Cause**: macOS keychain access lists trust an application by its code-signing designated requirement. Releases before 5.3.1 were signed with a version-specific identifier (for example `asc_5.3.0_macOS_arm64`), so every upgrade looked like a new application to the keychain. Each stored profile also required its own prompt, because resolving one profile used to read every stored secret.
+
+**Solution**: Upgrade to 5.3.1 or later. Releases now share the identifier `com.rorkai.asc`, so "Always Allow" granted to one release covers later releases, and resolving a profile reads only that profile's secret. The first run of 5.3.1 still prompts once because the identifier changed; choose "Always Allow" for each stored profile you use.
+
+Builds that are not signed with the release Developer ID (for example a local `go build`) are identified by the hash of the binary, so each rebuild prompts again. Use `ASC_BYPASS_KEYCHAIN=1` with config-file credentials for those builds.
+
 ### Multiple Credential Sources Conflict
 
 **Problem**: Error message about credentials resolving from multiple sources.
