@@ -63,11 +63,11 @@ func decodeReviewIAP(resource jsonAPIResource) ReviewIAP {
 // FindReviewIAP finds a single app-scoped IAP through the private web flow.
 //
 // The caller may pass either the iris IAP resource ID (a UUID, distinct from
-// the numeric public-REST-API in-app purchase ID) or the product ID
-// (e.g. `com.example.pro.lifetime`). The product-ID match exists because
-// the public REST API surfaces a numeric ID that does not match the iris
-// resource's ID, and users typically know either the iris UUID or the
-// product ID — not both.
+// the numeric public-REST-API in-app purchase ID), the product ID
+// (e.g. `com.example.pro.lifetime`), or the exact current reference name. The
+// product-ID match exists because the public REST API surfaces a numeric ID
+// that does not match the iris resource's ID, and users typically know either
+// the iris UUID, product ID, or display name — not all three.
 func (c *Client) FindReviewIAP(ctx context.Context, appID, iapID string) (ReviewIAP, bool, error) {
 	appID = strings.TrimSpace(appID)
 	if appID == "" {
@@ -85,7 +85,8 @@ func (c *Client) FindReviewIAP(ctx context.Context, appID, iapID string) (Review
 
 	nextPath := queryPath("/apps/"+url.PathEscape(appID)+"/inAppPurchases", query)
 	visited := map[string]struct{}{}
-	var productIDMatch *ReviewIAP
+	productIDMatches := make([]ReviewIAP, 0, 1)
+	referenceNameMatches := make([]ReviewIAP, 0, 1)
 
 	for nextPath != "" {
 		if _, seen := visited[nextPath]; seen {
@@ -103,13 +104,18 @@ func (c *Client) FindReviewIAP(ctx context.Context, appID, iapID string) (Review
 			return ReviewIAP{}, false, fmt.Errorf("failed to parse review iaps response: %w", err)
 		}
 		for _, resource := range payload.Data {
+			if resourceType := strings.TrimSpace(resource.Type); !strings.EqualFold(resourceType, "inAppPurchases") {
+				return ReviewIAP{}, false, fmt.Errorf("failed to parse review iaps response: unexpected resource type %q", resource.Type)
+			}
 			decoded := decodeReviewIAP(resource)
 			if decoded.ID == iapID {
 				return decoded, true, nil
 			}
-			if productIDMatch == nil && decoded.ProductID == iapID {
-				match := decoded
-				productIDMatch = &match
+			if decoded.ProductID == iapID {
+				appendUniqueReviewIAPMatch(&productIDMatches, decoded)
+			}
+			if strings.EqualFold(strings.TrimSpace(decoded.ReferenceName), iapID) {
+				appendUniqueReviewIAPMatch(&referenceNameMatches, decoded)
 			}
 		}
 
@@ -126,11 +132,50 @@ func (c *Client) FindReviewIAP(ctx context.Context, appID, iapID string) (Review
 		}
 	}
 
-	if productIDMatch != nil {
-		return *productIDMatch, true, nil
+	if len(productIDMatches) > 1 {
+		return ReviewIAP{}, false, ambiguousReviewIAPSelectorError(iapID, "product ID", productIDMatches)
+	}
+	if len(productIDMatches) == 1 {
+		return productIDMatches[0], true, nil
+	}
+	if len(referenceNameMatches) > 1 {
+		return ReviewIAP{}, false, ambiguousReviewIAPSelectorError(iapID, "reference name", referenceNameMatches)
+	}
+	if len(referenceNameMatches) == 1 {
+		return referenceNameMatches[0], true, nil
 	}
 
 	return ReviewIAP{}, false, nil
+}
+
+func appendUniqueReviewIAPMatch(matches *[]ReviewIAP, candidate ReviewIAP) {
+	for _, existing := range *matches {
+		if strings.TrimSpace(existing.ID) == strings.TrimSpace(candidate.ID) {
+			return
+		}
+	}
+	*matches = append(*matches, candidate)
+}
+
+func ambiguousReviewIAPSelectorError(selector, field string, matches []ReviewIAP) error {
+	lines := make([]string, 0, len(matches))
+	for _, match := range matches {
+		line := strings.TrimSpace(match.ID)
+		if productID := strings.TrimSpace(match.ProductID); productID != "" {
+			line += ", productId=" + productID
+		}
+		if referenceName := strings.TrimSpace(match.ReferenceName); referenceName != "" {
+			line += ", referenceName=" + referenceName
+		}
+		lines = append(lines, line)
+	}
+	return fmt.Errorf(
+		"%q matches %d in-app purchases by %s:\n  %s\nUse the Iris resource ID to disambiguate",
+		selector,
+		len(matches),
+		field,
+		strings.Join(lines, "\n  "),
+	)
 }
 
 // CreateInAppPurchaseSubmission attaches a non-renewing in-app purchase to the

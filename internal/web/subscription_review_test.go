@@ -332,6 +332,27 @@ func TestListReviewSubscriptionsHandlesMissingIncludedSubscriptionResource(t *te
 	}
 }
 
+func TestListReviewSubscriptionsRejectsUnexpectedGroupResourceType(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"data": [{
+				"id": "app-1",
+				"type": "apps",
+				"relationships": {
+					"subscriptions": {"data": [{"type": "subscriptions", "id": "sub-1"}]}
+				}
+			}]
+		}`))
+	}))
+	defer server.Close()
+
+	_, err := testWebClient(server).ListReviewSubscriptions(context.Background(), "app-123")
+	if err == nil || !strings.Contains(err.Error(), "unexpected resource type") {
+		t.Fatalf("expected unexpected-group-type error, got %v", err)
+	}
+}
+
 func TestCreateSubscriptionSubmissionFallsBackToRequestedIDWhenRelationshipMissing(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/subscriptionSubmissions" {
@@ -365,5 +386,52 @@ func TestCreateSubscriptionSubmissionFallsBackToRequestedIDWhenRelationshipMissi
 	}
 	if !got.SubmitWithNextAppStoreVersion {
 		t.Fatalf("expected submitWithNextAppStoreVersion true, got %#v", got)
+	}
+}
+
+func TestCreateSubscriptionSubmissionPreservesSanitizedPortalReason(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"errors":[{"code":"STATE_ERROR","title":"Attachment refused","detail":"The subscription is not ready\u001b[31m"}]}`))
+	}))
+	defer server.Close()
+
+	_, err := testWebClient(server).CreateSubscriptionSubmission(context.Background(), "sub-1")
+	if err == nil {
+		t.Fatal("expected attachment refusal")
+	}
+	if !strings.Contains(err.Error(), "status 422") {
+		t.Fatalf("expected portal status in error, got %q", err)
+	}
+	if !strings.Contains(err.Error(), "Attachment refused: The subscription is not ready[31m") {
+		t.Fatalf("expected sanitized portal reason in error, got %q", err)
+	}
+	if strings.Contains(err.Error(), "\x1b") {
+		t.Fatalf("portal reason contains terminal escape sequence: %q", err)
+	}
+}
+
+func TestCreateSubscriptionSubmissionRejectsMissingSubmissionID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"type":"subscriptionSubmissions","attributes":{"submitWithNextAppStoreVersion":true}}}`))
+	}))
+	defer server.Close()
+
+	if _, err := testWebClient(server).CreateSubscriptionSubmission(context.Background(), "sub-1"); err == nil || !strings.Contains(err.Error(), "missing submission id") {
+		t.Fatalf("expected missing-submission-id error, got %v", err)
+	}
+}
+
+func TestCreateSubscriptionSubmissionRejectsUnexpectedResourceType(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"id":"submission-1","type":"unexpectedResources"}}`))
+	}))
+	defer server.Close()
+
+	if _, err := testWebClient(server).CreateSubscriptionSubmission(context.Background(), "sub-1"); err == nil || !strings.Contains(err.Error(), "unexpected resource type") {
+		t.Fatalf("expected unexpected-type error, got %v", err)
 	}
 }

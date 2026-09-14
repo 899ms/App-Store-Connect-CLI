@@ -111,6 +111,11 @@ func (c *Client) ListReviewSubscriptions(ctx context.Context, appID string) ([]R
 		if err := json.Unmarshal(responseBody, &payload); err != nil {
 			return nil, fmt.Errorf("failed to parse review subscriptions response: %w", err)
 		}
+		for _, resource := range payload.Data {
+			if resourceType := strings.TrimSpace(resource.Type); !strings.EqualFold(resourceType, "subscriptionGroups") {
+				return nil, fmt.Errorf("failed to parse review subscriptions response: unexpected resource type %q", resource.Type)
+			}
+		}
 		allResources = append(allResources, payload.Data...)
 		allIncluded = append(allIncluded, payload.Included...)
 
@@ -169,6 +174,12 @@ func (c *Client) CreateSubscriptionSubmission(ctx context.Context, subscriptionI
 	}
 	if err := json.Unmarshal(responseBody, &payload); err != nil {
 		return ReviewSubscriptionSubmission{}, fmt.Errorf("failed to parse subscription submission response: %w", err)
+	}
+	if strings.TrimSpace(payload.Data.ID) == "" {
+		return ReviewSubscriptionSubmission{}, fmt.Errorf("failed to parse subscription submission response: missing submission id")
+	}
+	if payload.Data.Type != "" && payload.Data.Type != "subscriptionSubmissions" {
+		return ReviewSubscriptionSubmission{}, fmt.Errorf("failed to parse subscription submission response: unexpected resource type %q", payload.Data.Type)
 	}
 
 	result := ReviewSubscriptionSubmission{
