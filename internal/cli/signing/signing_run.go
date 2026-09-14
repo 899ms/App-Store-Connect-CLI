@@ -316,6 +316,9 @@ func InspectPKCS12Identity(ctx context.Context, options PKCS12IdentityOptions) (
 	if strings.TrimSpace(options.IdentityPath) == "" {
 		return PKCS12IdentityInfo{}, shared.NewValidationError(fmt.Errorf("inspect PKCS#12 identity: identity path is required"))
 	}
+	if ctx == nil {
+		return PKCS12IdentityInfo{}, shared.NewValidationError(fmt.Errorf("inspect PKCS#12 identity: context is required"))
+	}
 	if err := ctx.Err(); err != nil {
 		return PKCS12IdentityInfo{}, err
 	}
@@ -889,11 +892,9 @@ func inspectSigningRunInputs(identityData, identityPassword, profileData []byte,
 	if err != nil {
 		return nil, err
 	}
-	if entitlementTeam, exists := profile.Entitlements["com.apple.developer.team-identifier"]; exists {
-		value, ok := entitlementTeam.(string)
-		if !ok || strings.TrimSpace(value) != teamID {
-			return nil, fmt.Errorf("provisioning profile entitlement team identifier does not match TeamIdentifier")
-		}
+	entitlementTeam, ok := profile.Entitlements["com.apple.developer.team-identifier"].(string)
+	if !ok || strings.TrimSpace(entitlementTeam) != teamID {
+		return nil, fmt.Errorf("provisioning profile entitlement team identifier does not match TeamIdentifier")
 	}
 	if !slices.Contains(certificate.Subject.OrganizationalUnit, teamID) {
 		return nil, fmt.Errorf("identity certificate organizational unit does not contain profile team %q", teamID)
@@ -1044,40 +1045,35 @@ func signingRunTeamID(values []string) (string, error) {
 func signingRunBundleID(profile signingRunMobileProvision, teamID string) (string, error) {
 	value, ok := profile.Entitlements["application-identifier"].(string)
 	if !ok || strings.TrimSpace(value) == "" {
-		value, ok = profile.Entitlements["com.apple.application-identifier"].(string)
-	}
-	if !ok || strings.TrimSpace(value) == "" {
 		return "", fmt.Errorf("provisioning profile application identifier is missing")
 	}
 	applicationID := strings.TrimSpace(value)
+	if alternate, exists := profile.Entitlements["com.apple.application-identifier"]; exists {
+		alternateValue, ok := alternate.(string)
+		if !ok || strings.TrimSpace(alternateValue) != applicationID {
+			return "", fmt.Errorf("provisioning profile application identifiers are contradictory")
+		}
+	}
 	prefixes, err := signingRunApplicationIdentifierPrefixes(profile.ApplicationIdentifierPrefix, teamID)
 	if err != nil {
 		return "", err
 	}
-	slices.SortFunc(prefixes, func(left, right string) int { return len(right) - len(left) })
-	var bundleID string
-	for _, prefix := range prefixes {
-		prefix = strings.TrimSpace(prefix)
-		if prefix != "" && strings.HasPrefix(applicationID, prefix+".") {
-			bundleID = strings.TrimPrefix(applicationID, prefix+".")
-			break
-		}
+	prefix := prefixes[0]
+	if !strings.HasPrefix(applicationID, prefix+".") {
+		return "", fmt.Errorf("provisioning profile application identifier does not match its declared prefix")
 	}
+	bundleID := strings.TrimPrefix(applicationID, prefix+".")
 	if !validSigningRunBundlePattern(bundleID) {
 		return "", fmt.Errorf("provisioning profile bundle identifier pattern %q is invalid", bundleID)
 	}
 	return bundleID, nil
 }
 
-func signingRunApplicationIdentifierPrefixes(values []string, teamID string) ([]string, error) {
-	if len(values) == 0 {
-		if err := validateSigningResignTeamID(teamID); err != nil {
-			return nil, fmt.Errorf("provisioning profile: %w", err)
-		}
-		return []string{teamID}, nil
+func signingRunApplicationIdentifierPrefixes(values []string, _ string) ([]string, error) {
+	if len(values) != 1 {
+		return nil, fmt.Errorf("provisioning profile must declare exactly one application identifier prefix; duplicate or missing declarations are invalid")
 	}
-	seen := make(map[string]struct{}, len(values))
-	prefixes := make([]string, 0, len(values))
+	prefixes := make([]string, 0, 1)
 	for _, value := range values {
 		value = strings.TrimSpace(value)
 		if value == "" {
@@ -1086,10 +1082,6 @@ func signingRunApplicationIdentifierPrefixes(values []string, teamID string) ([]
 		if err := validateSigningResignTeamID(value); err != nil {
 			return nil, fmt.Errorf("provisioning profile application identifier prefix: %w", err)
 		}
-		if _, exists := seen[value]; exists {
-			return nil, fmt.Errorf("provisioning profile contains duplicate application identifier prefixes")
-		}
-		seen[value] = struct{}{}
 		prefixes = append(prefixes, value)
 	}
 	return prefixes, nil

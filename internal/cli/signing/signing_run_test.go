@@ -124,6 +124,31 @@ func TestSigningRunProfileIdentifiersRequireUniqueValues(t *testing.T) {
 	if got, err := signingRunBundleID(profile, "TEAM12345"); err != nil || got != "com.example.app" {
 		t.Fatalf("legacy prefix bundle ID = %q, error = %v, want accepted legacy prefix", got, err)
 	}
+	missingPrefix := profile
+	missingPrefix.ApplicationIdentifierPrefix = nil
+	if _, err := signingRunBundleID(missingPrefix, "TEAM12345"); !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("missing prefix error = %v, want exact-one rejection", err)
+	}
+	contradictory := profile
+	contradictory.Entitlements = map[string]any{
+		"application-identifier":           "LEGACY.com.example.app",
+		"com.apple.application-identifier": "OTHER.com.example.app",
+	}
+	if _, err := signingRunBundleID(contradictory, "TEAM12345"); !strings.Contains(err.Error(), "contradictory") {
+		t.Fatalf("contradictory identifiers error = %v, want rejection", err)
+	}
+	missingPrimary := profile
+	missingPrimary.Entitlements = map[string]any{"com.apple.application-identifier": "LEGACY.com.example.app"}
+	if _, err := signingRunBundleID(missingPrimary, "TEAM12345"); !strings.Contains(err.Error(), "application identifier is missing") {
+		t.Fatalf("missing primary identifier error = %v, want rejection", err)
+	}
+}
+
+func TestInspectPKCS12IdentityRejectsNilContext(t *testing.T) {
+	_, err := InspectPKCS12Identity(signingRunNilContext(), PKCS12IdentityOptions{IdentityPath: "identity.p12"})
+	if err == nil || !strings.Contains(err.Error(), "context is required") {
+		t.Fatalf("InspectPKCS12Identity() error = %v, want required context", err)
+	}
 }
 
 func TestVerifySigningRunProfileTrustRejectsMultipleSigners(t *testing.T) {
@@ -515,12 +540,16 @@ func TestRunSigningEnvironmentPropagatesEarlyTempCleanupFailure(t *testing.T) {
 	}
 }
 
+// signingRunNilContext supplies a typed nil solely to exercise the production
+// nil-context guards without triggering SA1012 on the call sites.
+func signingRunNilContext() context.Context { return nil }
+
 func TestSigningRunRejectsNilContext(t *testing.T) {
-	if err := executeSigningOperation(nil, signingRunOptions{}, func(context.Context) error { return nil }); !strings.Contains(err.Error(), "context is required") {
+	if err := executeSigningOperation(signingRunNilContext(), signingRunOptions{}, func(context.Context) error { return nil }); !strings.Contains(err.Error(), "context is required") {
 		t.Fatalf("executeSigningOperation() error = %v, want required context", err)
 	}
 	deps := fakeSigningRunDeps(&[]string{})
-	if _, err := runSigningEnvironment(nil, deps, signingRunOptions{Child: []string{"tool"}}, nil, nil, func(context.Context) error { return nil }); !strings.Contains(err.Error(), "context is required") {
+	if _, err := runSigningEnvironment(signingRunNilContext(), deps, signingRunOptions{Child: []string{"tool"}}, nil, nil, func(context.Context) error { return nil }); !strings.Contains(err.Error(), "context is required") {
 		t.Fatalf("runSigningEnvironment() error = %v, want required context", err)
 	}
 }
@@ -907,6 +936,53 @@ func TestSigningRunCommandThreadsFlagsAndChildArgv(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("options = %+v, want %+v", got, want)
+	}
+}
+
+func TestSigningRunCommandPreservesChildExitAndReceipt(t *testing.T) {
+	previous := executeSigningRunFn
+	var got signingRunOptions
+	executeSigningRunFn = func(_ context.Context, options signingRunOptions) error {
+		got = options
+		return withSigningRunReceipt(io.Discard, options.ReceiptPath, func() (signingRunReceipt, error) {
+			return signingRunReceipt{
+				SchemaVersion: 1,
+				Purpose:       signingRunPurposeReleaseTesting,
+				Outcome:       "failed",
+				ChildExitCode: 42,
+			}, shared.NewProcessExitError(42)
+		})
+	}
+	t.Cleanup(func() { executeSigningRunFn = previous })
+
+	receiptPath := filepath.Join(t.TempDir(), "receipt.json")
+	command := SigningRunCommand()
+	command.FlagSet.SetOutput(io.Discard)
+	if err := command.Parse([]string{
+		"--identity", "App.p12",
+		"--profile", "App.mobileprovision",
+		"--receipt", receiptPath,
+		"--", "child-tool", "--child-flag",
+	}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	err := command.Run(context.Background())
+	if code, ok := shared.ProcessExitCode(err); !ok || code != 42 {
+		t.Fatalf("process exit = %d, %t; want 42, true; error = %v", code, ok, err)
+	}
+	if !reflect.DeepEqual(got.Child, []string{"child-tool", "--child-flag"}) {
+		t.Fatalf("child argv = %#v, want child command and arguments", got.Child)
+	}
+	receiptData, readErr := os.ReadFile(receiptPath)
+	if readErr != nil {
+		t.Fatalf("read receipt: %v", readErr)
+	}
+	var receipt signingRunReceipt
+	if err := json.Unmarshal(receiptData, &receipt); err != nil {
+		t.Fatalf("decode receipt: %v", err)
+	}
+	if receipt.ChildExitCode != 42 || receipt.Outcome != "failed" {
+		t.Fatalf("receipt = %+v, want failed child exit 42", receipt)
 	}
 }
 

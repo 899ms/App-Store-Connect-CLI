@@ -37,13 +37,14 @@ const (
 	signingUtilityDiagnosticLimit = 4 << 10
 	signingRunChildWaitDelay      = 5 * time.Second
 	signingRunLockPollInterval    = 50 * time.Millisecond
+	signingRunXcodebuildPath      = "/usr/bin/xcodebuild"
 )
 
 var (
 	signingRunActiveXcodeMajorVersion     = activeSigningRunXcodeMajorVersion
 	signingRunCommandContext              = exec.CommandContext
 	signingRunProfileInstallDirFn         = signingRunProfileInstallDir
-	signingRunStateDirFn                  = signingRunStateDir
+	signingRunStateAnchorFn               = openSigningRunStateAnchor
 	signingRunRecoveryRemoveSearchEntryFn = removeKeychainSearchEntry
 	signingRunRecoveryDeleteKeychainFn    = deleteSigningRunKeychain
 	signingRunKillProcessGroupFn          = func(pid int, signal syscall.Signal) error {
@@ -174,36 +175,65 @@ func removeSigningRunTempDir(path string) error {
 	return parented.Remove(filepath.Base(cleanPath))
 }
 
-func signingRunStateDir() (string, error) {
+type signingRunStateAnchor struct {
+	root     rootfs.Root
+	relative string
+}
+
+func openSigningRunStateAnchor() (*signingRunStateAnchor, error) {
 	cacheDir, err := os.UserCacheDir()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	cacheRoot, err := rootfs.New(cacheDir)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	defer cacheRoot.Close()
 	const relative = "asc/signing-run/v1"
 	if err := cacheRoot.MkdirAll(relative, 0o700); err != nil {
-		return "", err
+		_ = cacheRoot.Close()
+		return nil, err
 	}
-	dir, err := cacheRoot.Resolve(relative)
+	_, err = cacheRoot.Resolve(relative)
 	if err != nil {
-		return "", err
+		_ = cacheRoot.Close()
+		return nil, err
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return "", err
+	stateDir, err := cacheRoot.OpenDir(relative)
+	if err != nil {
+		_ = cacheRoot.Close()
+		return nil, err
 	}
-	return dir, nil
+	chmodErr := stateDir.Chmod(0o700)
+	closeErr := stateDir.Close()
+	if chmodErr != nil || closeErr != nil {
+		_ = cacheRoot.Close()
+		return nil, errors.Join(chmodErr, closeErr)
+	}
+	// Keep one cache-root anchor for every lock/journal operation; callers must
+	// not reopen the state directory through a path after this function returns.
+	return &signingRunStateAnchor{root: cacheRoot, relative: relative}, nil
 }
 
-func signingRunJournalPath() (string, error) {
-	dir, err := signingRunStateDirFn()
-	if err != nil {
-		return "", err
+func (anchor *signingRunStateAnchor) relativePath(name string) string {
+	if anchor.relative == "." || anchor.relative == "" {
+		return name
 	}
-	return filepath.Join(dir, "journal.json"), nil
+	return filepath.Join(anchor.relative, name)
+}
+
+func (anchor *signingRunStateAnchor) removeFile(name string) error {
+	file, err := anchor.root.OpenFile(anchor.relativePath(name))
+	if err != nil {
+		return err
+	}
+	info, statErr := file.Stat()
+	data, readErr := io.ReadAll(io.LimitReader(file, signingRunDiagnosticLimit+1))
+	closeErr := file.Close()
+	if statErr != nil || readErr != nil || closeErr != nil {
+		return errors.Join(statErr, readErr, closeErr)
+	}
+	return anchor.root.RemoveFileIfSame(anchor.relativePath(name), info, data)
 }
 
 func writeSigningRunJournal(journal signingRunJournal, overwrite bool) error {
@@ -212,60 +242,47 @@ func writeSigningRunJournal(journal signingRunJournal, overwrite bool) error {
 		return err
 	}
 	data = append(data, '\n')
-	path, err := signingRunJournalPath()
+	anchor, err := signingRunStateAnchorFn()
 	if err != nil {
 		return err
 	}
-	_, err = shared.SafeWriteFileNoSymlink(
-		path,
-		0o600,
-		overwrite,
-		".journal-*",
-		".journal-backup-*",
-		func(file *os.File) (int64, error) {
-			written, writeErr := file.Write(data)
-			return int64(written), writeErr
-		},
-	)
-	return err
+	defer anchor.root.Close()
+	if !overwrite {
+		return anchor.root.CreateNewFile(anchor.relativePath("journal.json"), data, 0o600)
+	}
+	return anchor.root.WriteFile(anchor.relativePath("journal.json"), data, 0o600)
 }
 
-func removeSigningRunJournal() error {
-	path, err := signingRunJournalPath()
-	if err != nil {
-		return err
+func removeSigningRunJournalWithAnchor(anchor *signingRunStateAnchor) error {
+	if anchor == nil {
+		return fmt.Errorf("remove signing journal: state anchor is required")
 	}
-	parentRoot, err := rootfs.New(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	defer parentRoot.Close()
-	rooted, err := parentRoot.OpenRoot()
-	if err != nil {
-		return err
-	}
-	defer rooted.Close()
-	err = rooted.Remove(filepath.Base(path))
+	err := anchor.removeFile("journal.json")
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	return err
 }
 
+func removeSigningRunJournal() error {
+	anchor, err := signingRunStateAnchorFn()
+	if err != nil {
+		return err
+	}
+	defer anchor.root.Close()
+	return removeSigningRunJournalWithAnchor(anchor)
+}
+
 func recoverSigningRunJournal(ctx context.Context) error {
 	if ctx == nil {
 		return fmt.Errorf("recover signing environment: context is required")
 	}
-	path, err := signingRunJournalPath()
+	anchor, err := signingRunStateAnchorFn()
 	if err != nil {
 		return err
 	}
-	stateRoot, err := rootfs.New(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	defer stateRoot.Close()
-	file, err := stateRoot.OpenFile(filepath.Base(path))
+	defer anchor.root.Close()
+	file, err := anchor.root.OpenFile(anchor.relativePath("journal.json"))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -323,7 +340,7 @@ func recoverSigningRunJournal(ctx context.Context) error {
 	if err := removeSigningRunTempDir(journal.TempDir); err != nil {
 		return err
 	}
-	return removeSigningRunJournal()
+	return removeSigningRunJournalWithAnchor(anchor)
 }
 
 func validateSigningRunJournal(journal signingRunJournal) error {
@@ -382,22 +399,51 @@ func acquireSigningRunLock(ctx context.Context) (func() error, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("acquire signing environment lock: context is required")
 	}
-	dir, err := signingRunStateDirFn()
+	anchor, err := signingRunStateAnchorFn()
 	if err != nil {
 		return nil, err
 	}
-	lockPath := filepath.Join(dir, "lock")
-	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
+	lockName := anchor.relativePath("lock")
+	file, err := anchor.root.OpenFile(lockName)
+	if errors.Is(err, os.ErrNotExist) {
+		rooted, rootErr := anchor.root.OpenRoot()
+		if rootErr != nil {
+			_ = anchor.root.Close()
+			return nil, rootErr
+		}
+		file, err = secureopen.OpenNewFileNoFollowInRoot(rooted, lockName, 0o600)
+		closeRootErr := rooted.Close()
+		if errors.Is(err, os.ErrExist) {
+			file, err = anchor.root.OpenFile(lockName)
+		}
+		if err == nil && closeRootErr != nil {
+			_ = file.Close()
+			err = closeRootErr
+		}
+	}
 	if err != nil {
+		_ = anchor.root.Close()
 		return nil, err
 	}
 	for {
 		err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
 		if err == nil {
-			return func() error { return errors.Join(unix.Flock(int(file.Fd()), unix.LOCK_UN), file.Close()) }, nil
+			var releaseOnce sync.Once
+			var releaseErr error
+			return func() error {
+				releaseOnce.Do(func() {
+					releaseErr = errors.Join(
+						unix.Flock(int(file.Fd()), unix.LOCK_UN),
+						file.Close(),
+						anchor.root.Close(),
+					)
+				})
+				return releaseErr
+			}, nil
 		}
 		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) {
 			_ = file.Close()
+			_ = anchor.root.Close()
 			return nil, err
 		}
 		timer := time.NewTimer(signingRunLockPollInterval)
@@ -405,6 +451,7 @@ func acquireSigningRunLock(ctx context.Context) (func() error, error) {
 		case <-ctx.Done():
 			timer.Stop()
 			_ = file.Close()
+			_ = anchor.root.Close()
 			return nil, ctx.Err()
 		case <-timer.C:
 		}
@@ -790,10 +837,34 @@ func removeSigningRunStagedProfile(path string, device, inode uint64) error {
 		return err
 	}
 	defer installRoot.Close()
-	file, err := installRoot.OpenFile(filepath.Base(path))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
+	rooted, err := installRoot.OpenRoot()
+	if err != nil {
+		return err
 	}
+	defer rooted.Close()
+	name := filepath.Base(path)
+	if err := verifySigningRunStagedProfileEntry(rooted, name, device, inode); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	quarantineName := ".asc-signing-run-profile-remove-" + name
+	if err := secureopen.RenameNoReplaceInRoot(rooted, name, quarantineName); err != nil {
+		return fmt.Errorf("quarantine staged profile: %w", err)
+	}
+	if err := verifySigningRunStagedProfileEntry(rooted, quarantineName, device, inode); err != nil {
+		verificationErr := fmt.Errorf("refusing to remove staged profile because its file identity changed during cleanup: %w", err)
+		if restoreErr := secureopen.RenameNoReplaceInRoot(rooted, quarantineName, name); restoreErr != nil {
+			return errors.Join(verificationErr, fmt.Errorf("restore staged profile: %w", restoreErr))
+		}
+		return verificationErr
+	}
+	return rooted.Remove(quarantineName)
+}
+
+func verifySigningRunStagedProfileEntry(rooted *os.Root, name string, device, inode uint64) error {
+	file, err := secureopen.OpenExistingNoFollowInRoot(rooted, name)
 	if err != nil {
 		return err
 	}
@@ -803,15 +874,10 @@ func removeSigningRunStagedProfile(path string, device, inode uint64) error {
 		return errors.Join(statErr, closeErr)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || uint64(stat.Dev) != device || stat.Ino != inode {
+	if !ok || !info.Mode().IsRegular() || uint64(stat.Dev) != device || uint64(stat.Ino) != inode {
 		return fmt.Errorf("refusing to remove staged profile because its file identity changed")
 	}
-	rooted, err := installRoot.OpenRoot()
-	if err != nil {
-		return err
-	}
-	defer rooted.Close()
-	return rooted.Remove(filepath.Base(path))
+	return nil
 }
 
 var signingRunXcodeVersionPattern = regexp.MustCompile(`(?m)^Xcode[\t ]+([0-9]+)(?:[.][0-9]+)*(?:[\t ].*)?$`)
@@ -823,7 +889,7 @@ func activeSigningRunXcodeMajorVersion(ctx context.Context) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	cmd := signingRunCommandContext(ctx, "xcodebuild", "-version")
+	cmd := signingRunCommandContext(ctx, signingRunXcodebuildPath, "-version")
 	cmd.Env = SanitizedChildEnvironment(os.Environ())
 	stdout := &limitedSigningBuffer{limit: signingRunDiagnosticLimit}
 	stderr := &limitedSigningBuffer{limit: signingRunDiagnosticLimit}

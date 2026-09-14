@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/rootfs"
 )
 
 func TestParseKeychainSearchList(t *testing.T) {
@@ -201,8 +202,29 @@ func TestSigningRunProfileInstallDirDistinguishesUnavailableXcode(t *testing.T) 
 	}
 }
 
+func TestActiveSigningRunXcodeUsesTrustedAbsolutePath(t *testing.T) {
+	previous := signingRunCommandContext
+	var gotPath string
+	signingRunCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		gotPath = name
+		return exec.CommandContext(ctx, "/usr/bin/printf", "Xcode 16.0\\n")
+	}
+	t.Cleanup(func() { signingRunCommandContext = previous })
+
+	major, err := activeSigningRunXcodeMajorVersion(context.Background())
+	if err != nil {
+		t.Fatalf("activeSigningRunXcodeMajorVersion() error = %v", err)
+	}
+	if major != 16 {
+		t.Fatalf("major = %d, want 16", major)
+	}
+	if gotPath != signingRunXcodebuildPath || !filepath.IsAbs(gotPath) {
+		t.Fatalf("xcodebuild path = %q, want trusted absolute %q", gotPath, signingRunXcodebuildPath)
+	}
+}
+
 func TestSigningRunProfileInstallDirRejectsNilContext(t *testing.T) {
-	if _, err := signingRunProfileInstallDir(nil); !strings.Contains(err.Error(), "context is required") {
+	if _, err := signingRunProfileInstallDir(signingRunNilContext()); !strings.Contains(err.Error(), "context is required") {
 		t.Fatalf("error = %v, want required context", err)
 	}
 }
@@ -301,14 +323,20 @@ func TestRecoverSigningRunJournalRemovesCodesignProbeCrashResidue(t *testing.T) 
 		t.Fatalf("write crash residue: %v", err)
 	}
 
-	previousStateDir := signingRunStateDirFn
+	previousStateAnchor := signingRunStateAnchorFn
 	previousRemoveSearch := signingRunRecoveryRemoveSearchEntryFn
 	previousDeleteKeychain := signingRunRecoveryDeleteKeychainFn
-	signingRunStateDirFn = func() (string, error) { return stateDir, nil }
+	signingRunStateAnchorFn = func() (*signingRunStateAnchor, error) {
+		stateRoot, rootErr := rootfs.New(stateDir)
+		if rootErr != nil {
+			return nil, rootErr
+		}
+		return &signingRunStateAnchor{root: stateRoot, relative: "."}, nil
+	}
 	signingRunRecoveryRemoveSearchEntryFn = func(context.Context, string) error { return nil }
 	signingRunRecoveryDeleteKeychainFn = func(context.Context, string) error { return nil }
 	t.Cleanup(func() {
-		signingRunStateDirFn = previousStateDir
+		signingRunStateAnchorFn = previousStateAnchor
 		signingRunRecoveryRemoveSearchEntryFn = previousRemoveSearch
 		signingRunRecoveryDeleteKeychainFn = previousDeleteKeychain
 	})
@@ -468,6 +496,28 @@ func TestRemoveSigningRunProfileRefusesReplacement(t *testing.T) {
 	}
 	if err := removeSigningRunProfile(installed); err == nil || !strings.Contains(err.Error(), "file identity changed") {
 		t.Fatalf("error = %v, want file identity refusal", err)
+	}
+}
+
+func TestRemoveSigningRunStagedProfileQuarantinesBeforeRemoval(t *testing.T) {
+	installDir := t.TempDir()
+	path := filepath.Join(installDir, ".asc-signing-run-profile-staged")
+	if err := os.WriteFile(path, []byte("staged-profile"), 0o600); err != nil {
+		t.Fatalf("write staged profile: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat staged profile: %v", err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatal("staged profile has no platform file identity")
+	}
+	if err := removeSigningRunStagedProfile(path, uint64(stat.Dev), uint64(stat.Ino)); err != nil {
+		t.Fatalf("removeSigningRunStagedProfile() error: %v", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("staged profile stat error = %v, want not exist", err)
 	}
 }
 

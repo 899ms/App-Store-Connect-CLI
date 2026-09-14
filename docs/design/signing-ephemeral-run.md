@@ -43,9 +43,11 @@ All input validation completes before local signing state changes:
   bundle pattern and registered devices, and not be an enterprise or development
   profile (exact target matching remains the exporter/orchestrator's job);
 - the profile must embed the identity certificate, and its team identifier must
-  match the certificate organizational unit; duplicate team or application
-  identifier-prefix declarations are rejected, while legacy prefixes may differ
-  from the team identifier when the application identifier uses that prefix.
+  match the certificate organizational unit; exactly one TeamIdentifier value,
+  team entitlement, and application-identifier prefix are required. The primary
+  and alternate application-identifier entitlements must agree. Duplicate or
+  missing declarations are rejected, while a legacy prefix may differ from the
+  team identifier when the application identifier uses that prefix.
 
 The command creates an unpredictable mode-0700 temporary directory and a
 dedicated keychain with an in-memory random password. The identity import is
@@ -75,7 +77,8 @@ for the PKCS#12 library and copies inside Go, C, Security.framework, or the
 operating system are immutable or outside ASC's direct control.
 
 The profile is installed at Xcode's version-appropriate provisioning profile
-path only if no file exists for that UUID. Directory discovery and installation
+path only if no file exists for that UUID. Xcode is discovered through the
+trusted absolute `/usr/bin/xcodebuild` path; directory discovery and installation
 honor cancellation before touching the profile directory. An identical
 pre-existing profile is reused and left untouched; a different file at that path
 is a hard conflict.
