@@ -16,6 +16,8 @@ import (
 
 const iapReviewScreenshotPollInterval = 2 * time.Second
 
+const iapReviewScreenshotFileDeprecationWarning = "Warning: `--file` is deprecated and unsupported for `asc iap review-screenshots update`; use `asc iap review-screenshots create --iap-id \"IAP_ID\" --file \"./review.png\"` for a replacement upload, then delete the old screenshot, or use `--checksum` and/or `--uploaded` for PATCH updates."
+
 // IAPReviewScreenshotsCommand returns the review screenshots command group.
 func IAPReviewScreenshotsCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("review-screenshots", flag.ExitOnError)
@@ -209,6 +211,8 @@ func IAPReviewScreenshotsUpdateCommand() *ffcli.Command {
 	checksum := fs.String("checksum", "", "Source file checksum (MD5)")
 	var uploaded shared.OptionalBool
 	fs.Var(&uploaded, "uploaded", "Mark upload complete: true or false")
+	fs.String("file", "", "[deprecated] Use --checksum and/or --uploaded; upload replacements with create")
+	shared.HideFlagFromHelp(fs.Lookup("file"))
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -230,6 +234,16 @@ Examples:
 			if id == "" {
 				fmt.Fprintln(os.Stderr, "Error: --screenshot-id is required")
 				return shared.MissingRequiredUsageError("--screenshot-id")
+			}
+			legacyFileProvided := false
+			fs.Visit(func(f *flag.Flag) {
+				if f.Name == "file" {
+					legacyFileProvided = true
+				}
+			})
+			if legacyFileProvided {
+				fmt.Fprintln(os.Stderr, iapReviewScreenshotFileDeprecationWarning)
+				return shared.UsageError("`--file` is unsupported for `asc iap review-screenshots update`; use `--checksum` and/or `--uploaded`")
 			}
 
 			checksumValue := strings.TrimSpace(*checksum)

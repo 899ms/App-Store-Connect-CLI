@@ -287,6 +287,43 @@ func TestIAPReviewScreenshotsUpdateTreatsBlankChecksumAsMissing(t *testing.T) {
 	}
 }
 
+func TestIAPReviewScreenshotsUpdateRejectsDeprecatedFileBeforeRequest(t *testing.T) {
+	setupAuth(t)
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	requestCount := 0
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requestCount++
+		t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
+		return nil, nil
+	})
+
+	root := RootCommand("1.2.3")
+	root.FlagSet.SetOutput(io.Discard)
+	var runErr error
+	_, stderr := captureOutput(t, func() {
+		if err := root.Parse([]string{
+			"iap", "review-screenshots", "update",
+			"--screenshot-id", "shot-1",
+			"--file", "./review.png",
+		}); err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+		runErr = root.Run(context.Background())
+	})
+	if runErr == nil || !errors.Is(runErr, flag.ErrHelp) {
+		t.Fatalf("expected usage error, got %v", runErr)
+	}
+	if !strings.Contains(stderr, "Warning: `--file` is deprecated and unsupported") || !strings.Contains(stderr, "Error: `--file` is unsupported") {
+		t.Fatalf("expected deprecation and migration diagnostics, got %q", stderr)
+	}
+	if requestCount != 0 {
+		t.Fatalf("expected no requests, got %d", requestCount)
+	}
+}
+
 func TestIAPReviewScreenshotsUpdateRejectsInvalidUploadedFlag(t *testing.T) {
 	command := exec.Command(os.Args[0], "-test.run=TestIAPReviewScreenshotsUpdateInvalidUploadedFlagHelper", "--", "iap", "review-screenshots", "update", "--screenshot-id", "shot-1", "--uploaded", "maybe")
 	command.Env = append(os.Environ(), "ASC_IAP_REVIEW_SCREENSHOT_FLAG_HELPER=1", "ASC_BYPASS_KEYCHAIN=1")
@@ -294,8 +331,8 @@ func TestIAPReviewScreenshotsUpdateRejectsInvalidUploadedFlag(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected invalid --uploaded to fail")
 	}
-	exitErr, ok := err.(*exec.ExitError)
-	if !ok {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
 		t.Fatalf("expected process exit error, got %v", err)
 	}
 	if exitErr.ExitCode() != 2 {
