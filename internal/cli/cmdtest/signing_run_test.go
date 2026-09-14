@@ -11,7 +11,7 @@ import (
 	rootcmd "github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
 )
 
-func TestSigningRunUnsupportedPlatformRendersStderrAndUsageExit(t *testing.T) {
+func TestSigningRunUnsupportedPlatformRendersStderrAndErrorExit(t *testing.T) {
 	root := RootCommand("test")
 	root.FlagSet.SetOutput(io.Discard)
 	args := []string{
@@ -31,8 +31,8 @@ func TestSigningRunUnsupportedPlatformRendersStderrAndUsageExit(t *testing.T) {
 	if runErr == nil || !strings.Contains(runErr.Error(), "supported only on macOS") {
 		t.Fatalf("error = %v, want unsupported-platform diagnostic", runErr)
 	}
-	if got := rootcmd.ExitCodeFromError(runErr); got != rootcmd.ExitUsage {
-		t.Fatalf("exit code = %d, want %d", got, rootcmd.ExitUsage)
+	if got := rootcmd.ExitCodeFromError(runErr); got != rootcmd.ExitError {
+		t.Fatalf("exit code = %d, want %d", got, rootcmd.ExitError)
 	}
 	if stdout != "" {
 		t.Fatalf("stdout = %q, want empty", stdout)
