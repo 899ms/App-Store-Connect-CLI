@@ -781,6 +781,7 @@ func TestIsAppAvailabilityNotFoundRejectsUnclassified404s(t *testing.T) {
 		{name: "wrong error status", status: http.StatusNotFound, body: `{"errors":[{"status":"500","code":"PORTAL_FAILURE"}]}`},
 		{name: "wrong error code", status: http.StatusNotFound, body: `{"errors":[{"status":"404","code":"PORTAL_FAILURE"}]}`},
 		{name: "mixed error codes", status: http.StatusNotFound, body: `{"errors":[{"status":"404","code":"NOT_FOUND"},{"status":"404","code":"PORTAL_FAILURE"}]}`},
+		{name: "mixed data and errors", status: http.StatusNotFound, body: `{"data":null,"errors":[{"status":"404","code":"NOT_FOUND"}]}`},
 		{name: "JSON API not found", status: http.StatusNotFound, body: `{"errors":[{"status":"404","code":"NOT_FOUND"}]}`, want404: true},
 		{name: "JSON API not found by code", status: http.StatusNotFound, body: `{"errors":[{"code":"NOT_FOUND"}]}`, want404: true},
 		{name: "JSON API status without code", status: http.StatusNotFound, body: `{"errors":[{"status":"404"}]}`},

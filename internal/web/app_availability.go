@@ -77,12 +77,19 @@ func IsAppAvailabilityNotFound(err error) bool {
 	}
 
 	var payload struct {
+		Data   json.RawMessage `json:"data"`
 		Errors []struct {
 			Code   string `json:"code"`
 			Status string `json:"status"`
 		} `json:"errors"`
 	}
 	if json.Unmarshal(apiErr.rawResponseBody(), &payload) != nil || len(payload.Errors) == 0 {
+		return false
+	}
+	// JSON:API documents cannot combine a data member with errors. In
+	// particular, data:null is an absent-success response only for 2xx reads;
+	// a 404 envelope containing it is malformed and must not authorize a POST.
+	if payload.Data != nil {
 		return false
 	}
 	found := false

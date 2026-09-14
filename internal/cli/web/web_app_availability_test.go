@@ -408,3 +408,61 @@ func TestWebAppsAvailabilityCreateDoesNotPostAfterHTTPPreflightFailure(t *testin
 		})
 	}
 }
+
+func TestWebAppsAvailabilityCreateRejectsMixedNotFoundEnvelope(t *testing.T) {
+	origResolveSession := resolveSessionFn
+	origNewWebClient := newWebClientFn
+	origGet := getWebAppAvailabilityFn
+	origCreate := createWebAppAvailabilityFn
+	t.Cleanup(func() {
+		resolveSessionFn = origResolveSession
+		newWebClientFn = origNewWebClient
+		getWebAppAvailabilityFn = origGet
+		createWebAppAvailabilityFn = origCreate
+	})
+
+	resolveSessionFn = func(ctx context.Context, appleID, password, twoFactorCode string) (*webcore.AuthSession, string, error) {
+		return &webcore.AuthSession{
+			Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if req.Method != http.MethodGet || req.URL.Path != "/iris/v1/apps/app-1/appAvailabilityV2" {
+					t.Fatalf("unexpected request: %s %s", req.Method, req.URL.Path)
+				}
+				return &http.Response{
+					StatusCode: http.StatusNotFound,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"data":null,"errors":[{"status":"404","code":"NOT_FOUND"}]}`)),
+					Request:    req,
+				}, nil
+			})},
+		}, "cache", nil
+	}
+	newWebClientFn = webcore.NewClient
+	getWebAppAvailabilityFn = func(ctx context.Context, client *webcore.Client, appID string) (*webcore.AppAvailability, error) {
+		return client.GetAppAvailability(ctx, appID)
+	}
+	createCalled := false
+	createWebAppAvailabilityFn = func(ctx context.Context, client *webcore.Client, attrs webcore.AppAvailabilityCreateAttributes) (*webcore.AppAvailability, error) {
+		createCalled = true
+		return nil, nil
+	}
+
+	cmd := WebAppsAvailabilityCreateCommand()
+	if err := cmd.FlagSet.Parse([]string{
+		"--app", "app-1",
+		"--territory", "USA",
+		"--available-in-new-territories", "false",
+	}); err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	err := cmd.Exec(context.Background(), nil)
+	if err == nil {
+		t.Fatal("expected mixed 404 envelope to fail preflight")
+	}
+	if !strings.Contains(err.Error(), "web apps availability create failed") {
+		t.Fatalf("expected preflight failure, got %v", err)
+	}
+	if createCalled {
+		t.Fatal("must not POST after a mixed data/errors 404 envelope")
+	}
+}
