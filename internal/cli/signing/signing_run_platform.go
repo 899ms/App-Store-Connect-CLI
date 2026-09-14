@@ -775,7 +775,7 @@ func removeSigningRunProfileWithHook(install signingRunProfileInstall, afterVeri
 		if err != nil {
 			return fmt.Errorf("refusing to remove quarantined profile: %w", err)
 		}
-		return rooted.Remove(quarantineName)
+		return removeSigningRunProfileEntry(parentRoot, quarantineName, install)
 	}
 	if err != nil {
 		return err
@@ -784,18 +784,42 @@ func removeSigningRunProfileWithHook(install signingRunProfileInstall, afterVeri
 		if err := afterVerify(); err != nil {
 			return err
 		}
-	}
-	if err := secureopen.RenameNoReplaceInRoot(rooted, name, quarantineName); err != nil {
-		return fmt.Errorf("quarantine installed profile: %w", err)
-	}
-	if err := verifySigningRunProfileEntry(rooted, quarantineName, install); err != nil {
-		verificationErr := fmt.Errorf("refusing to remove profile because it changed during cleanup: %w", err)
-		if restoreErr := secureopen.RenameNoReplaceInRoot(rooted, quarantineName, name); restoreErr != nil {
-			return errors.Join(verificationErr, fmt.Errorf("restore changed profile: %w", restoreErr))
+		if err := removeSigningRunProfileEntry(parentRoot, name, install); err != nil {
+			return fmt.Errorf("refusing to remove profile because it changed during cleanup: %w", err)
 		}
-		return verificationErr
+		return nil
 	}
-	return rooted.Remove(quarantineName)
+	return removeSigningRunProfileEntry(parentRoot, name, install)
+}
+
+// removeSigningRunProfileEntry removes a profile only through the descriptor-
+// backed rootfs identity transaction. The earlier verification is useful for
+// diagnostics, but it is not sufficient for the final pathname mutation: a
+// same-user process can replace the quarantine entry after that check.
+func removeSigningRunProfileEntry(parentRoot rootfs.Root, name string, install signingRunProfileInstall) error {
+	identity, err := parentRoot.CaptureFile(name)
+	if err != nil {
+		return err
+	}
+	if err := signingRunProfileIdentityMatches(identity, install); err != nil {
+		return err
+	}
+	return parentRoot.RemoveFileIfSameIdentity(name, identity)
+}
+
+func signingRunProfileIdentityMatches(identity *rootfs.FileIdentity, install signingRunProfileInstall) error {
+	if identity == nil || identity.Info() == nil {
+		return fmt.Errorf("refusing to remove profile because its file identity is unavailable")
+	}
+	stat, ok := identity.Info().Sys().(*syscall.Stat_t)
+	if !ok || uint64(stat.Dev) != install.Device || stat.Ino != install.Inode {
+		return fmt.Errorf("refusing to remove profile because its file identity changed")
+	}
+	digest := sha256.Sum256(identity.Data())
+	if !strings.EqualFold(hex.EncodeToString(digest[:]), install.Digest) {
+		return fmt.Errorf("refusing to remove profile because its content changed")
+	}
+	return nil
 }
 
 func verifySigningRunProfileEntry(rooted *os.Root, name string, install signingRunProfileInstall) error {
@@ -849,18 +873,20 @@ func removeSigningRunStagedProfile(path string, device, inode uint64) error {
 		}
 		return err
 	}
-	quarantineName := ".asc-signing-run-profile-remove-" + name
-	if err := secureopen.RenameNoReplaceInRoot(rooted, name, quarantineName); err != nil {
-		return fmt.Errorf("quarantine staged profile: %w", err)
+	return removeSigningRunStagedProfileEntry(installRoot, name, device, inode)
+}
+
+func removeSigningRunStagedProfileEntry(installRoot rootfs.Root, name string, device, inode uint64) error {
+	identity, err := installRoot.CaptureFile(name)
+	if err != nil {
+		return err
 	}
-	if err := verifySigningRunStagedProfileEntry(rooted, quarantineName, device, inode); err != nil {
-		verificationErr := fmt.Errorf("refusing to remove staged profile because its file identity changed during cleanup: %w", err)
-		if restoreErr := secureopen.RenameNoReplaceInRoot(rooted, quarantineName, name); restoreErr != nil {
-			return errors.Join(verificationErr, fmt.Errorf("restore staged profile: %w", restoreErr))
-		}
-		return verificationErr
+	info := identity.Info()
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || uint64(stat.Dev) != device || stat.Ino != inode {
+		return fmt.Errorf("refusing to remove staged profile because its file identity changed")
 	}
-	return rooted.Remove(quarantineName)
+	return installRoot.RemoveFileIfSameIdentity(name, identity)
 }
 
 func verifySigningRunStagedProfileEntry(rooted *os.Root, name string, device, inode uint64) error {
