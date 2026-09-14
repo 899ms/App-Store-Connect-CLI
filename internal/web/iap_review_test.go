@@ -588,6 +588,53 @@ func TestCreateInAppPurchaseSubmissionRejectsUnexpectedResourceType(t *testing.T
 	}
 }
 
+func TestCreateInAppPurchaseSubmissionRejectsMissingOrEmptyResourceType(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{name: "missing", body: `{"data":{"id":"submission-1"}}`},
+		{name: "empty", body: `{"data":{"id":"submission-1","type":""}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+
+			if _, err := testWebClient(server).CreateInAppPurchaseSubmission(context.Background(), "iap-1"); err == nil || !strings.Contains(err.Error(), "missing submission resource type") {
+				t.Fatalf("expected missing-resource-type error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestCreateInAppPurchaseSubmissionRejectsMismatchedRelationship(t *testing.T) {
+	cases := []struct {
+		name string
+		data string
+	}{
+		{name: "wrong type", data: `{"type":"subscriptions","id":"iap-1"}`},
+		{name: "wrong id", data: `{"type":"inAppPurchases","id":"iap-2"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				body := `{"data":{"id":"submission-1","type":"inAppPurchaseSubmissions","relationships":{"inAppPurchaseV2":{"data":` + tc.data + `}}}}`
+				_, _ = w.Write([]byte(body))
+			}))
+			defer server.Close()
+
+			if _, err := testWebClient(server).CreateInAppPurchaseSubmission(context.Background(), "iap-1"); err == nil || !strings.Contains(err.Error(), "inAppPurchaseV2 relationship") {
+				t.Fatalf("expected inAppPurchaseV2-relationship error, got %v", err)
+			}
+		})
+	}
+}
+
 func TestCreateInAppPurchaseSubmissionRejectsEmptyID(t *testing.T) {
 	client := &Client{}
 	if _, err := client.CreateInAppPurchaseSubmission(context.Background(), "  "); err == nil {

@@ -223,7 +223,9 @@ func (c *Client) CreateInAppPurchaseSubmission(ctx context.Context, iapID string
 	if strings.TrimSpace(payload.Data.ID) == "" {
 		return ReviewIAPSubmission{}, fmt.Errorf("failed to parse iap submission response: missing submission id")
 	}
-	if payload.Data.Type != "" && payload.Data.Type != "inAppPurchaseSubmissions" {
+	if submissionType := strings.TrimSpace(payload.Data.Type); submissionType == "" {
+		return ReviewIAPSubmission{}, fmt.Errorf("failed to parse iap submission response: missing submission resource type")
+	} else if submissionType != "inAppPurchaseSubmissions" {
 		return ReviewIAPSubmission{}, fmt.Errorf("failed to parse iap submission response: unexpected resource type %q", payload.Data.Type)
 	}
 
@@ -231,10 +233,13 @@ func (c *Client) CreateInAppPurchaseSubmission(ctx context.Context, iapID string
 		ID:                            strings.TrimSpace(payload.Data.ID),
 		SubmitWithNextAppStoreVersion: boolAttr(payload.Data.Attributes, "submitWithNextAppStoreVersion"),
 	}
-	if ref := firstRelationshipRef(payload.Data, "inAppPurchaseV2"); ref != nil {
-		result.InAppPurchaseID = strings.TrimSpace(ref.ID)
+	relationshipID, relationshipPresent, err := validateReviewSubmissionRelationship(payload.Data, "inAppPurchaseV2", "inAppPurchases", iapID)
+	if err != nil {
+		return ReviewIAPSubmission{}, fmt.Errorf("failed to parse iap submission response: %w", err)
 	}
-	if result.InAppPurchaseID == "" {
+	if relationshipPresent {
+		result.InAppPurchaseID = relationshipID
+	} else {
 		result.InAppPurchaseID = iapID
 	}
 	return result, nil

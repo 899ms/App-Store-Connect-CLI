@@ -37,6 +37,7 @@ func decodeReviewSubscriptions(resources []jsonAPIResource, included []jsonAPIRe
 	}
 	includedMap := buildIncludedMap(included)
 	subscriptions := make([]ReviewSubscription, 0, len(included))
+	seenSubscriptionIDs := make(map[string]struct{}, len(included))
 	for _, group := range resources {
 		groupID := strings.TrimSpace(group.ID)
 		groupName := stringAttr(group.Attributes, "referenceName")
@@ -44,13 +45,18 @@ func decodeReviewSubscriptions(resources []jsonAPIResource, included []jsonAPIRe
 			if !strings.EqualFold(strings.TrimSpace(ref.Type), "subscriptions") {
 				continue
 			}
+			subscriptionID := strings.TrimSpace(ref.ID)
+			if _, seen := seenSubscriptionIDs[subscriptionID]; seen {
+				continue
+			}
+			seenSubscriptionIDs[subscriptionID] = struct{}{}
 			resource, ok := includedMap[jsonAPIResourceKey(ref.Type, ref.ID)]
 			if !ok {
 				resource = jsonAPIResource{ID: ref.ID, Type: ref.Type}
 			}
 			attached, attachedKnown := boolAttrKnown(resource.Attributes, "submitWithNextAppStoreVersion")
 			subscriptions = append(subscriptions, ReviewSubscription{
-				ID:                                 strings.TrimSpace(ref.ID),
+				ID:                                 subscriptionID,
 				GroupID:                            groupID,
 				GroupReferenceName:                 groupName,
 				ProductID:                          stringAttr(resource.Attributes, "productId"),
@@ -178,7 +184,9 @@ func (c *Client) CreateSubscriptionSubmission(ctx context.Context, subscriptionI
 	if strings.TrimSpace(payload.Data.ID) == "" {
 		return ReviewSubscriptionSubmission{}, fmt.Errorf("failed to parse subscription submission response: missing submission id")
 	}
-	if payload.Data.Type != "" && payload.Data.Type != "subscriptionSubmissions" {
+	if submissionType := strings.TrimSpace(payload.Data.Type); submissionType == "" {
+		return ReviewSubscriptionSubmission{}, fmt.Errorf("failed to parse subscription submission response: missing submission resource type")
+	} else if submissionType != "subscriptionSubmissions" {
 		return ReviewSubscriptionSubmission{}, fmt.Errorf("failed to parse subscription submission response: unexpected resource type %q", payload.Data.Type)
 	}
 
@@ -186,10 +194,13 @@ func (c *Client) CreateSubscriptionSubmission(ctx context.Context, subscriptionI
 		ID:                            strings.TrimSpace(payload.Data.ID),
 		SubmitWithNextAppStoreVersion: boolAttr(payload.Data.Attributes, "submitWithNextAppStoreVersion"),
 	}
-	if ref := firstRelationshipRef(payload.Data, "subscription"); ref != nil {
-		result.SubscriptionID = strings.TrimSpace(ref.ID)
+	relationshipID, relationshipPresent, err := validateReviewSubmissionRelationship(payload.Data, "subscription", "subscriptions", subscriptionID)
+	if err != nil {
+		return ReviewSubscriptionSubmission{}, fmt.Errorf("failed to parse subscription submission response: %w", err)
 	}
-	if result.SubscriptionID == "" {
+	if relationshipPresent {
+		result.SubscriptionID = relationshipID
+	} else {
 		result.SubscriptionID = subscriptionID
 	}
 	return result, nil
