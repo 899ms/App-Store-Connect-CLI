@@ -433,10 +433,21 @@ jobs:
         if: steps.candidate_artifact.outputs.reused != 'true'
         env:
           APPLE_DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
+          # Pin the code signing identifier. Without it codesign derives one
+          # from the versioned file name, so every release carries a different
+          # designated requirement. macOS keychain ACLs trust applications by
+          # that requirement, which re-prompts for stored credentials after
+          # every upgrade even after "Always Allow".
+          ASC_CODESIGN_IDENTIFIER: com.rorkai.asc
         run: |
           for binary in release/asc_*_macOS_*; do
-            codesign --force --sign "${APPLE_DEVELOPER_ID}" --timestamp --options=runtime "$binary"
+            codesign --force --sign "${APPLE_DEVELOPER_ID}" --identifier "${ASC_CODESIGN_IDENTIFIER}" --timestamp --options=runtime "$binary"
             codesign --verify --deep --strict --verbose=2 "$binary"
+            identifier=$(codesign -dv --verbose=4 "$binary" 2>&1 | sed -n 's/^Identifier=//p' | head -n 1)
+            if [ "$identifier" != "$ASC_CODESIGN_IDENTIFIER" ]; then
+              echo "::error::$(basename "$binary") has an unexpected code signing identifier: ${identifier}"
+              exit 1
+            fi
           done
 
       - name: Notarize macOS binaries

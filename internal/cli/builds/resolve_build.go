@@ -2,6 +2,7 @@ package builds
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -73,6 +74,9 @@ func ResolveBuild(ctx context.Context, client *asc.Client, opts ResolveBuildOpti
 			ExcludeExpired:        opts.ExcludeExpired,
 		}, false)
 		if err != nil {
+			if errors.Is(err, asc.ErrNotFound) {
+				return nil, err
+			}
 			return nil, fmt.Errorf("failed to fetch latest build: %w", err)
 		}
 		return buildResp, nil
@@ -270,27 +274,37 @@ func resolveBuildByNumberSelectionSince(
 	}
 }
 
+// noBuildFoundForBuildNumber reports an empty build-number lookup. The error
+// carries asc.ErrNotFound so callers exit with the not-found code instead of a
+// generic failure.
 func noBuildFoundForBuildNumber(appID, buildNumber, version, platform string) error {
-	return fmt.Errorf(
-		"no build found for app %s with build number %q%s",
-		appID,
-		buildNumber,
-		describeBuildNumberSelectionFilters(version, platform),
+	return shared.NewErrorWithCause(
+		fmt.Errorf(
+			"no build found for app %s with build number %q%s; check --build-number, --version, and --platform, or use --build-id",
+			appID,
+			buildNumber,
+			describeBuildNumberSelectionFilters(version, platform),
+		),
+		asc.ErrNotFound,
 	)
 }
 
+// ambiguousBuildNumberSelection reports a build-number lookup that matched
+// more than one build. The caller has to narrow the selector, so this stays a
+// usage error, and the message names every matching build ID plus the flag
+// that accepts one of them.
 func ambiguousBuildNumberSelection(appID, buildNumber, version, platform string, candidates []shared.AmbiguousCandidate, morePages bool) error {
 	hint := describeBuildNumberSelectionHint(version, platform)
 	if morePages {
 		hint = strings.TrimSpace("More matching builds exist on later pages. " + hint)
 	}
-	return &shared.AmbiguousSelectionError{
+	return shared.AmbiguousUsageError(&shared.AmbiguousSelectionError{
 		Kind:        "build",
 		Description: fmt.Sprintf("build number %q%s for app %s", buildNumber, describeBuildNumberSelectionFilters(version, platform), appID),
 		Flag:        "--build-id",
 		Candidates:  candidates,
 		Hint:        hint,
-	}
+	})
 }
 
 func describeBuildNumberSelectionFilters(version, platform string) string {

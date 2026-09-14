@@ -1617,9 +1617,7 @@ func TestRun_XcodeCloudStatusHelpOmitsRemovedIDAlias(t *testing.T) {
 	if stdout != "" {
 		t.Fatalf("removed alias stdout = %q, want empty", stdout)
 	}
-	want := "Error: unknown flag `--id` for `asc xcode-cloud status`\n" +
-		"Try:\n" +
-		"  --run-id\n" +
+	want := "Error: `--id` was removed in 5.0.0; use `--run-id` (see migrate-to-5-0)\n" +
 		"For help:\n" +
 		"  asc xcode-cloud status --help\n"
 	if stderr != want {

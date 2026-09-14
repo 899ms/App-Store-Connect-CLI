@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
@@ -513,7 +514,7 @@ func reportLoginCredentialShapes(keyID, issuerID string, individualKey bool) err
 func AuthLoginCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("auth login", flag.ExitOnError)
 
-	name := fs.String("name", "", "Friendly name for this key")
+	name := fs.String("name", "", "Friendly name for this key (optional on first login: defaults to \"default\" when no profiles are stored)")
 	keyID := fs.String("key-id", "", "App Store Connect API Key ID")
 	issuerID := fs.String("issuer-id", "", "App Store Connect Issuer ID")
 	keyType := fs.String("key-type", config.CredentialKeyTypeTeam, "App Store Connect API key type: team or individual")
@@ -534,6 +535,9 @@ with a local config fallback (restricted permissions). Use --bypass-keychain to
 explicitly bypass keychain and write credentials to ~/.asc/config.json instead.
 Add --local to write ./.asc/config.json for the current repo.
 
+--name may be omitted on a first login: with no stored profiles the key is saved
+as "default". Once profiles exist, --name is required and the error lists them.
+
 Examples:
   asc auth login --name "MyKey" --key-id "ABC123" --issuer-id "DEF456" --private-key /path/to/AuthKey.p8
   asc auth login --name "MyIndividualKey" --key-id "ABC123" --key-type individual --private-key /path/to/AuthKey.p8
@@ -549,6 +553,13 @@ so commands continue to work even if the original .p8 file is removed.`,
 			bypassKeychainEnabled := *bypassKeychain || authsvc.ShouldBypassKeychain()
 			if *local && !bypassKeychainEnabled {
 				return shared.WithDiagnostic(shared.UsageError("--local requires --bypass-keychain or ASC_BYPASS_KEYCHAIN set to 1/true/yes/on"), shared.DiagnosticInvalidInput, "--local")
+			}
+			if !flagWasSet(fs, "name") {
+				profileName, err := omittedLoginProfileName(bypassKeychainEnabled, *local)
+				if err != nil {
+					return err
+				}
+				*name = profileName
 			}
 			if strings.TrimSpace(*name) == "" {
 				fmt.Fprintln(os.Stderr, "Error: --name is required")
@@ -625,6 +636,98 @@ so commands continue to work even if the original .p8 file is removed.`,
 			return nil
 		},
 	}
+}
+
+// defaultLoginProfileName is the name stored credentials resolve to when none
+// was given, matching the name unnamed legacy credentials are listed under.
+const defaultLoginProfileName = "default"
+
+// omittedLoginProfileName chooses the profile name for `auth login` without
+// --name. With nothing stored in the destination it uses the default name; once
+// profiles exist it refuses to guess, so an implicit default can never overwrite
+// one, and lists the names to pass explicitly.
+func omittedLoginProfileName(bypassKeychain, local bool) (string, error) {
+	names, err := existingLoginProfileNames(bypassKeychain, local)
+	if err != nil {
+		return "", fmt.Errorf("auth login: %w", err)
+	}
+	if len(names) == 0 {
+		return defaultLoginProfileName, nil
+	}
+	return "", shared.WithDiagnostic(
+		shared.UsageErrorf(
+			"--name is required when profiles already exist (%s); re-run with --name %q to update that profile, or --name with a new name to add one",
+			strings.Join(names, ", "), names[0],
+		),
+		shared.DiagnosticRequiredInputMissing,
+		"--name",
+	)
+}
+
+// existingLoginProfileNames lists the profile names in the store `auth login`
+// would write to: the local or global config.json when bypassing the keychain,
+// otherwise the merged keychain and config credentials.
+func existingLoginProfileNames(bypassKeychain, local bool) ([]string, error) {
+	if !bypassKeychain {
+		credentials, err := listCredentialSummaries()
+		if err != nil {
+			if _, ok := errors.AsType[*authsvc.CredentialsWarning](err); !ok {
+				return nil, fmt.Errorf("failed to list credentials: %w", err)
+			}
+		}
+		names := make([]string, 0, len(credentials))
+		for _, credential := range credentials {
+			names = appendProfileName(names, credential.Name)
+		}
+		return names, nil
+	}
+
+	path, err := config.GlobalPath()
+	if local {
+		path, err = config.LocalPath()
+	}
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := config.LoadAt(path)
+	if err != nil {
+		if errors.Is(err, config.ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	names := make([]string, 0, len(cfg.Keys)+1)
+	for _, credential := range cfg.Keys {
+		names = appendProfileName(names, credential.Name)
+	}
+	if strings.TrimSpace(cfg.KeyID) != "" {
+		legacyName := strings.TrimSpace(cfg.DefaultKeyName)
+		if legacyName == "" {
+			legacyName = defaultLoginProfileName
+		}
+		names = appendProfileName(names, legacyName)
+	}
+	return names, nil
+}
+
+// flagWasSet reports whether name was passed on the command line, so an
+// explicitly blank value stays an error instead of reading as omitted.
+func flagWasSet(fs *flag.FlagSet, name string) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
+}
+
+func appendProfileName(names []string, name string) []string {
+	name = strings.TrimSpace(name)
+	if name == "" || slices.Contains(names, name) {
+		return names
+	}
+	return append(names, name)
 }
 
 // AuthExportToConfigCommand copies keychain-backed credentials to config.json.
@@ -904,7 +1007,7 @@ Examples:
 			}
 
 			credentialLister := listCredentialSummaries
-			if *validate || *verbose {
+			if *validate {
 				credentialLister = listStoredCredentials
 			}
 			credentials, err := credentialLister()
