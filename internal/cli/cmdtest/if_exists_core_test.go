@@ -202,7 +202,7 @@ func TestVersionsCreateIfExistsUpdateWithoutUpdatableFlagsSkips(t *testing.T) {
 // when there is nothing to PATCH on the version itself, matching the documented
 // behavior: skip leaves the version untouched, update still copies metadata.
 func TestVersionsCreateIfExistsUpdateCopiesMetadataWithoutUpdatableFlags(t *testing.T) {
-	stdout, _, seen, runErr := runIfExistsCommand(t, []string{
+	stdout, stderr, seen, runErr := runIfExistsCommand(t, []string{
 		"versions", "create", "--app", "app-1", "--version", "2.0.0", "--platform", "IOS",
 		"--copy-metadata-from", "1.9.0", "--if-exists", "update", "--output", "json",
 	}, func(req ifExistsRequest) (*http.Response, error) {
@@ -248,8 +248,14 @@ func TestVersionsCreateIfExistsUpdateCopiesMetadataWithoutUpdatableFlags(t *test
 	if result.MetadataCopy.SourceVersion != "1.9.0" || result.MetadataCopy.CopiedLocales != 1 {
 		t.Fatalf("metadataCopy = %+v, want the 1.9.0 copy to have run", *result.MetadataCopy)
 	}
-	if result.Action != "skipped" {
-		t.Fatalf("action = %q, want skipped when the version itself had nothing to PATCH", result.Action)
+	// The metadata copy PATCHes the existing version's localizations, so the
+	// receipt must report a mutation even though the version resource itself
+	// had nothing to PATCH.
+	if result.Action != "updated" {
+		t.Fatalf("action = %q, want updated when the metadata copy ran against the existing version", result.Action)
+	}
+	if !strings.Contains(stderr, "updated it in place") {
+		t.Fatalf("stderr = %q, want the update diagnostic rather than left unchanged", stderr)
 	}
 	sawCopyPatch := false
 	for _, req := range seen {
@@ -514,5 +520,53 @@ func TestReviewDetailsCreateIfExistsSkipStillFailsWhenReadBackFindsNothing(t *te
 	}
 	if len(seen) != 2 {
 		t.Fatalf("requests = %+v, want POST then read-back", seen)
+	}
+}
+
+// A metadata copy that changes nothing leaves the existing version untouched,
+// so the receipt must stay skipped rather than claim an update.
+func TestVersionsCreateIfExistsUpdateKeepsSkippedWhenMetadataCopyChangesNothing(t *testing.T) {
+	stdout, stderr, _, runErr := runIfExistsCommand(t, []string{
+		"versions", "create", "--app", "app-1", "--version", "2.0.0", "--platform", "IOS",
+		"--copy-metadata-from", "1.9.0", "--if-exists", "update", "--output", "json",
+	}, func(req ifExistsRequest) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodPost && req.Path == "/v1/appStoreVersions":
+			return jsonResponse(http.StatusConflict, versionsDuplicate409)
+		case req.Method == http.MethodGet && req.Path == "/v1/apps/app-1/appStoreVersions":
+			if strings.Contains(req.Query, "filter%5BversionString%5D=1.9.0") {
+				return jsonResponse(http.StatusOK, sourceVersionsList)
+			}
+			return jsonResponse(http.StatusOK, existingVersionsList)
+		case req.Method == http.MethodGet && req.Path == "/v1/appStoreVersions/version-source/appStoreVersionLocalizations":
+			// The source locale carries none of the copyable fields.
+			return jsonResponse(http.StatusOK, `{"data":[{"type":"appStoreVersionLocalizations","id":"loc-source-en","attributes":{"locale":"en-US"}}]}`)
+		case req.Method == http.MethodGet && req.Path == "/v1/appStoreVersions/version-existing/appStoreVersionLocalizations":
+			return jsonResponse(http.StatusOK, destinationLocalizationsList)
+		default:
+			t.Fatalf("unexpected request %s %s?%s", req.Method, req.Path, req.Query)
+			return nil, nil
+		}
+	})
+	if runErr != nil {
+		t.Fatalf("run error: %v", runErr)
+	}
+	var result struct {
+		Action       string `json:"action"`
+		MetadataCopy *struct {
+			CopiedFieldUpdates int `json:"copiedFieldUpdates"`
+		} `json:"metadataCopy"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("unmarshal stdout: %v; stdout=%q", err, stdout)
+	}
+	if result.MetadataCopy == nil || result.MetadataCopy.CopiedFieldUpdates != 0 {
+		t.Fatalf("metadataCopy = %+v, want a copy that applied no field updates", result.MetadataCopy)
+	}
+	if result.Action != "skipped" {
+		t.Fatalf("action = %q, want skipped when the copy changed nothing", result.Action)
+	}
+	if !strings.Contains(stderr, "left unchanged") {
+		t.Fatalf("stderr = %q, want the left-unchanged diagnostic", stderr)
 	}
 }

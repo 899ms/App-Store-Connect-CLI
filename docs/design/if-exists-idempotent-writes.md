@@ -104,7 +104,9 @@ codes is listed.
 1. `if-exists-core`: shared flag and helpers, receipt fields, `versions create`
    (`update` routes to `PATCH /v1/appStoreVersions/{id}` with `--copyright` and
    `--release-type`; `--copy-metadata-from` still runs against the existing
-   version), `review details-create` (`update` routes to
+   version, and because that copy PATCHes the existing version's localizations
+   the receipt reports `updated` even when the version resource itself had
+   nothing to PATCH), `review details-create` (`update` routes to
    `PATCH /v1/appStoreReviewDetails/{id}` with the same attributes).
 2. `if-exists-localizations`: `localizations create`/`update` and
    `metadata push`.

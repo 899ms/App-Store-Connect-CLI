@@ -599,6 +599,7 @@ version. Any other 409 keeps failing.`,
 			resp, err := client.CreateAppStoreVersion(requestCtx, resolvedAppID, attrs)
 			action := asc.IdempotentWriteActionCreated
 			copyMetadata := copyMetadataFromValue != ""
+			conflictHandled := false
 			if err != nil {
 				existing, handled, resolveErr := shared.ResolveIfExistsConflict(ifExistsMode, err, versionsCreateExistsCodes, func() (*asc.AppStoreVersionResponse, bool, error) {
 					return findExistingAppStoreVersion(requestCtx, client, resolvedAppID, attrs.VersionString, normalizedPlatform)
@@ -632,22 +633,12 @@ version. Any other 409 keeps failing.`,
 						action = asc.IdempotentWriteActionUpdated
 					}
 				}
-				fmt.Fprintf(os.Stderr, "versions create: version %s (%s, %s) already exists as %s; %s (--if-exists %s)\n",
-					attrs.VersionString, normalizedPlatform, resolvedAppID, resp.Data.ID, ifExistsOutcomeText(action), ifExistsMode)
+				conflictHandled = true
 			}
 
-			result := &asc.AppStoreVersionDetailResult{
-				ID:            resp.Data.ID,
-				VersionString: resp.Data.Attributes.VersionString,
-				Platform:      string(resp.Data.Attributes.Platform),
-				State:         shared.ResolveAppStoreVersionState(resp.Data.Attributes),
-				IdempotentWriteReceipt: asc.IdempotentWriteReceipt{
-					AlreadyExists: action != asc.IdempotentWriteActionCreated,
-					Action:        action,
-				},
-			}
+			var copySummary *asc.AppStoreVersionMetadataCopySummary
 			if copyMetadata {
-				copySummary, err := copyVersionMetadataFromSource(
+				copySummary, err = copyVersionMetadataFromSource(
 					requestCtx,
 					client,
 					resolvedAppID,
@@ -662,7 +653,31 @@ version. Any other 409 keeps failing.`,
 				if len(copySummary.SkippedLocales) > 0 {
 					fmt.Fprintf(os.Stderr, "Warning: skipped source locales not enabled on destination: %s\n", strings.Join(copySummary.SkippedLocales, ", "))
 				}
-				result.MetadataCopy = copySummary
+				// The copy PATCHes the existing version's localizations, so a
+				// copy that changed something makes the resolved conflict an
+				// update even when the version resource itself had nothing to
+				// PATCH. A copy that changed nothing leaves the version
+				// untouched and keeps the skipped receipt honest.
+				if conflictHandled && copySummary.CopiedFieldUpdates > 0 {
+					action = asc.IdempotentWriteActionUpdated
+				}
+			}
+
+			if conflictHandled {
+				fmt.Fprintf(os.Stderr, "versions create: version %s (%s, %s) already exists as %s; %s (--if-exists %s)\n",
+					attrs.VersionString, normalizedPlatform, resolvedAppID, resp.Data.ID, ifExistsOutcomeText(action), ifExistsMode)
+			}
+
+			result := &asc.AppStoreVersionDetailResult{
+				ID:            resp.Data.ID,
+				VersionString: resp.Data.Attributes.VersionString,
+				Platform:      string(resp.Data.Attributes.Platform),
+				State:         shared.ResolveAppStoreVersionState(resp.Data.Attributes),
+				IdempotentWriteReceipt: asc.IdempotentWriteReceipt{
+					AlreadyExists: action != asc.IdempotentWriteActionCreated,
+					Action:        action,
+				},
+				MetadataCopy: copySummary,
 			}
 
 			return shared.PrintOutput(result, *output.Output, *output.Pretty)
