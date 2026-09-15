@@ -787,6 +787,7 @@ func TestWebAppGroupsAssignClassifiesEveryFailurePath(t *testing.T) {
 		{name: "missing resource", err: &webcore.APIError{Status: 404}, wantCode: shared.DiagnosticResourceNotFound},
 		{name: "conflict", err: &webcore.APIError{Status: 409}, wantCode: shared.DiagnosticResourceConflict},
 		{name: "portal server error", err: &webcore.APIError{Status: 503}, wantCode: shared.DiagnosticRequestFailed},
+		{name: "portal refusal envelope", err: &webcore.DeveloperPortalResultError{ResultCode: 1100, Message: "Access denied"}, wantCode: shared.DiagnosticRequestFailed},
 		{name: "deadline exceeded", err: fmt.Errorf("write failed: %w", context.DeadlineExceeded), wantCode: shared.DiagnosticRequestFailed},
 		{name: "unclassified portal failure", err: errors.New("portal rejected assign"), wantCode: shared.DiagnosticInternalError},
 		{name: "missing receipt", result: nil, wantCode: shared.DiagnosticInternalError},

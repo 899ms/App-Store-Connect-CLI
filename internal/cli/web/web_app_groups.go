@@ -537,6 +537,7 @@ func developerAppGroupDiagnosticCode(err error) shared.DiagnosticCode {
 	var inUse *webcore.DeveloperAppGroupInUseError
 	var unreadable *webcore.DeveloperAppGroupUnreadableResponseError
 	var notFound *webcore.DeveloperAppGroupNotFoundError
+	var resultErr *webcore.DeveloperPortalResultError
 	var apiErr *webcore.APIError
 	var urlErr *url.Error
 	// A failure the CLI already reports as a usage or validation problem keeps
@@ -562,6 +563,8 @@ func developerAppGroupDiagnosticCode(err error) shared.DiagnosticCode {
 		return shared.DiagnosticResourceConflict
 	case errors.As(err, &unreadable):
 		return shared.DiagnosticDependencyFailed
+	case errors.As(err, &resultErr):
+		return shared.DiagnosticRequestFailed
 	case errors.As(err, &apiErr):
 		switch apiErr.Status {
 		case http.StatusUnauthorized, http.StatusForbidden:

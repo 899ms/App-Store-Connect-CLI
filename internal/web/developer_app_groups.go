@@ -145,6 +145,22 @@ func (e *DeveloperAppGroupUnverifiedError) Unwrap() error { return e.Err }
 // naming a team.
 var ErrDeveloperPortalTeamNotSelected = errors.New("developer portal team is not selected")
 
+// DeveloperPortalResultError reports that a Developer Portal legacy endpoint
+// answered with an explicit non-zero result code: the request reached the
+// portal and was refused.
+type DeveloperPortalResultError struct {
+	ResultCode int
+	RequestID  string
+	Message    string
+}
+
+func (e *DeveloperPortalResultError) Error() string {
+	if e.RequestID != "" {
+		return fmt.Sprintf("developer portal request failed (result code %d, request ID %s): %s", e.ResultCode, e.RequestID, e.Message)
+	}
+	return fmt.Sprintf("developer portal request failed (result code %d): %s", e.ResultCode, e.Message)
+}
+
 // DeveloperAppGroupNotFoundError reports that the named App Group does not
 // exist in the selected Developer Portal team.
 type DeveloperAppGroupNotFoundError struct {
@@ -153,6 +169,38 @@ type DeveloperAppGroupNotFoundError struct {
 
 func (e *DeveloperAppGroupNotFoundError) Error() string {
 	return fmt.Sprintf("app group %q not found in the selected Developer Portal team", e.GroupID)
+}
+
+// developerAppGroupResponseError marks a Developer Portal response the client
+// could not read completely, so telemetry separates an unusable upstream
+// response from a CLI defect. Transport failures, HTTP statuses, explicit
+// portal refusals, and failures that already classify themselves keep their
+// own meaning.
+func developerAppGroupResponseError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var apiErr *APIError
+	var resultErr *DeveloperPortalResultError
+	var unreadable *DeveloperAppGroupUnreadableResponseError
+	var unverified *DeveloperAppGroupUnverifiedError
+	var inUse *DeveloperAppGroupInUseError
+	var notFound *DeveloperAppGroupNotFoundError
+	var identifier *DeveloperAppGroupIdentifierError
+	switch {
+	case errors.As(err, &apiErr),
+		errors.As(err, &resultErr),
+		errors.As(err, &unreadable),
+		errors.As(err, &unverified),
+		errors.As(err, &inUse),
+		errors.As(err, &notFound),
+		errors.As(err, &identifier),
+		errors.Is(err, ErrDeveloperPortalTeamNotSelected),
+		isAmbiguousDeveloperPortalWriteFailure(err):
+		return err
+	default:
+		return &DeveloperAppGroupUnreadableResponseError{Err: err}
+	}
 }
 
 // DeveloperAppGroupUnreadableResponseError marks an App Group mutation that
@@ -247,7 +295,11 @@ func (c *Client) ListDeveloperAppGroups(ctx context.Context, options DeveloperAp
 	if teamID == "" {
 		return nil, fmt.Errorf("%w; %s", ErrDeveloperPortalTeamNotSelected, developerPortalAuthHint)
 	}
-	return c.listDeveloperAppGroupPages(ctx, teamID, options.Paginate, false)
+	result, err := c.listDeveloperAppGroupPages(ctx, teamID, options.Paginate, false)
+	if err != nil {
+		return nil, developerAppGroupResponseError(err)
+	}
+	return result, nil
 }
 
 // listDeveloperAppGroupPages reads the team's App Groups. With requireCollection
@@ -350,7 +402,7 @@ func (c *Client) DeleteDeveloperAppGroup(ctx context.Context, request DeveloperA
 
 	groups, err := c.listDeveloperAppGroupPages(ctx, teamID, true, true)
 	if err != nil {
-		return nil, err
+		return nil, developerAppGroupResponseError(err)
 	}
 	group, found := findDeveloperAppGroup(groups, request.GroupID)
 	if !found {
@@ -359,7 +411,7 @@ func (c *Client) DeleteDeveloperAppGroup(ctx context.Context, request DeveloperA
 
 	assignments, err := c.listDeveloperAppGroupAssignments(ctx, request.GroupID)
 	if err != nil {
-		return nil, err
+		return nil, developerAppGroupResponseError(err)
 	}
 	if len(assignments) > 0 {
 		return nil, &DeveloperAppGroupInUseError{GroupID: group.ID, Identifier: group.Identifier, Assignments: assignments}
@@ -690,14 +742,14 @@ func (c *Client) CreateDeveloperAppGroup(ctx context.Context, request DeveloperA
 	}
 	var response developerAppGroupCreateResponse
 	if err := json.Unmarshal(body, &response); err != nil {
-		return nil, fmt.Errorf("failed to parse Developer Portal App Group create response: %w", err)
+		return nil, &DeveloperAppGroupUnreadableResponseError{Err: fmt.Errorf("failed to parse Developer Portal App Group create response: %w", err)}
 	}
 	if err := validateDeveloperPortalLegacyResponse(response.developerPortalLegacyResponse); err != nil {
 		return nil, err
 	}
 	group, err := decodeDeveloperAppGroup(response.ApplicationGroup)
 	if err != nil {
-		return nil, err
+		return nil, developerAppGroupResponseError(err)
 	}
 	return &group, nil
 }
@@ -946,7 +998,7 @@ func (c *Client) primeDeveloperAppGroupCSRF(ctx context.Context) error {
 	}
 	var response developerAppGroupsListResponse
 	if err := json.Unmarshal(body, &response); err != nil {
-		return fmt.Errorf("failed to parse Developer Portal App Groups response while priming CSRF: %w", err)
+		return &DeveloperAppGroupUnreadableResponseError{Err: fmt.Errorf("failed to parse Developer Portal App Groups response while priming CSRF: %w", err)}
 	}
 	if err := validateDeveloperPortalLegacyResponse(response.developerPortalLegacyResponse); err != nil {
 		return err
@@ -1000,7 +1052,7 @@ func ValidateDeveloperAppGroupIdentifier(identifier string) error {
 
 func validateDeveloperPortalLegacyResponse(response developerPortalLegacyResponse) error {
 	if response.ResultCode == nil {
-		return fmt.Errorf("developer portal response is missing resultCode")
+		return &DeveloperAppGroupUnreadableResponseError{Err: fmt.Errorf("developer portal response is missing resultCode")}
 	}
 	if *response.ResultCode == 0 {
 		return nil
@@ -1012,10 +1064,7 @@ func validateDeveloperPortalLegacyResponse(response developerPortalLegacyRespons
 	if message == "" {
 		message = "unknown Developer Portal error"
 	}
-	if response.RequestID != "" {
-		return fmt.Errorf("developer portal request failed (result code %d, request ID %s): %s", *response.ResultCode, response.RequestID, message)
-	}
-	return fmt.Errorf("developer portal request failed (result code %d): %s", *response.ResultCode, message)
+	return &DeveloperPortalResultError{ResultCode: *response.ResultCode, RequestID: response.RequestID, Message: message}
 }
 
 // developerAppGroupCapabilityReferences resolves the capability references an
@@ -1035,7 +1084,7 @@ func validateDeveloperPortalLegacyResponse(response developerPortalLegacyRespons
 // all.
 func developerAppGroupCapabilityReferences(current developerBundleIDResponse) ([]developerResource, error) {
 	rawRelationship, hasRelationship := current.Data.Relationships["bundleIdCapabilities"]
-	if hasRelationship && developerRelationshipHasDataMember(rawRelationship) {
+	if hasRelationship && !developerRelationshipUnresolved(rawRelationship) {
 		references, err := decodeStrictDeveloperRelationship(rawRelationship)
 		if err != nil {
 			return nil, fmt.Errorf("cannot safely update Bundle ID %q: capability graph %w", current.Data.ID, err)
@@ -1068,19 +1117,22 @@ func developerAppGroupCapabilityReferences(current developerBundleIDResponse) ([
 	return references, nil
 }
 
-// developerRelationshipHasDataMember reports whether a JSON:API relationship
-// object carries a data member at all, resolved or explicitly null. A
-// links-only relationship carries none, which is Apple's "this linkage was not
-// selected" form rather than a statement about the linkage itself.
-func developerRelationshipHasDataMember(raw json.RawMessage) bool {
+// developerRelationshipUnresolved reports whether a JSON:API relationship
+// object states no linkage because Apple did not select it: a well-formed
+// object that carries links and no data member. A null value, a non-object, an
+// empty object, and anything carrying a data member are all handled by the
+// strict decoder instead, so a malformed relationship can never hand the
+// capability graph over to included.
+func developerRelationshipUnresolved(raw json.RawMessage) bool {
 	var members map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &members); err != nil {
-		// Malformed relationship objects belong to the strict decoder, which
-		// reports the parse failure instead of falling back to included.
-		return true
+	if err := json.Unmarshal(raw, &members); err != nil || members == nil {
+		return false
 	}
-	_, ok := members["data"]
-	return ok
+	if _, resolved := members["data"]; resolved {
+		return false
+	}
+	_, hasLinks := members["links"]
+	return hasLinks
 }
 
 // developerBundleIDAppGroupsState reads the APP_GROUPS capability of a Bundle

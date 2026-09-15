@@ -1762,6 +1762,14 @@ func TestAppGroupMutationsFailClosedWithoutAnyCapabilityGraph(t *testing.T) {
 			"data":{"id":"bundle-1","type":"bundleIds","attributes":{"identifier":"com.example.app"}},
 			"included":[{"type":"bundleIdCapabilities","id":"","attributes":{"enabled":true,"settings":[]},"relationships":{"capability":{"data":{"type":"capabilities","id":"PUSH_NOTIFICATIONS"}}}}]
 		}`,
+		"null relationship with an included graph": `{
+			"data":{"id":"bundle-1","type":"bundleIds","attributes":{"identifier":"com.example.app"},"relationships":{"bundleIdCapabilities":null}},
+			"included":[{"type":"bundleIdCapabilities","id":"push-1","attributes":{"enabled":true,"settings":[]},"relationships":{"capability":{"data":{"type":"capabilities","id":"PUSH_NOTIFICATIONS"}}}}]
+		}`,
+		"empty relationship object with an included graph": `{
+			"data":{"id":"bundle-1","type":"bundleIds","attributes":{"identifier":"com.example.app"},"relationships":{"bundleIdCapabilities":{}}},
+			"included":[{"type":"bundleIdCapabilities","id":"push-1","attributes":{"enabled":true,"settings":[]},"relationships":{"capability":{"data":{"type":"capabilities","id":"PUSH_NOTIFICATIONS"}}}}]
+		}`,
 	}
 	for bundleName, bundle := range bundles {
 		t.Run(bundleName, func(t *testing.T) {
@@ -1914,4 +1922,45 @@ func TestDeleteDeveloperAppGroupReportsMissingGroupAsNotFound(t *testing.T) {
 	if !strings.Contains(err.Error(), "not found in the selected Developer Portal team") {
 		t.Fatalf("unexpected message: %v", err)
 	}
+}
+
+// TestListDeveloperAppGroupsClassifiesUnreadableResponses proves an App Group
+// response the client cannot read is reported as an unreadable Developer
+// Portal response rather than an unclassified failure, while an explicit
+// portal refusal keeps its own classification.
+func TestListDeveloperAppGroupsClassifiesUnreadableResponses(t *testing.T) {
+	t.Run("malformed body", func(t *testing.T) {
+		client := newDeveloperAppGroupsTestClient(t, func(requestNumber int, request *http.Request) (*http.Response, error) {
+			if requestNumber == 1 {
+				return assertDeveloperPortalBootstrap(t, request), nil
+			}
+			return developerPortalTestResponse(http.StatusOK, `{"resultCode":0,`, nil), nil
+		})
+		_, err := client.ListDeveloperAppGroups(context.Background(), DeveloperAppGroupsListOptions{})
+		var unreadable *DeveloperAppGroupUnreadableResponseError
+		if !errors.As(err, &unreadable) {
+			t.Fatalf("error %v is not classified as an unreadable Developer Portal response", err)
+		}
+	})
+
+	t.Run("portal refusal", func(t *testing.T) {
+		client := newDeveloperAppGroupsTestClient(t, func(requestNumber int, request *http.Request) (*http.Response, error) {
+			if requestNumber == 1 {
+				return assertDeveloperPortalBootstrap(t, request), nil
+			}
+			return developerPortalTestResponse(http.StatusOK, `{"resultCode":1100,"userString":"Access denied","requestId":"req-1"}`, nil), nil
+		})
+		_, err := client.ListDeveloperAppGroups(context.Background(), DeveloperAppGroupsListOptions{})
+		var resultErr *DeveloperPortalResultError
+		if !errors.As(err, &resultErr) || resultErr.ResultCode != 1100 {
+			t.Fatalf("expected an explicit portal result error, got %v", err)
+		}
+		var unreadable *DeveloperAppGroupUnreadableResponseError
+		if errors.As(err, &unreadable) {
+			t.Fatalf("a refused request must not be reported as an unreadable response: %v", err)
+		}
+		if !strings.Contains(err.Error(), "Access denied") {
+			t.Fatalf("unexpected message: %v", err)
+		}
+	})
 }
