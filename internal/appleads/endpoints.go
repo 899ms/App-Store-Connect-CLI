@@ -53,7 +53,10 @@ func (spec EndpointSpec) ReadOnlyRequest() bool {
 	return strings.HasSuffix(path, "/find") ||
 		strings.HasSuffix(path, "/query") ||
 		strings.HasPrefix(path, "v5/reports/") ||
-		strings.HasPrefix(path, "v5/search/")
+		strings.HasPrefix(path, "v5/search/") ||
+		// The Platform API serves the same search namespace under v1, and its
+		// geolocation resolution is a POST read.
+		strings.HasPrefix(path, "v1/search/")
 }
 
 // EndpointSpec is the single source of truth for the Apple Ads command and

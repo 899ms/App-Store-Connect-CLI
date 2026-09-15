@@ -93,4 +93,12 @@ func TestEndpointSpecReadOnlyRequestClassification(t *testing.T) {
 	if platformApply.ReadOnlyRequest() {
 		t.Fatal("platform /apply POST must not be classified as a read")
 	}
+	// Apple serves Platform geolocation resolution as a POST search.
+	platformGeo, ok := PlatformEndpointByCommandPath("geo", "resolve")
+	if !ok {
+		t.Fatal("missing platform geo resolve endpoint")
+	}
+	if !platformGeo.ReadOnlyRequest() {
+		t.Fatalf("platform %s %s must be classified as a read", platformGeo.Method, platformGeo.Path)
+	}
 }
