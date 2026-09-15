@@ -140,10 +140,17 @@ fields, so it asks only whether the locale is present in
 `GET /v1/appStoreVersions/{id}/appStoreVersionLocalizations` or
 `GET /v1/appInfos/{id}/appInfoLocalizations` (paginated, limit 200). A
 read-back that finds nothing leaves the 409 unchanged, and a 409 whose Apple
-code is not `ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE` never triggers it. Each
-resolved conflict writes one stderr line, for example
+code is not `ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE` never triggers it, and
+because `shared.IsIfExistsConflict` walks every entry in Apple's `errors[]`
+array, a duplicate code reported after a relationship rejection is still
+matched. Each resolved conflict writes one stderr line, for example
 `metadata push: version localization loc-ja for locale ja already exists;
 updated in place (--if-exists update)`.
+
+This section is the authority on the code for `metadata push`; it settles the
+"code to be confirmed with the PR2 fixture" note left on the shared
+`localizations create` / `update` / `metadata push` table row above, which the
+`localizations create` PR rewrites for its own half.
 
 #### Receipt change
 

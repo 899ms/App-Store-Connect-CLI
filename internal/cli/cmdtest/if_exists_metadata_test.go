@@ -388,3 +388,27 @@ func TestMetadataPushIfExistsUpdateEmitsNoCreateReadinessWarning(t *testing.T) {
 		t.Fatalf("stderr = %q, want no submit-readiness create warning for a resolved duplicate", stderr)
 	}
 }
+
+// Apple can report several causes for one 409, with the duplicate-locale code
+// after a relationship rejection rather than first. Only the shared matcher's
+// walk over every errors[] entry catches this.
+const metadataVersionLocaleDuplicateSecondEntry409 = `{"errors":[{"id":"4d2b8e17-3a95-4c60-b1f7-5e8c9a0d2b43","status":"409","code":"ENTITY_ERROR.RELATIONSHIP.INVALID","title":"The provided entity includes a relationship with an invalid value","detail":"The relationship 'appStoreVersion' is not valid for this request.","source":{"pointer":"/data/relationships/appStoreVersion"}},{"id":"9f3c1d75-4a62-4d1b-8f0e-6c5b2a9d4e31","status":"409","code":"ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE","title":"The provided entity includes an attribute with a value that has already been used","detail":"Entity with locale: 'ja' already exists. Try updating.","source":{"pointer":"/data/attributes/locale"}}]}`
+
+func TestMetadataPushIfExistsSkipMatchesDuplicateCodeAfterTheFirstError(t *testing.T) {
+	dir := writeMetadataVersionFixture(t, `{"description":"Planned JA description","whatsNew":"Planned JA release notes"}`)
+	stdout, stderr, seen, runErr := runIfExistsCommand(t, []string{
+		"metadata", "push", "--app", "app-1", "--version", "1.2.3", "--platform", "IOS", "--dir", dir,
+		"--if-exists", "skip", "--output", "json",
+	}, metadataPushVersionConflictHandler(t, metadataVersionLocaleDuplicateSecondEntry409, nil))
+
+	if runErr != nil {
+		t.Fatalf("expected exit 0 when the duplicate code is not errors[0], got %v (stderr %q)", runErr, stderr)
+	}
+	if countRequests(seen, http.MethodPatch, "/v1/appStoreVersionLocalizations/loc-ja") != 0 {
+		t.Fatalf("--if-exists skip must not update the existing localization: %v", seen)
+	}
+	actions := metadataPushActions(t, stdout)
+	if len(actions) != 1 || actions[0]["status"] != "skipped" || actions[0]["alreadyExists"] != true {
+		t.Fatalf("actions = %v, want one skipped action resolved as already existing", actions)
+	}
+}
