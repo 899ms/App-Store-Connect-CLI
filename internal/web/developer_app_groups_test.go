@@ -1863,3 +1863,55 @@ func TestAssignDeveloperAppGroupRejectsAppGroupIdentifierArgument(t *testing.T) 
 		}
 	})
 }
+
+// TestAssignDeveloperAppGroupKeepsAssigningOnIncompleteListing proves the
+// identifier refusal needs a complete listing: a success envelope that omits
+// its record count could be missing the very group that was named, so the
+// assignment proceeds instead of being refused.
+func TestAssignDeveloperAppGroupKeepsAssigningOnIncompleteListing(t *testing.T) {
+	client := newDeveloperAppGroupsTestClient(t, func(requestNumber int, request *http.Request) (*http.Response, error) {
+		switch requestNumber {
+		case 1:
+			return assertDeveloperPortalBootstrap(t, request), nil
+		case 2:
+			return developerPortalTestResponse(http.StatusOK, `{"resultCode":0,"applicationGroupList":[{"name":"Other","identifier":"group.com.example.other","applicationGroup":"OTHER"}]}`, nil), nil
+		case 3:
+			return developerPortalTestResponse(http.StatusOK, developerBundleAppGroupsFixture(true, "group.com.example.shared"), nil), nil
+		default:
+			t.Fatalf("unexpected request %d (%s %s)", requestNumber, request.Method, request.URL.Path)
+			return nil, nil
+		}
+	})
+	result, err := client.AssignDeveloperAppGroup(context.Background(), DeveloperAppGroupAssignRequest{BundleID: "bundle-1", GroupID: "group.com.example.shared"})
+	if err != nil {
+		t.Fatalf("AssignDeveloperAppGroup() error: %v", err)
+	}
+	if result.Status != "already-assigned" {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+// TestDeleteDeveloperAppGroupReportsMissingGroupAsNotFound classifies a
+// delete whose group is absent from the team so callers can separate it from
+// an internal failure.
+func TestDeleteDeveloperAppGroupReportsMissingGroupAsNotFound(t *testing.T) {
+	client := newDeveloperAppGroupsTestClient(t, func(requestNumber int, request *http.Request) (*http.Response, error) {
+		switch requestNumber {
+		case 1:
+			return assertDeveloperPortalBootstrap(t, request), nil
+		case 2:
+			return developerPortalTestResponse(http.StatusOK, developerAppGroupsListFixture("OTHER"), nil), nil
+		default:
+			t.Fatalf("unexpected request %d (%s %s)", requestNumber, request.Method, request.URL.Path)
+			return nil, nil
+		}
+	})
+	_, err := client.DeleteDeveloperAppGroup(context.Background(), DeveloperAppGroupDeleteRequest{GroupID: "GROUP12345"})
+	var notFound *DeveloperAppGroupNotFoundError
+	if !errors.As(err, &notFound) || notFound.GroupID != "GROUP12345" {
+		t.Fatalf("expected a not-found App Group error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "not found in the selected Developer Portal team") {
+		t.Fatalf("unexpected message: %v", err)
+	}
+}

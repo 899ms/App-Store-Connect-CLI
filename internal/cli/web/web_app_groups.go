@@ -492,12 +492,18 @@ func developerAppGroupMutationError(session *webcore.AuthSession, err error, com
 }
 
 // developerAppGroupError renders an App Group failure the way every other web
-// command does and attaches the structured reason behind it.
+// command does and attaches the structured reason behind it. A failure that
+// already classifies itself keeps its own code and parameter, so an operator
+// mistake is never relabeled as an internal defect.
 func developerAppGroupError(err error, command string) error {
 	if err == nil {
 		return nil
 	}
-	return shared.WithDiagnostic(withWebAuthHint(err, command), developerAppGroupDiagnosticCode(err), "")
+	rendered := withWebAuthHint(err, command)
+	if diagnostic, ok := shared.DiagnosticFromError(err); ok {
+		return shared.WithDiagnostic(rendered, diagnostic.Code, diagnostic.Parameter)
+	}
+	return shared.WithDiagnostic(rendered, developerAppGroupDiagnosticCode(err), "")
 }
 
 // developerAppGroupMissingResultError classifies a 2xx portal response that
@@ -530,9 +536,26 @@ func developerAppGroupDiagnosticCode(err error) shared.DiagnosticCode {
 	var unverified *webcore.DeveloperAppGroupUnverifiedError
 	var inUse *webcore.DeveloperAppGroupInUseError
 	var unreadable *webcore.DeveloperAppGroupUnreadableResponseError
+	var notFound *webcore.DeveloperAppGroupNotFoundError
 	var apiErr *webcore.APIError
 	var urlErr *url.Error
+	// A failure the CLI already reports as a usage or validation problem keeps
+	// that meaning: it describes what the operator typed or the state they
+	// asked about, not a defect.
+	switch shared.ClassifyUsageError(err) {
+	case shared.UsageErrorMissingRequired:
+		return shared.DiagnosticRequiredInputMissing
+	case shared.UsageErrorInvalidValue, shared.UsageErrorOther:
+		return shared.DiagnosticInvalidInput
+	}
+	if shared.IsValidationError(err) {
+		return shared.DiagnosticStateNotReady
+	}
 	switch {
+	case errors.As(err, &notFound):
+		return shared.DiagnosticResourceNotFound
+	case errors.Is(err, webcore.ErrDeveloperPortalTeamNotSelected), errors.Is(err, errNoCachedWebSession):
+		return shared.DiagnosticAuthenticationRejected
 	case errors.As(err, &unverified):
 		return shared.DiagnosticStateNotReady
 	case errors.As(err, &inUse):

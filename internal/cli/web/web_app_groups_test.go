@@ -820,3 +820,94 @@ func TestWebAppGroupsAssignClassifiesEveryFailurePath(t *testing.T) {
 		})
 	}
 }
+
+// TestWebAppGroupsClassifiesOperatorFailures keeps routine operator failures
+// out of the internal_error bucket and preserves a diagnostic the validator
+// already attached.
+func TestWebAppGroupsClassifiesOperatorFailures(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		wantCode  shared.DiagnosticCode
+		wantParam string
+	}{
+		{
+			name:      "validator diagnostic is preserved",
+			err:       shared.WithDiagnostic(errors.New("--apple-id is unsupported"), shared.DiagnosticConflictingInput, "--apple-id"),
+			wantCode:  shared.DiagnosticConflictingInput,
+			wantParam: "--apple-id",
+		},
+		{
+			name:     "missing team selection",
+			err:      fmt.Errorf("%w; run 'asc web auth login'", webcore.ErrDeveloperPortalTeamNotSelected),
+			wantCode: shared.DiagnosticAuthenticationRejected,
+		},
+		{
+			name:     "missing App Group",
+			err:      &webcore.DeveloperAppGroupNotFoundError{GroupID: "GROUP1"},
+			wantCode: shared.DiagnosticResourceNotFound,
+		},
+		{
+			name:     "group still assigned",
+			err:      &webcore.DeveloperAppGroupInUseError{GroupID: "GROUP1", Assignments: []webcore.DeveloperAppGroupAssignment{{BundleID: "bundle-1"}}},
+			wantCode: shared.DiagnosticResourceConflict,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			restore, cleanup := stubWebAppGroupsDependencies(t)
+			defer cleanup()
+			defer restore()
+			deleteDeveloperAppGroupFn = func(context.Context, *webcore.Client, webcore.DeveloperAppGroupDeleteRequest) (*asc.WebAppGroupDeleteResult, error) {
+				return nil, test.err
+			}
+			command := WebAppGroupsDeleteCommand()
+			if err := command.FlagSet.Parse([]string{"--group-id", "GROUP1", "--confirm"}); err != nil {
+				t.Fatalf("parse error: %v", err)
+			}
+			var runErr error
+			_, _ = captureWebCommandOutput(t, func() {
+				runErr = command.Exec(context.Background(), nil)
+			})
+			if runErr == nil {
+				t.Fatal("expected an error")
+			}
+			diagnostic, ok := shared.DiagnosticFromError(runErr)
+			if !ok {
+				t.Fatalf("error %v carries no diagnostic code", runErr)
+			}
+			if diagnostic.Code != test.wantCode || diagnostic.Parameter != test.wantParam {
+				t.Fatalf("diagnostic = %+v, want code %q parameter %q", diagnostic, test.wantCode, test.wantParam)
+			}
+		})
+	}
+}
+
+// TestWebAppGroupsPreservesUsageErrorClassification keeps a usage failure from
+// session resolution on exit code 2 with an input diagnostic.
+func TestWebAppGroupsPreservesUsageErrorClassification(t *testing.T) {
+	restore, cleanup := stubWebAppGroupsDependencies(t)
+	defer cleanup()
+	defer restore()
+	assignDeveloperAppGroupFn = func(context.Context, *webcore.Client, webcore.DeveloperAppGroupAssignRequest) (*webcore.DeveloperAppGroupAssignResult, error) {
+		return nil, shared.NewReportedUsageError(shared.UsageErrorInvalidValue, "ASC_WEB_SESSION is unset or empty")
+	}
+	command := WebAppGroupsAssignCommand()
+	if err := command.FlagSet.Parse([]string{"--group", "GROUP1", "--bundle-id", "bundle-1", "--confirm"}); err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	var runErr error
+	_, _ = captureWebCommandOutput(t, func() {
+		runErr = command.Exec(context.Background(), nil)
+	})
+	if runErr == nil {
+		t.Fatal("expected an error")
+	}
+	if kind := shared.ClassifyUsageError(runErr); kind != shared.UsageErrorInvalidValue {
+		t.Fatalf("usage kind = %q, want %q", kind, shared.UsageErrorInvalidValue)
+	}
+	diagnostic, ok := shared.DiagnosticFromError(runErr)
+	if !ok || diagnostic.Code != shared.DiagnosticInvalidInput {
+		t.Fatalf("diagnostic = %+v (found=%t), want invalid_input", diagnostic, ok)
+	}
+}

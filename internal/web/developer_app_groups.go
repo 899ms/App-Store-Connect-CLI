@@ -140,6 +140,21 @@ func (e *DeveloperAppGroupUnverifiedError) Error() string { return e.Err.Error()
 
 func (e *DeveloperAppGroupUnverifiedError) Unwrap() error { return e.Err }
 
+// ErrDeveloperPortalTeamNotSelected reports that no Developer Portal team is
+// selected for the session, which the operator fixes by authenticating or by
+// naming a team.
+var ErrDeveloperPortalTeamNotSelected = errors.New("developer portal team is not selected")
+
+// DeveloperAppGroupNotFoundError reports that the named App Group does not
+// exist in the selected Developer Portal team.
+type DeveloperAppGroupNotFoundError struct {
+	GroupID string
+}
+
+func (e *DeveloperAppGroupNotFoundError) Error() string {
+	return fmt.Sprintf("app group %q not found in the selected Developer Portal team", e.GroupID)
+}
+
 // DeveloperAppGroupUnreadableResponseError marks an App Group mutation that
 // was abandoned before any write because Apple's Bundle ID response could not
 // be read completely. Nothing was sent, so the operator can retry once the
@@ -230,7 +245,7 @@ func (c *Client) ListDeveloperAppGroups(ctx context.Context, options DeveloperAp
 	}
 	teamID := c.developerPortalTeamID()
 	if teamID == "" {
-		return nil, fmt.Errorf("developer portal team is not selected; %s", developerPortalAuthHint)
+		return nil, fmt.Errorf("%w; %s", ErrDeveloperPortalTeamNotSelected, developerPortalAuthHint)
 	}
 	return c.listDeveloperAppGroupPages(ctx, teamID, options.Paginate, false)
 }
@@ -330,7 +345,7 @@ func (c *Client) DeleteDeveloperAppGroup(ctx context.Context, request DeveloperA
 	}
 	teamID := c.developerPortalTeamID()
 	if teamID == "" {
-		return nil, fmt.Errorf("developer portal team is not selected; %s", developerPortalAuthHint)
+		return nil, fmt.Errorf("%w; %s", ErrDeveloperPortalTeamNotSelected, developerPortalAuthHint)
 	}
 
 	groups, err := c.listDeveloperAppGroupPages(ctx, teamID, true, true)
@@ -339,7 +354,7 @@ func (c *Client) DeleteDeveloperAppGroup(ctx context.Context, request DeveloperA
 	}
 	group, found := findDeveloperAppGroup(groups, request.GroupID)
 	if !found {
-		return nil, fmt.Errorf("app group %q not found in the selected Developer Portal team", request.GroupID)
+		return nil, &DeveloperAppGroupNotFoundError{GroupID: request.GroupID}
 	}
 
 	assignments, err := c.listDeveloperAppGroupAssignments(ctx, request.GroupID)
@@ -662,7 +677,7 @@ func (c *Client) CreateDeveloperAppGroup(ctx context.Context, request DeveloperA
 	}
 	teamID := c.developerPortalTeamID()
 	if teamID == "" {
-		return nil, fmt.Errorf("developer portal team is not selected; %s", developerPortalAuthHint)
+		return nil, fmt.Errorf("%w; %s", ErrDeveloperPortalTeamNotSelected, developerPortalAuthHint)
 	}
 
 	body, err := c.doDeveloperPortalLegacyFormRequest(ctx, developerAppGroupsCreatePath, url.Values{
@@ -704,7 +719,11 @@ func (c *Client) rejectDeveloperAppGroupIdentifier(ctx context.Context, groupID 
 	if teamID == "" {
 		return nil
 	}
-	groups, err := c.listDeveloperAppGroupPages(ctx, teamID, true, false)
+	// Only a complete listing can prove the value is not a resource ID: a
+	// success envelope that is short or sparse may omit the very group that
+	// was named, so the strict read is required and any failure leaves the
+	// assignment to proceed.
+	groups, err := c.listDeveloperAppGroupPages(ctx, teamID, true, true)
 	if err != nil || groups == nil {
 		return nil
 	}
@@ -913,7 +932,7 @@ func (c *Client) verifyDeveloperAppGroups(ctx context.Context, bundleID string, 
 func (c *Client) primeDeveloperAppGroupCSRF(ctx context.Context) error {
 	teamID := c.developerPortalTeamID()
 	if teamID == "" {
-		return fmt.Errorf("developer portal team is not selected; %s", developerPortalAuthHint)
+		return fmt.Errorf("%w; %s", ErrDeveloperPortalTeamNotSelected, developerPortalAuthHint)
 	}
 	c.clearDeveloperCSRFTokens()
 	body, err := c.doDeveloperPortalLegacyFormRequest(ctx, developerAppGroupsListPath, url.Values{
