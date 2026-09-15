@@ -628,12 +628,36 @@ func validateMissingRootComponent(component string) error {
 // final-component O_NOFOLLOW open, this rejects symlinks in parent components
 // below the selected root.
 func OpenFile(path string) (*os.File, error) {
+	root, relative, err := trustedAnchorFor(path)
+	if err != nil {
+		return nil, err
+	}
+	return root.OpenFile(relative)
+}
+
+// ChmodFile changes the mode of an existing regular file through the same
+// rooted traversal OpenFile uses, without requiring read or write access to
+// the file itself. A symlinked final component, a symlink in any component
+// below the selected root, and any non-regular file are rejected.
+func ChmodFile(path string, mode os.FileMode) error {
+	root, relative, err := trustedAnchorFor(path)
+	if err != nil {
+		return err
+	}
+	return root.ChmodFile(relative, mode)
+}
+
+// trustedAnchorFor selects the trusted root for an operator-supplied path and
+// returns the path relative to it. Paths below the current working directory
+// or OS temporary directory use that anchor; other paths use their filesystem
+// root.
+func trustedAnchorFor(path string) (Root, string, error) {
 	if path == "" {
-		return nil, fmt.Errorf("%w: path is empty", ErrEscapesRoot)
+		return Root{}, "", fmt.Errorf("%w: path is empty", ErrEscapesRoot)
 	}
 	absolute, err := filepath.Abs(path)
 	if err != nil {
-		return nil, fmt.Errorf("resolve path %q: %w", path, err)
+		return Root{}, "", fmt.Errorf("resolve path %q: %w", path, err)
 	}
 	volumeRoot := filepath.VolumeName(absolute) + string(filepath.Separator)
 	rootPath := volumeRoot
@@ -649,13 +673,13 @@ func OpenFile(path string) (*os.File, error) {
 	}
 	root, err := New(rootPath)
 	if err != nil {
-		return nil, err
+		return Root{}, "", err
 	}
 	relative, err := filepath.Rel(root.Path(), absolute)
 	if err != nil {
-		return nil, fmt.Errorf("%w: resolve %q below %q: %w", ErrEscapesRoot, path, root.Path(), err)
+		return Root{}, "", fmt.Errorf("%w: resolve %q below %q: %w", ErrEscapesRoot, path, root.Path(), err)
 	}
-	return root.OpenFile(relative)
+	return root, relative, nil
 }
 
 func workingDirectory() string {
@@ -1177,6 +1201,42 @@ func (r Root) OpenFile(name string) (*os.File, error) {
 		return nil, fmt.Errorf("%q is not a regular file", resolved)
 	}
 	return file, nil
+}
+
+// ChmodFile changes the mode of an existing regular file beneath the root. The
+// mode is applied through the pinned parent directory handle, so it needs
+// neither read nor write access to the file and cannot follow a symlinked final
+// component or a symlink in any component below the root. Callers that already
+// hold a descriptor should prefer File.Chmod; this exists for a mode repair on
+// a file the caller may not be able to open, such as a key that denies its own
+// owner read access.
+func (r Root) ChmodFile(name string, mode os.FileMode) error {
+	resolved, err := r.Resolve(name)
+	if err != nil {
+		return err
+	}
+	parent, base, err := r.openParentRooted(resolved)
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+	if err := r.checkParentComponents(resolved); err != nil {
+		return err
+	}
+	info, err := parent.Lstat(base)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return symlinkError(resolved)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%q is not a regular file", resolved)
+	}
+	if r.afterValidationForTest != nil {
+		r.afterValidationForTest()
+	}
+	return parent.Chmod(base, mode)
 }
 
 // CaptureFile opens and reads a regular file beneath the root while retaining

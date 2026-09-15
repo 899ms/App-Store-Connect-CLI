@@ -3518,3 +3518,63 @@ func requireSymlinks(t *testing.T) {
 		t.Skip("symlink creation is not permitted on this host")
 	}
 }
+
+func TestChmodFileTightensContainedFileWithoutReadAccess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose POSIX permission bits")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses owner read permission")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "secret.p8")
+	if err := os.WriteFile(path, []byte("key"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := os.Chmod(path, 0o044); err != nil {
+		t.Fatalf("Chmod() error = %v", err)
+	}
+
+	if err := ChmodFile(path, 0o600); err != nil {
+		t.Fatalf("ChmodFile() error = %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("permissions = %#o, want 0600", info.Mode().Perm())
+	}
+}
+
+func TestChmodFileRefusesSymlinkAndDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose POSIX permission bits")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "secret.p8")
+	if err := os.WriteFile(target, []byte("key"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	link := filepath.Join(dir, "link.p8")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	if err := ChmodFile(link, 0o600); !errors.Is(err, ErrSymlink) {
+		t.Fatalf("ChmodFile(symlink) error = %v, want ErrSymlink", err)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Fatalf("target permissions = %#o, want 0644 untouched", info.Mode().Perm())
+	}
+	if err := ChmodFile(dir, 0o600); err == nil {
+		t.Fatal("expected ChmodFile(directory) to fail")
+	}
+	if err := ChmodFile(filepath.Join(dir, "missing.p8"), 0o600); err == nil {
+		t.Fatal("expected ChmodFile(missing) to fail")
+	}
+}

@@ -140,3 +140,31 @@ func TestFixPrivateKeyFilePermissionsRejectsUnsupportedFileIdentities(t *testing
 		t.Fatalf("symlink target permissions = %#o, want 0644 untouched", info.Mode().Perm())
 	}
 }
+
+func TestFixPrivateKeyFilePermissionsRepairsKeyTheOwnerCannotRead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose POSIX key permissions")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses owner read permission")
+	}
+	path := filepath.Join(t.TempDir(), "AuthKey.p8")
+	writeECDSAPEM(t, path, 0o600, true)
+	if err := os.Chmod(path, 0o044); err != nil {
+		t.Fatalf("Chmod() error: %v", err)
+	}
+	if _, err := os.ReadFile(path); err == nil {
+		t.Fatal("expected the owner to be unable to read the key before repair")
+	}
+
+	changed, err := FixPrivateKeyFilePermissions(path)
+	if err != nil {
+		t.Fatalf("FixPrivateKeyFilePermissions() error: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected permissions to be reported as changed")
+	}
+	if err := ValidateKeyFile(path); err != nil {
+		t.Fatalf("ValidateKeyFile() after repair error: %v", err)
+	}
+}
