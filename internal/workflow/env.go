@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/readonly"
 )
 
 var shellWaitDelay = 5 * time.Second
@@ -64,7 +66,7 @@ func buildEnvSlice(env map[string]string) []string {
 	base = sanitized
 
 	if len(env) == 0 {
-		return base
+		return forceReadOnlyEnv(base)
 	}
 
 	// Build an index once so each override is O(1) instead of scanning base.
@@ -106,7 +108,28 @@ func buildEnvSlice(env map[string]string) []string {
 		indexByKey[k] = len(base)
 		base = append(base, entry)
 	}
-	return base
+	return forceReadOnlyEnv(base)
+}
+
+// forceReadOnlyEnv propagates read-only mode into workflow steps. A step runs
+// a shell command that may invoke asc again, and the root --read-only flag is
+// process-local, so the child needs the environment variable to inherit the
+// policy. It is applied after the step's declared env so a workflow file cannot
+// override it declaratively. This is inheritance rather than containment: a
+// step's shell command can still clear the variable for a process it starts,
+// and a step that runs a different tool never reaches these guards.
+func forceReadOnlyEnv(env []string) []string {
+	if !readonly.Enabled() {
+		return env
+	}
+	forced := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		if key, _, ok := strings.Cut(entry, "="); ok && key == readonly.EnvVar {
+			continue
+		}
+		forced = append(forced, entry)
+	}
+	return append(forced, readonly.EnvVar+"=1")
 }
 
 // runShellCommand executes a command string via bash -o pipefail -c when bash
