@@ -13,6 +13,10 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
+// betaGroupIDNotFoundHint tells an operator which ID --group-id expects when
+// App Store Connect does not know the beta group the flag named.
+const betaGroupIDNotFoundHint = `--group-id expects a beta group ID (list them with: asc testflight groups list --app "APP_ID")`
+
 var betaGroupRelationshipKinds = map[string]relationshipKind{
 	"betaTesters": relationshipList,
 	"builds":      relationshipList,
@@ -48,7 +52,7 @@ func BetaGroupsRelationshipsGetCommand() *ffcli.Command {
 
 	groupID := fs.String("group-id", "", "Beta group ID")
 	aliasID := fs.String("id", "", "Beta group ID (alias of --group-id)")
-	relType := fs.String("type", "", "Relationship type: "+strings.Join(relationshipTypeList(betaGroupRelationshipKinds), ", "))
+	relType := fs.String("type", "", shared.RelationshipTypeFlagUsage(relationshipTypeList(betaGroupRelationshipKinds)))
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -79,13 +83,12 @@ Examples:
 
 			relationshipType := strings.TrimSpace(*relType)
 			if relationshipType == "" {
-				fmt.Fprintln(os.Stderr, "Error: --type is required")
-				return shared.MissingRequiredUsageError("--type")
+				return shared.MissingRelationshipTypeUsageError(relationshipTypeList(betaGroupRelationshipKinds))
 			}
 
 			kind, ok := betaGroupRelationshipKinds[relationshipType]
 			if !ok {
-				fmt.Fprintf(os.Stderr, "Error: --type must be one of: %s\n", strings.Join(relationshipTypeList(betaGroupRelationshipKinds), ", "))
+				shared.PrintInvalidRelationshipTypeError(relationshipType, relationshipTypeList(betaGroupRelationshipKinds))
 				return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticInvalidInput, "--type")
 			}
 
@@ -125,6 +128,18 @@ Examples:
 				asc.WithLinkagesNextURL(*next),
 			}
 
+			// A next-page URL replaces the group path in the request, so a
+			// 404 belongs to that URL rather than to --group-id.
+			parent := shared.RelationshipParent{
+				ResourceType: "betaGroups",
+				Label:        "beta group",
+				ID:           groupValue,
+				Hint:         betaGroupIDNotFoundHint,
+			}
+			if nextValue != "" {
+				parent.ID = ""
+			}
+
 			if *paginate {
 				paginateOpts := append(opts, asc.WithLinkagesLimit(200))
 				resp, err := shared.PaginateWithSpinner(
@@ -137,7 +152,7 @@ Examples:
 					},
 				)
 				if err != nil {
-					return fmt.Errorf("testflight beta-groups relationships view: %w", err)
+					return fmt.Errorf("testflight beta-groups relationships view: %w", shared.DescribeRelationshipLookupFailure(err, relationshipType, parent))
 				}
 
 				return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -145,7 +160,7 @@ Examples:
 
 			resp, err := getBetaGroupRelationshipList(requestCtx, client, relationshipType, groupValue, opts...)
 			if err != nil {
-				return fmt.Errorf("testflight beta-groups relationships view: %w", err)
+				return fmt.Errorf("testflight beta-groups relationships view: %w", shared.DescribeRelationshipLookupFailure(err, relationshipType, parent))
 			}
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
 		},

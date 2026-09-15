@@ -13,6 +13,10 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
+// betaTesterIDNotFoundHint tells an operator which ID --tester-id expects
+// when App Store Connect does not know the beta tester the flag named.
+const betaTesterIDNotFoundHint = `--tester-id expects a beta tester ID (list them with: asc testflight testers list --app "APP_ID")`
+
 var betaTesterRelationshipKinds = map[string]relationshipKind{
 	"apps":       relationshipList,
 	"betaGroups": relationshipList,
@@ -49,7 +53,7 @@ func BetaTestersRelationshipsGetCommand() *ffcli.Command {
 
 	testerID := fs.String("tester-id", "", "Beta tester ID")
 	aliasID := fs.String("id", "", "Beta tester ID (alias of --tester-id)")
-	relType := fs.String("type", "", "Relationship type: "+strings.Join(relationshipTypeList(betaTesterRelationshipKinds), ", "))
+	relType := fs.String("type", "", shared.RelationshipTypeFlagUsage(relationshipTypeList(betaTesterRelationshipKinds)))
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -80,13 +84,12 @@ Examples:
 
 			relationshipType := strings.TrimSpace(*relType)
 			if relationshipType == "" {
-				fmt.Fprintln(os.Stderr, "Error: --type is required")
-				return shared.MissingRequiredUsageError("--type")
+				return shared.MissingRelationshipTypeUsageError(relationshipTypeList(betaTesterRelationshipKinds))
 			}
 
 			kind, ok := betaTesterRelationshipKinds[relationshipType]
 			if !ok {
-				fmt.Fprintf(os.Stderr, "Error: --type must be one of: %s\n", strings.Join(relationshipTypeList(betaTesterRelationshipKinds), ", "))
+				shared.PrintInvalidRelationshipTypeError(relationshipType, relationshipTypeList(betaTesterRelationshipKinds))
 				return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticInvalidInput, "--type")
 			}
 
@@ -126,6 +129,18 @@ Examples:
 				asc.WithLinkagesNextURL(*next),
 			}
 
+			// A next-page URL replaces the tester path in the request, so a
+			// 404 belongs to that URL rather than to --tester-id.
+			parent := shared.RelationshipParent{
+				ResourceType: "betaTesters",
+				Label:        "beta tester",
+				ID:           testerValue,
+				Hint:         betaTesterIDNotFoundHint,
+			}
+			if nextValue != "" {
+				parent.ID = ""
+			}
+
 			if *paginate {
 				paginateOpts := append(opts, asc.WithLinkagesLimit(200))
 				resp, err := shared.PaginateWithSpinner(
@@ -138,7 +153,7 @@ Examples:
 					},
 				)
 				if err != nil {
-					return fmt.Errorf("testflight beta-testers relationships view: %w", err)
+					return fmt.Errorf("testflight beta-testers relationships view: %w", shared.DescribeRelationshipLookupFailure(err, relationshipType, parent))
 				}
 
 				return shared.PrintOutput(resp, *output.Output, *output.Pretty)
@@ -146,7 +161,7 @@ Examples:
 
 			resp, err := getBetaTesterRelationshipList(requestCtx, client, relationshipType, testerValue, opts...)
 			if err != nil {
-				return fmt.Errorf("testflight beta-testers relationships view: %w", err)
+				return fmt.Errorf("testflight beta-testers relationships view: %w", shared.DescribeRelationshipLookupFailure(err, relationshipType, parent))
 			}
 			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
 		},
