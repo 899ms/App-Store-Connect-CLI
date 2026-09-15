@@ -3,6 +3,7 @@ package cmdtest
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -237,6 +238,87 @@ func TestBetaGroupsAddTestersPartialMembershipStillFails(t *testing.T) {
 	}
 }
 
+func TestBetaGroupsAddTestersConflictReadBackChunksTesterIDs(t *testing.T) {
+	setupAuth(t)
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+
+	testerIDs := make([]string, 51)
+	membership := make(map[string][]string, len(testerIDs))
+	for index := range testerIDs {
+		testerIDs[index] = fmt.Sprintf("tester-%02d", index+1)
+		membership[testerIDs[index]] = []string{"group-1"}
+	}
+	requests := stubAddTestersTransport(t, http.StatusConflict, betaGroupAddTestersStateConflictBody, membership, http.StatusOK)
+
+	stdout, _, err := runAddTesters(
+		t,
+		"testflight", "groups", "add-testers",
+		"--group", "group-1",
+		"--tester", strings.Join(testerIDs, ","),
+		"--output", "json",
+	)
+	if err != nil {
+		t.Fatalf("expected the fully satisfied conflict to succeed, got %v", err)
+	}
+	var receipt betaGroupAddTestersReceipt
+	if err := json.Unmarshal([]byte(stdout), &receipt); err != nil {
+		t.Fatalf("parse stdout JSON: %v; stdout=%q", err, stdout)
+	}
+	if len(receipt.TesterIDs) != len(testerIDs) {
+		t.Fatalf("receipt testerIds count = %d, want %d", len(receipt.TesterIDs), len(testerIDs))
+	}
+	if got := *requests; len(got) != 3 || got[0].method != http.MethodPost || got[1].method != http.MethodGet || got[2].method != http.MethodGet {
+		t.Fatalf("expected one POST and two chunked read-backs, got %v", got)
+	}
+}
+
+func TestBetaGroupsAddTestersConflictReadBackPaginates(t *testing.T) {
+	setupAuth(t)
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	requests := make([]addTestersConflictRequest, 0, 3)
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests = append(requests, addTestersConflictRequest{method: req.Method, path: req.URL.Path})
+		switch {
+		case req.Method == http.MethodPost:
+			return jsonResponse(http.StatusConflict, betaGroupAddTestersStateConflictBody)
+		case req.Method == http.MethodGet && req.URL.Query().Get("cursor") == "2":
+			return jsonResponse(http.StatusOK, `{"data":[{"type":"betaTesters","id":"tester-2"}],"links":{}}`)
+		case req.Method == http.MethodGet:
+			if req.URL.Query().Get("filter[betaGroups]") != "group-1" || req.URL.Query().Get("filter[id]") != "tester-1,tester-2" {
+				t.Fatalf("unexpected initial read-back query %q", req.URL.RawQuery)
+			}
+			return jsonResponse(http.StatusOK, `{"data":[{"type":"betaTesters","id":"tester-1"}],"links":{"next":"https://api.appstoreconnect.apple.com/v1/betaTesters?cursor=2"}}`)
+		default:
+			t.Fatalf("unexpected %s request to %q", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+
+	stdout, _, err := runAddTesters(
+		t,
+		"testflight", "groups", "add-testers",
+		"--group", "group-1",
+		"--tester", "tester-1,tester-2",
+		"--output", "json",
+	)
+	if err != nil {
+		t.Fatalf("expected membership across both pages to satisfy the conflict, got %v", err)
+	}
+	var receipt betaGroupAddTestersReceipt
+	if err := json.Unmarshal([]byte(stdout), &receipt); err != nil {
+		t.Fatalf("parse stdout JSON: %v; stdout=%q", err, stdout)
+	}
+	if receipt.Action != "skipped" || !receipt.AlreadyPresent || len(receipt.TesterIDs) != 2 {
+		t.Fatalf("unexpected skip receipt: %+v", receipt)
+	}
+	if len(requests) != 3 || requests[0].method != http.MethodPost || requests[1].method != http.MethodGet || requests[2].method != http.MethodGet {
+		t.Fatalf("expected one POST and two paginated read-backs, got %v", requests)
+	}
+}
+
 func TestBetaGroupsAddTestersNonConflictFailureSkipsReadBack(t *testing.T) {
 	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
@@ -256,6 +338,31 @@ func TestBetaGroupsAddTestersNonConflictFailureSkipsReadBack(t *testing.T) {
 	}
 	if got := *requests; len(got) != 1 || got[0].method != http.MethodPost {
 		t.Fatalf("expected only the POST for a non-conflict failure, got %v", got)
+	}
+}
+
+func TestBetaGroupsAddTestersConflictCodeWithoutHTTP409SkipsReadBack(t *testing.T) {
+	setupAuth(t)
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+
+	requests := stubAddTestersTransport(t, http.StatusUnprocessableEntity,
+		`{"errors":[{"status":"422","code":"CONFLICT","title":"The request cannot be fulfilled","detail":"The build is not eligible for this tester."}]}`,
+		map[string][]string{"tester-1": {"group-1"}}, http.StatusOK)
+
+	_, _, err := runAddTesters(
+		t,
+		"testflight", "groups", "add-testers",
+		"--group", "group-1",
+		"--tester", "tester-1",
+	)
+	if err == nil {
+		t.Fatal("expected a non-409 API error to fail even when its code is CONFLICT")
+	}
+	if !strings.Contains(err.Error(), "not eligible") {
+		t.Fatalf("expected Apple's error detail to survive, got %v", err)
+	}
+	if got := *requests; len(got) != 1 || got[0].method != http.MethodPost {
+		t.Fatalf("expected only the POST for a non-409 failure, got %v", got)
 	}
 }
 

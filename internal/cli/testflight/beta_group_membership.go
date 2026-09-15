@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 
@@ -41,8 +42,7 @@ func (r betaGroupMembershipReadBack) diagnostic() string {
 	return " (" + strings.Join(parts, "; ") + ")"
 }
 
-// isBetaGroupMembershipConflict reports whether err is an App Store Connect
-// HTTP 409 on a beta group membership write.
+// isHTTPConflict reports whether err is an App Store Connect HTTP 409.
 //
 // Apple's code for "this tester is already in the group" is not documented and
 // could not be captured: the codes observed on
@@ -60,16 +60,18 @@ func (r betaGroupMembershipReadBack) diagnostic() string {
 // betaTesterGroupConflictAlreadySatisfied applies the same rule to the sibling
 // POST /v1/betaTesters/{id}/relationships/betaGroups write used by the CSV
 // importer.
-func isBetaGroupMembershipConflict(err error) bool {
-	return err != nil && errors.Is(err, asc.ErrConflict)
+func isHTTPConflict(err error) bool {
+	var apiErr *asc.APIError
+	return errors.As(err, &apiErr) && apiErr != nil && apiErr.StatusCode == http.StatusConflict
 }
 
 // readBackBetaGroupMembership resolves which requested testers are already in
 // the group. It asks App Store Connect for the intersection directly
 // (GET /v1/betaTesters?filter[betaGroups]=GROUP&filter[id]=TESTER,...), so the
-// cost is one request per betaTesterResolveChunkSize requested testers,
-// regardless of how many testers the group holds. It is only called after a
-// failed add, so these reads never touch the success path.
+// cost starts at one request per betaTesterResolveChunkSize requested testers,
+// plus any pagination those filtered responses require, regardless of how many
+// testers the group holds. It is only called after a failed add, so these reads
+// never touch the success path.
 func readBackBetaGroupMembership(
 	ctx context.Context,
 	client *asc.Client,

@@ -34,8 +34,8 @@ const (
 	// BetaGroupTestersActionAdded reports that App Store Connect created the
 	// requested memberships.
 	BetaGroupTestersActionAdded = "added"
-	// BetaGroupTestersActionSkipped reports that every requested tester was
-	// already in the group, so nothing was written.
+	// BetaGroupTestersActionSkipped reports that a post-conflict read-back
+	// confirmed every requested tester in the group.
 	BetaGroupTestersActionSkipped = "skipped"
 )
 

@@ -1291,7 +1291,7 @@ Examples:
 
 			addErr := client.AddBetaTestersToGroup(requestCtx, groupID, testerIDs)
 			if addErr != nil {
-				if !isBetaGroupMembershipConflict(addErr) {
+				if !isHTTPConflict(addErr) {
 					return fmt.Errorf("beta-groups add-testers: failed to add testers: %w", addErr)
 				}
 
