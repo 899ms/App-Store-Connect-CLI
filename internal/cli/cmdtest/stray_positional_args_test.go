@@ -12,6 +12,10 @@ import (
 // telemetry showed callers reaching for most often: a bare resource ID where a
 // flag-only leaf command expects a flag. Every case must fail before auth or
 // any request, name the offending token, and exit with the usage code.
+//
+// Every operand here renders identically in every shell. Quoting and the
+// Windows suppression rule belong to strayPositionalHint and are covered
+// platform-independently by TestStrayPositionalHintRendersSafelyPerShell.
 func TestStrayPositionalOperandsNameTheTokenAndFlag(t *testing.T) {
 	tests := []struct {
 		name     string

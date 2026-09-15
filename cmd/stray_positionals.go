@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
@@ -104,22 +105,33 @@ func strayPositionalError(operands []string) error {
 	return fmt.Errorf("unexpected arguments %s", strings.Join(quoted, ", "))
 }
 
+// strayPositionalHint renders the copyable correction for one operand, using
+// the same rules as the command-path recovery suggestions: POSIX single-quoting
+// everywhere, and no suggestion at all on Windows for an operand that cannot be
+// rendered safely for both cmd.exe and PowerShell. Naming the token is the part
+// that matters; a hint the caller cannot paste verbatim is worse than none.
+func strayPositionalHint(commandName, flagName, operand, goos string) (string, bool) {
+	if goos == "windows" && !isWindowsRecoverySafeArg(operand) {
+		return "", false
+	}
+	return fmt.Sprintf("%s --%s %s", commandName, flagName, shellSafeCommandArg(operand)), true
+}
+
 // printStrayPositionalOperands writes the diagnostic, then the flag the caller
 // most likely meant. The hint is offered only when the operand is the single
 // leftover token and the command defines exactly one primary identifier flag
 // that the caller has not already passed, so it always names a flag that
 // command defines and a value the caller actually typed.
+//
+// The hint is meant to be copied into a shell, so the operand is quoted by
+// strayPositionalHint rather than interpolated raw.
 func printStrayPositionalOperands(commandName string, operands []string, flagSet *flag.FlagSet) {
 	fmt.Fprintf(os.Stderr, "Error: %s\n", strayPositionalError(operands))
 	if len(operands) == 1 {
 		if name, ok := shared.PrimaryIDFlagName(flagSet); ok {
-			fmt.Fprintf(
-				os.Stderr,
-				"Did you mean: %s --%s %s\n",
-				commandName,
-				name,
-				shared.SanitizeTerminal(operands[0]),
-			)
+			if hint, rendered := strayPositionalHint(commandName, name, operands[0], runtime.GOOS); rendered {
+				fmt.Fprintf(os.Stderr, "Did you mean: %s\n", hint)
+			}
 		}
 	}
 	fmt.Fprintln(os.Stderr, "For help:")

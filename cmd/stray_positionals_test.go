@@ -76,6 +76,58 @@ func TestStrayPositionalTelemetryNeverCarriesTheOperand(t *testing.T) {
 	}
 }
 
+// TestStrayPositionalHintRendersSafelyPerShell covers the copyable correction:
+// a POSIX shell gets a quoted argument, and Windows gets no hint at all when
+// the operand cannot be rendered safely for cmd.exe and PowerShell.
+func TestStrayPositionalHintRendersSafelyPerShell(t *testing.T) {
+	tests := []struct {
+		name     string
+		operand  string
+		goos     string
+		want     string
+		rendered bool
+	}{
+		{name: "plain id", operand: "123", goos: "darwin", want: "asc apps view --id 123", rendered: true},
+		{
+			name:     "spaces and a command separator",
+			operand:  "my app; whoami",
+			goos:     "darwin",
+			want:     "asc apps view --id 'my app; whoami'",
+			rendered: true,
+		},
+		{
+			name:     "leading comment marker",
+			operand:  "#app-1",
+			goos:     "darwin",
+			want:     "asc apps view --id '#app-1'",
+			rendered: true,
+		},
+		{
+			name:     "embedded single quote",
+			operand:  "it's",
+			goos:     "darwin",
+			want:     `asc apps view --id 'it'"'"'s'`,
+			rendered: true,
+		},
+		{name: "plain id on windows", operand: "123", goos: "windows", want: "asc apps view --id 123", rendered: true},
+		{name: "ampersand on windows", operand: "x&whoami", goos: "windows"},
+		{name: "semicolon on windows", operand: "x;whoami", goos: "windows"},
+		{name: "empty operand on windows", operand: "", goos: "windows"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, rendered := strayPositionalHint("asc apps view", "id", test.operand, test.goos)
+			if rendered != test.rendered {
+				t.Fatalf("rendered = %v, want %v (hint %q)", rendered, test.rendered, got)
+			}
+			if got != test.want {
+				t.Fatalf("hint = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 // TestLeafOperandContractMatchesDeclaredUsage walks the whole command tree so a
 // new command cannot quietly disagree with the stray-operand exclusion list.
 // The reviewed list in commandAcceptsOperandsPath and each command's own
