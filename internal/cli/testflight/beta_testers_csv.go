@@ -747,7 +747,7 @@ func betaTesterGroupConflictAlreadySatisfied(
 	groupIDs []string,
 	requestErr error,
 ) (bool, error) {
-	if !errors.Is(requestErr, asc.ErrConflict) {
+	if !isHTTPConflict(requestErr) {
 		return false, nil
 	}
 
