@@ -2,6 +2,7 @@ package versions
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -55,8 +56,8 @@ func paginationConflictParameter(limit int, next string, paginate bool) string {
 func VersionsRelationshipsCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("versions links", flag.ExitOnError)
 
-	versionID := fs.String("version-id", "", "App Store version ID")
-	relType := fs.String("type", "", "Relationship type: "+strings.Join(appStoreVersionRelationshipList(), ", "))
+	versionID := fs.String("version-id", "", "App Store version ID (not an app ID; list IDs with \"asc versions list --app APP_ID\")")
+	relType := fs.String("type", "", "Relationship type (required); must be one of: "+appStoreVersionRelationshipValues())
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
 	next := fs.String("next", "", "Fetch next page using a links.next URL")
 	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
@@ -91,13 +92,18 @@ Examples:
 
 			relationshipType := strings.TrimSpace(*relType)
 			if relationshipType == "" {
-				fmt.Fprintln(os.Stderr, "Error: --type is required")
+				fmt.Fprintf(os.Stderr, "Error: --type is required; must be one of: %s\n", appStoreVersionRelationshipValues())
 				return shared.MissingRequiredUsageError("--type")
 			}
 
 			kind, ok := appStoreVersionRelationshipKinds[relationshipType]
 			if !ok {
-				fmt.Fprintf(os.Stderr, "Error: --type must be one of: %s\n", strings.Join(appStoreVersionRelationshipList(), ", "))
+				fmt.Fprintf(
+					os.Stderr,
+					"Error: --type %q is not a valid relationship type; must be one of: %s\n",
+					relationshipType,
+					appStoreVersionRelationshipValues(),
+				)
 				return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticInvalidInput, "--type")
 			}
 
@@ -129,7 +135,7 @@ Examples:
 			case relationshipSingle:
 				resp, err := getAppStoreVersionRelationship(requestCtx, client, relationshipType, trimmedID)
 				if err != nil {
-					return fmt.Errorf("versions links: %w", err)
+					return fmt.Errorf("versions links: %w", describeRelationshipLookupFailure(err, relationshipType, trimmedID))
 				}
 				return shared.PrintOutput(resp, *output.Output, *output.Pretty)
 			case relationshipList:
@@ -142,20 +148,20 @@ Examples:
 					paginateOpts := append(opts, asc.WithLinkagesLimit(200))
 					firstPage, err := getAppStoreVersionRelationshipList(requestCtx, client, relationshipType, trimmedID, paginateOpts...)
 					if err != nil {
-						return fmt.Errorf("versions links: failed to fetch: %w", err)
+						return fmt.Errorf("versions links: failed to fetch: %w", describeRelationshipLookupFailure(err, relationshipType, trimmedID))
 					}
 					resp, err := asc.PaginateAll(requestCtx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
 						return getAppStoreVersionRelationshipList(ctx, client, relationshipType, trimmedID, asc.WithLinkagesNextURL(nextURL))
 					})
 					if err != nil {
-						return fmt.Errorf("versions links: %w", err)
+						return fmt.Errorf("versions links: %w", describeRelationshipLookupFailure(err, relationshipType, trimmedID))
 					}
 					return shared.PrintOutput(resp, *output.Output, *output.Pretty)
 				}
 
 				resp, err := getAppStoreVersionRelationshipList(requestCtx, client, relationshipType, trimmedID, opts...)
 				if err != nil {
-					return fmt.Errorf("versions links: %w", err)
+					return fmt.Errorf("versions links: %w", describeRelationshipLookupFailure(err, relationshipType, trimmedID))
 				}
 				return shared.PrintOutput(resp, *output.Output, *output.Pretty)
 			default:
@@ -206,4 +212,51 @@ func appStoreVersionRelationshipList() []string {
 	}
 	sort.Strings(relationships)
 	return relationships
+}
+
+// appStoreVersionRelationshipValues renders the accepted --type values so the
+// flag help and both --type usage errors always agree.
+func appStoreVersionRelationshipValues() string {
+	return strings.Join(appStoreVersionRelationshipList(), ", ")
+}
+
+// describeRelationshipLookupFailure names the resource App Store Connect could
+// not find so a 404 says whether the version ID is unknown or the relationship
+// linkage is missing. A 404 that names neither, and every other failure, is
+// returned unchanged.
+func describeRelationshipLookupFailure(err error, relationshipType, versionID string) error {
+	if err == nil || !asc.IsNotFound(err) {
+		return err
+	}
+	if asc.IsMissingResourceOfType(err, "appStoreVersions") {
+		if versionID == "" {
+			return shared.NewErrorWithCause(
+				errors.New("the app store version referenced by --next was not found"),
+				err,
+			)
+		}
+		return shared.NewErrorWithCause(
+			fmt.Errorf(
+				`app store version %q was not found; --version-id expects an App Store version ID, not an app ID (list them with: asc versions list --app "APP_ID")`,
+				versionID,
+			),
+			err,
+		)
+	}
+	if !namesRelationshipResource(err, relationshipType) {
+		return err
+	}
+	if versionID == "" {
+		return fmt.Errorf("%s relationship was not found: %w", relationshipType, err)
+	}
+	return fmt.Errorf("%s relationship was not found for app store version %q: %w", relationshipType, versionID, err)
+}
+
+// namesRelationshipResource reports whether Apple's 404 detail names the
+// resource behind relationshipType, which Apple spells either exactly like the
+// relationship or as its plural. Any other 404 keeps its original message so an
+// unrelated failure is not relabeled as a missing relationship.
+func namesRelationshipResource(err error, relationshipType string) bool {
+	return asc.IsMissingResourceOfType(err, relationshipType) ||
+		asc.IsMissingResourceOfType(err, relationshipType+"s")
 }
