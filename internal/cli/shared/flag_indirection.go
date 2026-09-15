@@ -19,6 +19,15 @@ const (
 	MaxIndirectFileValueSize = 1 << 20
 )
 
+// HasFlagValueIndirection reports whether value carries one of the
+// indirection prefixes, so callers that must not read the environment or the
+// filesystem (help rendering) can recognize such a value without resolving it.
+func HasFlagValueIndirection(value string) bool {
+	return strings.HasPrefix(value, indirectEnvPrefix) ||
+		strings.HasPrefix(value, indirectFilePrefix) ||
+		strings.HasPrefix(value, indirectEscapePrefix)
+}
+
 // ResolveFlagValueIndirection expands the value-indirection prefixes shared by
 // every value-taking flag: `@env:NAME` resolves to that environment variable,
 // `@file:PATH` resolves to that file's contents with one trailing line ending
@@ -80,8 +89,15 @@ func resolveIndirectFileValue(flagName, path string) (string, error) {
 	if len(data) > MaxIndirectFileValueSize {
 		return "", indirectValueUsageError(flagName, "file "+label+" exceeds the 1 MiB limit")
 	}
-	value := strings.TrimSuffix(string(data), "\n")
-	value = strings.TrimSuffix(value, "\r")
+	// Remove exactly one trailing line ending: the complete CRLF pair or a
+	// lone LF. A lone CR is data, not a line ending asc recognizes, so it
+	// survives in secrets and payload text that legitimately end in `\r`.
+	value := string(data)
+	if strings.HasSuffix(value, "\r\n") {
+		value = value[:len(value)-2]
+	} else {
+		value = strings.TrimSuffix(value, "\n")
+	}
 	if value == "" {
 		return "", indirectValueUsageError(flagName, "file "+label+" is empty")
 	}

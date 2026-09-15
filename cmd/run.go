@@ -53,9 +53,19 @@ func Run(args []string, versionInfo string) int {
 	// flag, including typed and repeat-safe values, validates the resolved
 	// text. Structural analyses keep using the original args: the rewrite is
 	// token-for-token, and resolved values must never reach diagnostics or
-	// telemetry. An explicit help request wins over an unresolvable value.
-	parseArgs := args
-	if !requestedHelp(root, args) {
+	// telemetry.
+	//
+	// An explicit help request wins unconditionally: help output depends only
+	// on which command the args select, so the indirect flag tokens are
+	// dropped instead of resolved. `--help` then reads no environment
+	// variable and opens no file, help prints whether or not the value would
+	// have resolved, and no resolved value can reach help output or a parse
+	// diagnostic.
+	helpRequested := requestedHelp(root, args)
+	var parseArgs []string
+	if helpRequested {
+		parseArgs = dropIndirectFlagValues(root, args)
+	} else {
 		resolvedArgs, err := resolveFlagValueIndirection(root, args)
 		if err != nil {
 			recoverCIReportFlags(root, args)
@@ -81,7 +91,7 @@ func Run(args []string, versionInfo string) int {
 			// diagnostic: agents pipe and redirect it, so it belongs on stdout
 			// with a success exit code. Help raised by any other parse path is
 			// a usage failure and stays on stderr.
-			if requestedHelp(root, args) {
+			if helpRequested {
 				fmt.Fprint(os.Stdout, parseOutput.String())
 				return ExitSuccess
 			}

@@ -31,6 +31,7 @@ func newIndirectionTestTree() *ffcli.Command {
 	updateFlags.String("secret", "", "")
 	updateFlags.String("output", "", "")
 	updateFlags.String("format", "", "")
+	updateFlags.String("profile", "", "")
 	updateFlags.Bool("confirm", false, "")
 	updateFlags.Int("limit", 0, "")
 	shared.BindOnceCSVFlag(updateFlags, "events", "")
@@ -114,6 +115,11 @@ func TestResolveFlagValueIndirectionRewritesArgs(t *testing.T) {
 			want: []string{"localizations", "update", "--output", "@env:ASC_TEST_SECRET", "--secret", "hunter2"},
 		},
 		{
+			name: "command-local profile flag resolves",
+			args: []string{"localizations", "update", "--profile", "@file:" + notesPath},
+			want: []string{"localizations", "update", "--profile", "From file"},
+		},
+		{
 			name: "command-local format flag resolves",
 			args: []string{"localizations", "update", "--format", "@env:ASC_TEST_FORMAT"},
 			want: []string{"localizations", "update", "--format", "json"},
@@ -122,6 +128,11 @@ func TestResolveFlagValueIndirectionRewritesArgs(t *testing.T) {
 			name: "terminator stops rewriting",
 			args: []string{"localizations", "update", "--secret", "@env:ASC_TEST_SECRET", "--", "--whats-new", "@env:ASC_TEST_NOTES"},
 			want: []string{"localizations", "update", "--secret", "hunter2", "--", "--whats-new", "@env:ASC_TEST_NOTES"},
+		},
+		{
+			name: "malformed flag prefix stops rewriting",
+			args: []string{"localizations", "update", "---secret=@env:ASC_TEST_SECRET", "--whats-new", "@env:ASC_TEST_NOTES"},
+			want: []string{"localizations", "update", "---secret=@env:ASC_TEST_SECRET", "--whats-new", "@env:ASC_TEST_NOTES"},
 		},
 		{
 			name: "unknown flag stops rewriting",
@@ -285,5 +296,181 @@ func TestRunHelpWinsOverUnresolvableIndirectValue(t *testing.T) {
 	}
 	if stderr != "" {
 		t.Fatalf("stderr = %q, want empty", stderr)
+	}
+}
+
+func TestResolveFlagValueIndirectionScopesRootSelectorsToRootFlagSet(t *testing.T) {
+	t.Setenv("ASC_TEST_PROFILE_PATH", "/tmp/asc-test/dev.mobileprovision")
+
+	root := rootCommandForArgs("1.0.0", []string{"signing", "run"})
+	commandLocal := []string{"signing", "run", "--profile", "@env:ASC_TEST_PROFILE_PATH"}
+	got, err := resolveFlagValueIndirection(root, commandLocal)
+	if err != nil {
+		t.Fatalf("resolveFlagValueIndirection() error = %v", err)
+	}
+	want := []string{"signing", "run", "--profile", "/tmp/asc-test/dev.mobileprovision"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("resolveFlagValueIndirection() = %q, want %q", got, want)
+	}
+
+	rootLevel := []string{"--profile", "@env:ASC_TEST_PROFILE_PATH", "apps", "list"}
+	got, err = resolveFlagValueIndirection(rootCommandForArgs("1.0.0", rootLevel), rootLevel)
+	if err != nil {
+		t.Fatalf("resolveFlagValueIndirection() error = %v", err)
+	}
+	if !reflect.DeepEqual(got, rootLevel) {
+		t.Fatalf("resolveFlagValueIndirection() = %q, want the root selector untouched %q", got, rootLevel)
+	}
+}
+
+func TestRunHelpWinsOverResolvableIndirectTypedValue(t *testing.T) {
+	resetReportFlags(t)
+	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
+	t.Setenv("ASC_TEST_INDIRECT_LIMIT", "5")
+	stdout, stderr := captureCommandOutput(t, func() {
+		if code := Run([]string{"apps", "list", "--limit", "@env:ASC_TEST_INDIRECT_LIMIT", "--help"}, "1.0.0"); code != ExitSuccess {
+			t.Fatalf("Run() exit code = %d, want %d", code, ExitSuccess)
+		}
+	})
+	if !strings.Contains(stdout, "USAGE") || !strings.Contains(stdout, "--limit") {
+		t.Fatalf("stdout = %q, want command help", stdout)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want empty", stderr)
+	}
+}
+
+func TestRunHelpDropsIndirectValuesWithoutResolvingThem(t *testing.T) {
+	resetReportFlags(t)
+	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
+	const secret = "s3cr3t-not-a-number-4b7d"
+	t.Setenv("ASC_TEST_INDIRECT_LIMIT_BAD", secret)
+	os.Unsetenv("ASC_TEST_INDIRECT_UNSET")
+	missing := filepath.Join(t.TempDir(), "never-read.txt")
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "resolvable typed value",
+			args: []string{"apps", "list", "--limit", "@env:ASC_TEST_INDIRECT_LIMIT_BAD", "--help"},
+		},
+		{
+			name: "unset environment variable",
+			args: []string{"apps", "list", "--limit", "@env:ASC_TEST_INDIRECT_UNSET", "--help"},
+		},
+		{
+			name: "missing file is never opened",
+			args: []string{"apps", "list", "--next=@file:" + missing, "--help"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stdout, stderr := captureCommandOutput(t, func() {
+				if code := Run(test.args, "1.0.0"); code != ExitSuccess {
+					t.Fatalf("Run() exit code = %d, want %d", code, ExitSuccess)
+				}
+			})
+			if !strings.Contains(stdout, "USAGE") {
+				t.Fatalf("stdout = %q, want command help", stdout)
+			}
+			if strings.Contains(stdout, secret) || strings.Contains(stderr, secret) {
+				t.Fatalf("help leaked the resolved value: stdout = %q, stderr = %q", stdout, stderr)
+			}
+			if stderr != "" {
+				t.Fatalf("stderr = %q, want empty", stderr)
+			}
+		})
+	}
+}
+
+func TestDropIndirectFlagValuesKeepsEverythingElse(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "separate and inline indirect values dropped",
+			args: []string{"localizations", "update", "--secret", "@env:X", "--whats-new=@file:/tmp/x", "--help"},
+			want: []string{"localizations", "update", "--help"},
+		},
+		{
+			name: "escape form dropped too",
+			args: []string{"localizations", "update", "--whats-new", "@@literal", "--help"},
+			want: []string{"localizations", "update", "--help"},
+		},
+		{
+			name: "plain values and booleans kept",
+			args: []string{"localizations", "update", "--secret", "plain", "--confirm", "--help"},
+			want: []string{"localizations", "update", "--secret", "plain", "--confirm", "--help"},
+		},
+		{
+			name: "excluded and unknown flags kept verbatim",
+			args: []string{"--profile", "@env:X", "localizations", "update", "--output", "@env:X", "--nope", "@env:X", "--help"},
+			want: []string{"--profile", "@env:X", "localizations", "update", "--output", "@env:X", "--nope", "@env:X", "--help"},
+		},
+		{
+			name: "malformed flag prefix kept so bad flag syntax still reports",
+			args: []string{"localizations", "update", "---secret=@env:X", "--help"},
+			want: []string{"localizations", "update", "---secret=@env:X", "--help"},
+		},
+		{
+			name: "terminator and positionals kept",
+			args: []string{"localizations", "update", "@env:X", "--help", "--", "@env:X"},
+			want: []string{"localizations", "update", "@env:X", "--help", "--", "@env:X"},
+		},
+		{
+			name: "trailing flag without a value kept",
+			args: []string{"localizations", "update", "--secret"},
+			want: []string{"localizations", "update", "--secret"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := dropIndirectFlagValues(newIndirectionTestTree(), test.args)
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("dropIndirectFlagValues() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestRunHelpLeavesLiteralValueValidationUnchanged(t *testing.T) {
+	resetReportFlags(t)
+	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
+	// Help precedence covers indirection, not flag parsing at large: a literal
+	// value keeps the behavior it had before this feature existed.
+	stdout, stderr := captureCommandOutput(t, func() {
+		if code := Run([]string{"apps", "list", "--limit=not-a-number", "--help"}, "1.0.0"); code != ExitUsage {
+			t.Fatalf("Run() exit code = %d, want %d", code, ExitUsage)
+		}
+	})
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, "for flag -limit") {
+		t.Fatalf("stderr = %q, want the invalid-value error for --limit", stderr)
+	}
+}
+
+func TestRunHelpKeepsBadFlagSyntaxAuthoritative(t *testing.T) {
+	resetReportFlags(t)
+	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
+	t.Setenv("ASC_TEST_INDIRECT_LIMIT", "5")
+	stdout, stderr := captureCommandOutput(t, func() {
+		if code := Run([]string{"apps", "list", "---limit=@env:ASC_TEST_INDIRECT_LIMIT", "--help"}, "1.0.0"); code != ExitUsage {
+			t.Fatalf("Run() exit code = %d, want %d", code, ExitUsage)
+		}
+	})
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, "bad flag syntax") {
+		t.Fatalf("stderr = %q, want the bad flag syntax error", stderr)
+	}
+	if strings.Contains(stderr, "=5") {
+		t.Fatalf("stderr = %q, want the raw token, not a resolved value", stderr)
 	}
 }

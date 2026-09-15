@@ -106,6 +106,8 @@ func TestResolveFlagValueIndirectionReadsFile(t *testing.T) {
 		{name: "only one trailing newline trimmed", content: "line one\nline two\n\n", want: "line one\nline two\n"},
 		{name: "no trailing newline", content: "hunter2", want: "hunter2"},
 		{name: "interior whitespace preserved", content: "  padded  \n", want: "  padded  "},
+		{name: "lone trailing carriage return preserved", content: "hunter2\r", want: "hunter2\r"},
+		{name: "only the crlf pair is trimmed", content: "hunter2\r\r\n", want: "hunter2\r"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -200,5 +202,25 @@ func assertIndirectionUsageError(t *testing.T, err error, parameter, wantMessage
 	}
 	if diagnostic.Code != DiagnosticInvalidInput || diagnostic.Parameter != parameter {
 		t.Fatalf("diagnostic = %+v, want %s on %s", diagnostic, DiagnosticInvalidInput, parameter)
+	}
+}
+
+func TestHasFlagValueIndirection(t *testing.T) {
+	tests := []struct {
+		value string
+		want  bool
+	}{
+		{value: "@env:NAME", want: true},
+		{value: "@file:/tmp/x", want: true},
+		{value: "@@literal", want: true},
+		{value: "@env:", want: true},
+		{value: "@handle", want: false},
+		{value: "plain", want: false},
+		{value: "", want: false},
+	}
+	for _, test := range tests {
+		if got := HasFlagValueIndirection(test.value); got != test.want {
+			t.Fatalf("HasFlagValueIndirection(%q) = %t, want %t", test.value, got, test.want)
+		}
 	}
 }
