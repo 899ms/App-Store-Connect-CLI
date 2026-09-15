@@ -674,10 +674,13 @@ version. Any other 409 keeps failing.`,
 // string is already taken on POST /v1/appStoreVersions. Apple answers the
 // duplicate with ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE on the
 // /data/attributes/versionString pointer ("The version number has been
-// previously used."). The same endpoint also returns 409
+// previously used."). Live against app 6759231657 on 2026-09-15 that code
+// arrives as the *second* entry of the errors[] array, behind
 // ENTITY_ERROR.RELATIONSHIP.INVALID ("You cannot create a new version of the
-// App in the current state.") and STATE_ERROR.*; those are not existence
-// conflicts and keep failing.
+// App in the current state."), so shared.IsIfExistsConflict matches every code
+// in the response. A 409 that carries only the relationship rejection, or
+// STATE_ERROR.*, is not an existence conflict and keeps failing; so does a
+// duplicate whose read-back finds no such version string.
 var versionsCreateExistsCodes = []string{"ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE"}
 
 // findExistingAppStoreVersion reads back the version a 409 conflict referred

@@ -13,11 +13,16 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 )
 
-// Apple's real 409 body for a duplicate versionString on POST /v1/appStoreVersions.
-const versionsDuplicate409 = `{"errors":[{"id":"0b9c4f2e-1d0e-4f5a-9c6b-3e2f1a7d8c90","status":"409","code":"ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE","title":"The provided entity includes an attribute with a value that has already been used","detail":"The version number has been previously used.","source":{"pointer":"/data/attributes/versionString"}}]}`
+// Apple's real 409 body for a duplicate versionString on POST /v1/appStoreVersions,
+// captured live against app 6759231657 on 2026-09-15. Apple reports two errors
+// and the duplicate is the second one, so the conflict matcher has to inspect
+// every entry in errors[] rather than only the first.
+const versionsDuplicate409 = `{"errors":[{"id":"b068c5c0-b3fa-4d12-aa89-f1b9aa061b28","status":"409","code":"ENTITY_ERROR.RELATIONSHIP.INVALID","title":"The provided entity includes a relationship with an invalid value","detail":"You cannot create a new version of the App in the current state.","source":{"pointer":"/data/relationships/app"}},{"id":"eb1884a7-e427-42db-ac95-26c49c84a5c2","status":"409","code":"ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE","title":"The provided entity includes an attribute with a value that has already been used","detail":"The version number has been previously used.","source":{"pointer":"/data/attributes/versionString"}}]}`
 
-// Apple's 409 body when an appStoreReviewDetail already exists for the version.
-const reviewDetailExists409 = `{"errors":[{"id":"6a1e3b2c-9d4f-4a8e-b7c0-2f5d1e8a9b3c","status":"409","code":"ENTITY_ERROR.RELATIONSHIP.INVALID","title":"The provided entity includes a relationship with an invalid value","detail":"There is already an appStoreReviewDetail for this appStoreVersion.","source":{"pointer":"/data/relationships/appStoreVersion"}}]}`
+// Apple's 409 body when an appStoreReviewDetail already exists for the version,
+// captured live against app 6759231657 on 2026-09-15. Apple answers this
+// existence conflict with STATE_ERROR.ALREADY_EXISTS.
+const reviewDetailExists409 = `{"errors":[{"id":"a48854d3-ef2e-4eea-9451-228c907bf1ad","status":"409","code":"STATE_ERROR.ALREADY_EXISTS","title":"Resource already exists.","detail":"The given app version already has an existing review."}]}`
 
 // Apple's 409 on POST /v1/appStoreVersions when the app cannot take a new
 // version yet; it is not an existence conflict and must keep failing.
@@ -298,7 +303,9 @@ func TestVersionsCreateDefaultIfExistsFailPreservesConflict(t *testing.T) {
 	if runErr == nil || !errors.Is(runErr, asc.ErrConflict) {
 		t.Fatalf("run error = %v, want the 409 conflict", runErr)
 	}
-	if !strings.Contains(runErr.Error(), "The version number has been previously used.") {
+	// Apple's own errors[0] detail is what the CLI has always surfaced for this
+	// body; --if-exists fail must keep printing it verbatim.
+	if !strings.Contains(runErr.Error(), "You cannot create a new version of the App in the current state.") {
 		t.Fatalf("run error = %v, want Apple detail preserved", runErr)
 	}
 	if stdout != "" {
@@ -326,8 +333,8 @@ func TestVersionsCreateIfExistsSkipStillFailsWhenReadBackFindsNothing(t *testing
 	if runErr == nil || !errors.Is(runErr, asc.ErrConflict) {
 		t.Fatalf("run error = %v, want the original 409", runErr)
 	}
-	if !strings.Contains(runErr.Error(), "The version number has been previously used.") {
-		t.Fatalf("run error = %v, want original duplicate detail", runErr)
+	if !strings.Contains(runErr.Error(), "You cannot create a new version of the App in the current state.") {
+		t.Fatalf("run error = %v, want the original conflict", runErr)
 	}
 	if stdout != "" {
 		t.Fatalf("stdout = %q, want empty", stdout)

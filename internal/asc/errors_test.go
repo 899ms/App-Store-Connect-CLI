@@ -92,3 +92,29 @@ func TestAPIErrorError_AssociatedErrorsSortedByResourcePath(t *testing.T) {
 		t.Fatalf("expected associated errors to be sorted by path, got %q", message)
 	}
 }
+
+func TestParseErrorWithStatus_RetainsEveryErrorCode(t *testing.T) {
+	// Apple's live 409 for a duplicate versionString on
+	// POST /v1/appStoreVersions carries two errors, and the duplicate code is
+	// the second one. Captured against app 6759231657 on 2026-09-15.
+	payload := `{"errors":[{"id":"b068c5c0-b3fa-4d12-aa89-f1b9aa061b28","status":"409","code":"ENTITY_ERROR.RELATIONSHIP.INVALID","title":"The provided entity includes a relationship with an invalid value","detail":"You cannot create a new version of the App in the current state.","source":{"pointer":"/data/relationships/app"}},{"id":"eb1884a7-e427-42db-ac95-26c49c84a5c2","status":"409","code":"ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE","title":"The provided entity includes an attribute with a value that has already been used","detail":"The version number has been previously used.","source":{"pointer":"/data/attributes/versionString"}}]}`
+
+	err := ParseErrorWithStatus([]byte(payload), 409)
+
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("ParseErrorWithStatus returned %T, want *APIError", err)
+	}
+	if apiErr.Code != "ENTITY_ERROR.RELATIONSHIP.INVALID" {
+		t.Fatalf("Code = %q, want the first error's code", apiErr.Code)
+	}
+	want := []string{"ENTITY_ERROR.RELATIONSHIP.INVALID", "ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE"}
+	if len(apiErr.AllCodes) != len(want) {
+		t.Fatalf("AllCodes = %v, want %v", apiErr.AllCodes, want)
+	}
+	for i, code := range want {
+		if apiErr.AllCodes[i] != code {
+			t.Fatalf("AllCodes = %v, want %v", apiErr.AllCodes, want)
+		}
+	}
+}
