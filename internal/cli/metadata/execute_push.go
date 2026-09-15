@@ -60,7 +60,10 @@ func ExecutePushWithWarnings(ctx context.Context, opts PushExecutionOptions) (Pu
 		return PushPlanResult{}, nil, shared.UsageError("--confirm is required when applying an approved metadata plan")
 	}
 
-	ifExistsMode, err := shared.ParseIfExistsMode(opts.IfExists, shared.IfExistsSkip, shared.IfExistsUpdate)
+	// Unset means fail: release orchestration builds these options without a
+	// conflict policy. Command code validates the raw flag at its own boundary,
+	// so an explicit --if-exists "" never reaches here as an empty value.
+	ifExistsMode, err := shared.ParseOptionalIfExistsMode(opts.IfExists, shared.IfExistsSkip, shared.IfExistsUpdate)
 	if err != nil {
 		return PushPlanResult{}, nil, err
 	}

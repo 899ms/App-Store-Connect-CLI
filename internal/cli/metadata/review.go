@@ -118,6 +118,11 @@ Examples:
 			if len(args) > 0 {
 				return shared.UsageError("metadata plan does not accept positional arguments")
 			}
+			// See the note in push.go: the bound flag defaults to fail, so an
+			// empty value is an explicitly supplied unsupported value.
+			if _, err := shared.ParseIfExistsMode(*ifExists, shared.IfExistsSkip, shared.IfExistsUpdate); err != nil {
+				return err
+			}
 			artifact, warnings, err := ExecuteMetadataPlanWithWarnings(ctx, PushExecutionOptions{
 				CommandName:  "plan",
 				AppID:        *appID,
@@ -437,7 +442,7 @@ func metadataReviewDir(reviewDir string) string {
 // before this flag existed keeps its hash; skip and update each change it, so
 // switching the conflict policy invalidates the approval.
 func normalizedIfExistsPlanValue(raw string) string {
-	mode, err := shared.ParseIfExistsMode(raw, shared.IfExistsSkip, shared.IfExistsUpdate)
+	mode, err := shared.ParseOptionalIfExistsMode(raw, shared.IfExistsSkip, shared.IfExistsUpdate)
 	if err != nil {
 		// Unreachable in practice: an unsupported value is a usage error
 		// before any plan is hashed. Keep the raw spelling so it can never
