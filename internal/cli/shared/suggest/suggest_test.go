@@ -2,6 +2,7 @@ package suggest
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -157,5 +158,26 @@ func TestEditDistanceCountsAdjacentTranspositionOnce(t *testing.T) {
 	}
 	if !withinThreshold("apps", 1) || withinThreshold("apps", 2) {
 		t.Fatalf("unexpected threshold behavior for short command length")
+	}
+}
+
+// The unknown token is whatever the caller typed, so the ranker must stay
+// bounded by the command names it compares against rather than by that token.
+// A full edit-distance matrix over a token this long allocates a row per
+// character for every candidate.
+func TestCommandsStaysBoundedForAnOversizedInput(t *testing.T) {
+	candidates := []string{"list", "view", "create", "phased-release"}
+	huge := strings.Repeat("q", 200000)
+
+	if got := Commands(huge, candidates); got != nil {
+		t.Fatalf("Commands() = %v, want no suggestion for an oversized input", got)
+	}
+
+	perCandidate := testing.AllocsPerRun(1, func() {
+		_ = editDistance(huge, "phased-release")
+	})
+	// Three rolling rows, plus slack for the test harness itself.
+	if perCandidate > 10 {
+		t.Fatalf("editDistance allocated %v times for one candidate, want a handful of rolling rows", perCandidate)
 	}
 }

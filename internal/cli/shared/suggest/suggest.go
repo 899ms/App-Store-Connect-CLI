@@ -145,7 +145,14 @@ func withinThreshold(input string, dist int) bool {
 
 // editDistance computes the optimal string alignment distance (Levenshtein
 // plus adjacent transpositions counted as one edit), so `lsit` sits one edit
-// from `list`. Command names are short ASCII, so the full matrix is cheap.
+// from `list`.
+//
+// One of the two strings is whatever the caller typed, which the OS caps at
+// hundreds of kilobytes rather than at anything command-shaped, so the matrix
+// is never materialized: the transposition rule needs the two preceding rows,
+// and three rolling rows over the shorter string keep memory proportional to
+// the command name being compared. The distance is symmetric, so ordering the
+// pair by length does not change the result.
 func editDistance(a, b string) int {
 	if a == b {
 		return 0
@@ -156,29 +163,32 @@ func editDistance(a, b string) int {
 	if b == "" {
 		return len(a)
 	}
-
-	rows := make([][]int, len(a)+1)
-	for i := range rows {
-		rows[i] = make([]int, len(b)+1)
-		rows[i][0] = i
+	if len(b) > len(a) {
+		a, b = b, a
 	}
+
+	prev2 := make([]int, len(b)+1)
+	prev := make([]int, len(b)+1)
+	cur := make([]int, len(b)+1)
 	for j := 0; j <= len(b); j++ {
-		rows[0][j] = j
+		prev[j] = j
 	}
 
 	for i := 1; i <= len(a); i++ {
+		cur[0] = i
 		for j := 1; j <= len(b); j++ {
 			cost := 0
 			if a[i-1] != b[j-1] {
 				cost = 1
 			}
-			best := min(rows[i-1][j]+1, rows[i][j-1]+1, rows[i-1][j-1]+cost)
+			best := min(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
 			if i > 1 && j > 1 && a[i-1] == b[j-2] && a[i-2] == b[j-1] {
-				best = min(best, rows[i-2][j-2]+1)
+				best = min(best, prev2[j-2]+1)
 			}
-			rows[i][j] = best
+			cur[j] = best
 		}
+		prev2, prev, cur = prev, cur, prev2
 	}
 
-	return rows[len(a)][len(b)]
+	return prev[len(b)]
 }
