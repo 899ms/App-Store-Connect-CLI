@@ -124,6 +124,11 @@ func TestHoistRootProfileFlag(t *testing.T) {
 			want: []string{"search", "upload a build", "--profile", "staging"},
 		},
 		{
+			name: "stops at an empty positional argument",
+			args: []string{"search", "", "--profile", "staging"},
+			want: []string{"search", "", "--profile", "staging"},
+		},
+		{
 			name: "stops at an unknown flag",
 			args: []string{"apps", "list", "--bogus", "--profile", "staging"},
 			want: []string{"apps", "list", "--bogus", "--profile", "staging"},

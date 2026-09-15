@@ -26,10 +26,11 @@ const rootProfileFlagName = shared.RootProfileFlagName
 //
 //   - a command that defines its own `profile` flag keeps it, so
 //     `asc signing run --profile app.mobileprovision` is untouched;
-//   - the walk stops at `--`, at the first positional argument, at a malformed
-//     `---flag` spelling, and at the first unknown flag, so every existing
-//     diagnostic and positional payload keeps describing the invocation as the
-//     operator wrote it;
+//   - the walk stops at `--`, at the first positional argument (an empty token
+//     included, because the standard flag package stops there too), at a
+//     malformed `---flag` spelling, and at the first unknown flag, so every
+//     existing diagnostic and positional payload keeps describing the
+//     invocation as the operator wrote it;
 //   - a separated value is carried as `--profile=VALUE`, so the root flag set
 //     can never swallow a following command name instead;
 //   - at a command group, a following token naming one of its subcommands is a
@@ -65,22 +66,21 @@ func hoistRootProfileFlag(root *ffcli.Command, args []string) []string {
 			kept = append(kept, args[index:]...)
 			break
 		}
-		if token == "" {
-			kept = append(kept, token)
-			continue
-		}
 		if !strings.HasPrefix(token, "-") || token == "-" {
 			if boundary < 0 {
 				boundary = len(kept)
 			}
-			if subcommand := findDirectSubcommand(command, token); subcommand != nil {
-				command = subcommand
-				commandPath = append(commandPath, subcommand.Name)
-				kept = append(kept, token)
-				continue
+			if token != "" {
+				if subcommand := findDirectSubcommand(command, token); subcommand != nil {
+					command = subcommand
+					commandPath = append(commandPath, subcommand.Name)
+					kept = append(kept, token)
+					continue
+				}
 			}
 			// The standard flag package stops parsing at the first positional
-			// argument, so nothing after it is a flag this walk may move.
+			// argument, so nothing after it is a flag this walk may move. An
+			// empty token is that same boundary.
 			kept = append(kept, args[index:]...)
 			break
 		}

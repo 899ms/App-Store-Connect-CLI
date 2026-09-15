@@ -363,6 +363,8 @@ class WebsiteCommandChecksTest(unittest.TestCase):
         cases = {
             "asc apps list --profile prod": [],
             "asc apps list --profile=prod": [],
+            "asc apps --profile prod list --output json": [],
+            "asc apps --profile=list list": [],
             "asc search QUERY --profile=prod": ["appears after positional arguments"],
             "asc apps list --profile": ["missing value for flag '--profile'"],
             "asc apps list --debug": ["must appear before the top-level command"],
