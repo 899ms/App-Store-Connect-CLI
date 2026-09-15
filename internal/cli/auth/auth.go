@@ -221,15 +221,15 @@ func printDoctorReport(report authsvc.DoctorReport) {
 		if len(section.Checks) == 0 {
 			continue
 		}
-		fmt.Printf("\n%s:\n", section.Title)
+		fmt.Printf("\n%s:\n", shared.SanitizeTerminal(section.Title))
 		for _, check := range section.Checks {
-			fmt.Printf("  [%s] %s\n", doctorStatusLabel(check.Status), check.Message)
+			fmt.Printf("  [%s] %s\n", doctorStatusLabel(check.Status), shared.SanitizeTerminal(check.Message))
 		}
 	}
 	if len(report.Recommendations) > 0 {
 		fmt.Println("\nRecommendations:")
 		for i, rec := range report.Recommendations {
-			fmt.Printf("  %d. %s\n", i+1, rec)
+			fmt.Printf("  %d. %s\n", i+1, shared.SanitizeTerminal(rec))
 		}
 	}
 
@@ -426,11 +426,15 @@ func printPrivateKeyPermissionRemediation(cause error, keyPath string) {
 	if kind, ok := authsvc.PrivateKeyErrorKindOf(cause); !ok || kind != authsvc.PrivateKeyPermissionsInsecure {
 		return
 	}
-	fmt.Fprintf(
-		os.Stderr,
-		"To fix, run:\n  %s\nOr re-run with --fix-permissions to let asc change the file to 0600.\n",
-		shared.SanitizeTerminal(authsvc.FilePermissionRemediationCommand(keyPath)),
-	)
+	if command, safe := authsvc.FilePermissionRemediationCommand(keyPath); safe {
+		fmt.Fprintf(
+			os.Stderr,
+			"To fix, run:\n  %s\nOr re-run with --fix-permissions to let asc change the file to 0600.\n",
+			shared.SanitizeTerminal(command),
+		)
+		return
+	}
+	fmt.Fprintln(os.Stderr, "Re-run with --fix-permissions to let asc change the file to 0600.")
 }
 
 func withPrivateKeyDiagnostic(rendered, cause error) error {
@@ -555,9 +559,10 @@ Add --local to write ./.asc/config.json for the current repo.
 as "default". Once profiles exist, --name is required and the error lists them.
 
 The private key file must not be readable by other users. An over-permissive key
-fails validation and prints the exact chmod command that repairs it; pass
---fix-permissions to let asc change the file to 0600 first and report what it
-changed.
+fails validation and, when its path is safe to render, prints the exact chmod
+command that repairs it. Pass --fix-permissions to let asc change the file to
+0600 first and report what it changed. If the operating system cannot securely
+open the file for descriptor-bound repair, asc fails without changing it.
 
 Examples:
   asc auth login --name "MyKey" --key-id "ABC123" --issuer-id "DEF456" --private-key /path/to/AuthKey.p8
@@ -620,7 +625,8 @@ so commands continue to work even if the original .p8 file is removed.`,
 			if *fixPermissions {
 				changed, err := authsvc.FixPrivateKeyFilePermissions(*keyPath)
 				if err != nil {
-					return withPrivateKeyDiagnostic(fmt.Errorf("auth login: failed to fix private key permissions: %w", err), err)
+					rendered := errors.New(shared.SanitizeTerminal(fmt.Sprintf("auth login: failed to fix private key permissions: %v", err)))
+					return withPrivateKeyDiagnostic(shared.NewErrorWithCause(rendered, err), err)
 				}
 				if changed {
 					fmt.Fprintf(os.Stderr, "Changed private key file permissions to 0600: %s\n", shared.SanitizeTerminal(*keyPath))

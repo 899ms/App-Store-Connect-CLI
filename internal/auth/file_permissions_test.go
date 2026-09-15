@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 
 	"github.com/kballard/go-shellquote"
@@ -44,14 +43,17 @@ func TestValidateKeyFileForOSWindowsSkipsUnixPermissionCheck(t *testing.T) {
 }
 
 func TestFilePermissionRemediationCommand(t *testing.T) {
-	if command := FilePermissionRemediationCommand("/tmp/keys/AuthKey.p8"); command != "chmod 600 /tmp/keys/AuthKey.p8" {
-		t.Fatalf("FilePermissionRemediationCommand() = %q", command)
+	if command, safe := FilePermissionRemediationCommand("/tmp/keys/AuthKey.p8"); !safe || command != "chmod 600 /tmp/keys/AuthKey.p8" {
+		t.Fatalf("FilePermissionRemediationCommand() = %q, %t", command, safe)
 	}
-	if command := FilePermissionRemediationCommand("-rf.p8"); command != "chmod 600 ./-rf.p8" {
-		t.Fatalf("a leading dash must be anchored, got %q", command)
-	}
-	if command := FilePermissionRemediationCommand("/tmp/ke\ny.p8"); strings.ContainsAny(command, "\n\r") {
-		t.Fatalf("control characters must be escaped, got %q", command)
+	for path, want := range map[string]string{
+		"-rf.p8":      "chmod 600 ./-rf.p8",
+		"#AuthKey.p8": "chmod 600 ./#AuthKey.p8",
+		"=AuthKey.p8": "chmod 600 ./=AuthKey.p8",
+	} {
+		if command, safe := FilePermissionRemediationCommand(path); !safe || command != want {
+			t.Fatalf("special leading character must be anchored: FilePermissionRemediationCommand(%q) = %q, %t; want %q", path, command, safe, want)
+		}
 	}
 
 	for _, path := range []string{
@@ -62,13 +64,28 @@ func TestFilePermissionRemediationCommand(t *testing.T) {
 		`/tmp/quo"te/AuthKey.p8`,
 		"/tmp/semi;rm -rf/AuthKey.p8",
 	} {
-		command := FilePermissionRemediationCommand(path)
+		command, safe := FilePermissionRemediationCommand(path)
+		if !safe {
+			t.Fatalf("ordinary path %q was marked unsafe", path)
+		}
 		words, err := shellquote.Split(command)
 		if err != nil {
 			t.Fatalf("Split(%q) error: %v", command, err)
 		}
 		if len(words) != 3 || words[0] != "chmod" || words[1] != "600" || words[2] != path {
 			t.Fatalf("Split(%q) = %#v, want chmod 600 %q with no shell expansion", command, words, path)
+		}
+	}
+
+	for _, path := range []string{
+		"/tmp/ke\ny.p8",
+		"/tmp/ke\x1by.p8",
+		"/tmp/ke\u202ey.p8",
+		"/tmp/ke\u2028y.p8",
+		string([]byte("/tmp/ke\xffy.p8")),
+	} {
+		if command, safe := FilePermissionRemediationCommand(path); safe || command != "" {
+			t.Fatalf("unsafe path returned executable-looking command %q, safe=%t", command, safe)
 		}
 	}
 }
@@ -180,6 +197,19 @@ func TestFixPrivateKeyFilePermissionsRepairsKeyTheOwnerCannotRead(t *testing.T) 
 	}
 
 	changed, err := FixPrivateKeyFilePermissions(path)
+	if runtime.GOOS != "linux" {
+		if err == nil || changed {
+			t.Fatalf("FixPrivateKeyFilePermissions() = %t, %v; want fail-closed result", changed, err)
+		}
+		info, statErr := os.Stat(path)
+		if statErr != nil {
+			t.Fatalf("Stat() error: %v", statErr)
+		}
+		if info.Mode().Perm() != 0o044 {
+			t.Fatalf("permissions = %#o, want 0044 unchanged", info.Mode().Perm())
+		}
+		return
+	}
 	if err != nil {
 		t.Fatalf("FixPrivateKeyFilePermissions() error: %v", err)
 	}

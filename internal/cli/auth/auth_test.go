@@ -22,6 +22,7 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	authsvc "github.com/rudrankriyam/App-Store-Connect-CLI/internal/auth"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared/errfmt"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/config"
 )
 
@@ -189,19 +190,23 @@ func TestDoctorHelpers(t *testing.T) {
 	report := authsvc.DoctorReport{
 		Sections: []authsvc.DoctorSection{
 			{
-				Title: "Storage",
+				Title: "Storage\nforged section",
 				Checks: []authsvc.DoctorCheck{
-					{Status: authsvc.DoctorOK, Message: "all good"},
+					{Status: authsvc.DoctorOK, Message: "all\x1b[31m good"},
 				},
 			},
 		},
-		Summary: authsvc.DoctorSummary{},
+		Recommendations: []string{"fix\u2028forged row"},
+		Summary:         authsvc.DoctorSummary{},
 	}
 	stdout, _ := captureAuthOutput(t, func() {
 		printDoctorReport(report)
 	})
-	if !strings.Contains(stdout, "Auth Doctor") || !strings.Contains(stdout, "[OK] all good") {
+	if !strings.Contains(stdout, "Auth Doctor") || !strings.Contains(stdout, "[OK] all[31m good") {
 		t.Fatalf("unexpected doctor output: %q", stdout)
+	}
+	if strings.Contains(stdout, "\nforged section") || strings.Contains(stdout, "\x1b") || strings.ContainsRune(stdout, '\u2028') {
+		t.Fatalf("doctor text output contains unsanitized terminal content: %q", stdout)
 	}
 }
 
@@ -656,9 +661,9 @@ func TestAuthLoginCommand(t *testing.T) {
 				t.Fatalf("expected insecure permissions error, got %v", execErr)
 			}
 			assertAuthDiagnostic(t, execErr, shared.DiagnosticFilePermissionsInsecure, "--private-key")
-			wantCommand := authsvc.FilePermissionRemediationCommand(keyPath)
-			if !strings.HasPrefix(wantCommand, "chmod 600 ") || !strings.Contains(wantCommand, keyPath) {
-				t.Fatalf("remediation command = %q, want a chmod 600 command naming the key", wantCommand)
+			wantCommand, safe := authsvc.FilePermissionRemediationCommand(keyPath)
+			if !safe || !strings.HasPrefix(wantCommand, "chmod 600 ") || !strings.Contains(wantCommand, keyPath) {
+				t.Fatalf("remediation command = %q, safe=%t; want a chmod 600 command naming the key", wantCommand, safe)
 			}
 			if !strings.Contains(stderr, wantCommand) {
 				t.Fatalf("stderr = %q, want remediation %q", stderr, wantCommand)
@@ -672,6 +677,65 @@ func TestAuthLoginCommand(t *testing.T) {
 			}
 			if info.Mode().Perm() != 0o644 {
 				t.Fatalf("permissions = %#o, want 0644 unchanged without --fix-permissions", info.Mode().Perm())
+			}
+		})
+	})
+
+	t.Run("unsafe private key path omits executable remediation", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows does not expose POSIX permission bits")
+		}
+		withTempRepo(t, func(string) {
+			keyPath := writeTempECDSAKeyFile(t)
+			unsafePath := filepath.Join(filepath.Dir(keyPath), "unsafe\nkey.p8")
+			if err := os.Rename(keyPath, unsafePath); err != nil {
+				t.Fatalf("rename key: %v", err)
+			}
+			if err := os.Chmod(unsafePath, 0o644); err != nil {
+				t.Fatalf("set key permissions: %v", err)
+			}
+			cmd := AuthLoginCommand()
+			if err := cmd.FlagSet.Parse([]string{
+				"--name", "demo",
+				"--key-id", "KEY",
+				"--issuer-id", "ISS",
+				"--private-key", unsafePath,
+			}); err != nil {
+				t.Fatalf("Parse() error: %v", err)
+			}
+			var execErr error
+			_, stderr := captureAuthOutput(t, func() {
+				execErr = cmd.Exec(context.Background(), []string{})
+			})
+			if execErr == nil || !strings.Contains(execErr.Error(), "private key file is too permissive") {
+				t.Fatalf("expected insecure permissions error, got %v", execErr)
+			}
+			if strings.Contains(stderr, "chmod 600") || !strings.Contains(stderr, "--fix-permissions") {
+				t.Fatalf("stderr = %q, want only the safe --fix-permissions remediation", stderr)
+			}
+		})
+	})
+
+	t.Run("fix failure sanitizes unsafe private key path", func(t *testing.T) {
+		withTempRepo(t, func(string) {
+			unsafePath := filepath.Join(t.TempDir(), "missing\n\x1b[31mkey.p8")
+			cmd := AuthLoginCommand()
+			if err := cmd.FlagSet.Parse([]string{
+				"--name", "demo",
+				"--key-id", "KEY",
+				"--issuer-id", "ISS",
+				"--private-key", unsafePath,
+				"--fix-permissions",
+			}); err != nil {
+				t.Fatalf("Parse() error: %v", err)
+			}
+			execErr := cmd.Exec(context.Background(), []string{})
+			if execErr == nil {
+				t.Fatal("expected missing private key repair to fail")
+			}
+			formatted := errfmt.FormatStderr(execErr)
+			if strings.ContainsAny(formatted, "\r\x1b") || strings.Count(formatted, "\n") != 1 {
+				t.Fatalf("formatted error contains terminal control or forged lines: %q", formatted)
 			}
 		})
 	})

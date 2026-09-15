@@ -35,22 +35,23 @@ func filePermissionsTooPermissiveForOS(mode fs.FileMode, goos string) bool {
 // The path is quoted for a POSIX shell, so a path holding metacharacters such
 // as `$(...)`, a backtick, or `$VAR` is pasted literally instead of being
 // expanded, and a leading dash is anchored so chmod reads it as a file rather
-// than a flag. A path carrying control characters cannot be displayed as a
-// command to copy at all, so it is escaped into an inert Go-quoted form.
-func FilePermissionRemediationCommand(path string) string {
+// than a flag. A path carrying control or display-reordering characters cannot
+// be rendered as a trustworthy copy-paste command, so callers receive
+// safe=false and must offer a command that does not embed the path.
+func FilePermissionRemediationCommand(path string) (command string, safe bool) {
+	if path == "" || !utf8.ValidString(path) || containsNonDisplayableRune(path) {
+		return "", false
+	}
 	target := path
-	if strings.HasPrefix(target, "-") {
+	if strings.ContainsRune("-#=", rune(target[0])) {
 		target = "./" + target
 	}
-	if !utf8.ValidString(target) || containsNonDisplayableRune(target) {
-		return fmt.Sprintf("chmod 600 %q", target)
-	}
-	return shellquote.Join("chmod", "600", target)
+	return shellquote.Join("chmod", "600", target), true
 }
 
 func containsNonDisplayableRune(value string) bool {
 	for _, r := range value {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029' {
 			return true
 		}
 	}
@@ -63,9 +64,9 @@ func containsNonDisplayableRune(value string) bool {
 // A file that is already owner-only is left exactly as it is. The mode is
 // applied through the rooted traversal used elsewhere for operator-selected
 // paths, so a symlinked component, a directory, or any other non-regular file
-// is rejected instead of being changed, and a key that denies its own owner
-// read access is still repairable. Failures carry PrivateKeyError kinds,
-// keeping the existing private-key diagnostics.
+// is rejected instead of being changed. Platforms that cannot securely open a
+// key which denies its owner read access fail closed. Failures carry
+// PrivateKeyError kinds, keeping the existing private-key diagnostics.
 func FixPrivateKeyFilePermissions(path string) (bool, error) {
 	return fixPrivateKeyFilePermissionsForOS(path, runtime.GOOS)
 }
@@ -84,7 +85,7 @@ func fixPrivateKeyFilePermissionsForOS(path, goos string) (bool, error) {
 	if !filePermissionsTooPermissiveForOS(info.Mode(), goos) {
 		return false, nil
 	}
-	if err := rootfs.ChmodFile(path, privateKeyFileMode); err != nil {
+	if err := rootfs.ChmodFileIfSame(path, info, privateKeyFileMode); err != nil {
 		return false, newPrivateKeyError(privateKeyAccessErrorKind(err), fmt.Errorf("failed to change key file permissions: %w", err))
 	}
 	return true, nil
