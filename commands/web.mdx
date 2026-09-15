@@ -116,6 +116,15 @@ trusted-device code once; Apple then delivers the phone verification code by
 its configured method (including SMS) and `asc` prompts again. Automated flows
 rerun the configured `--two-factor-code-command` after phone fallback.
 
+For a login with no terminal, set `ASC_WEB_PASSWORD` and
+`ASC_WEB_2FA_CODE_COMMAND`. The password variable is consulted after the
+cached session and before the saved-password store and the interactive prompt,
+and a password supplied that way is used for the login without being saved.
+`--two-factor-code-command` wins over `ASC_WEB_2FA_CODE_COMMAND`, and
+`ASC_WEB_DONT_STORE_PASSWORD=1` disables saved-password reads and writes. Every
+`asc web` environment variable is listed in
+[Web session variables](/configuration/environment-variables#web-session-variables).
+
 #### Moving a session to another machine or to CI
 
 `asc web auth export` writes the cached session to a JSON bundle, and
@@ -822,6 +831,12 @@ Available commands:
 * `asc web review subscriptions` - inspect and mutate next-version subscription review selection
 * `asc web review iaps` - attach a non-renewing IAP to the next app version review
 * `asc web review reply` - send one confirmed Resolution Center text reply
+
+`asc web review show` auto-downloads attachments from the HTTPS signed URLs
+Apple returns, which must be on its `.apple.com`, `.mzstatic.com`,
+`.amazonaws.com`, or `.cloudfront.net` hosts. A signed URL on any other host is
+refused unless the host is added to `ASC_WEB_ALLOWED_ATTACHMENT_HOSTS` as a
+comma-separated list of exact hosts or `.suffix` patterns.
 
 Subscription JSON includes both `submitWithNextAppStoreVersion` and
 `submitWithNextAppStoreVersionKnown`. When the presence field is `false`, Apple
