@@ -42,7 +42,7 @@ func chmodFileDescriptorFD(
 
 	fallbackErr := chmod(fmt.Sprintf("/proc/self/fd/%d", fd), mode)
 	if errors.Is(fallbackErr, unix.ENOENT) || errors.Is(fallbackErr, unix.ENOTDIR) {
-		return fmt.Errorf("%w: descriptor chmod fallback is unavailable: %v", ErrFileIdentityMutationUnsupported, fallbackErr)
+		return fmt.Errorf("%w: descriptor chmod fallback is unavailable: %s", ErrFileIdentityMutationUnsupported, fallbackErr.Error())
 	}
 	return fallbackErr
 }
