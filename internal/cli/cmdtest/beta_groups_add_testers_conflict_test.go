@@ -36,9 +36,10 @@ type addTestersConflictRequest struct {
 	path   string
 }
 
-// stubAddTestersTransport replays a POST conflict followed by membership
-// read-backs. membership maps a tester ID to the group IDs its
-// relationships/betaGroups read reports.
+// stubAddTestersTransport replays a POST conflict followed by the membership
+// read-back. membership maps a tester ID to the group IDs it belongs to; the
+// read-back (GET /v1/betaTesters filtered by group and tester ID) answers with
+// the requested testers that list the filtered group.
 func stubAddTestersTransport(
 	t *testing.T,
 	postStatus int,
@@ -71,19 +72,28 @@ func stubAddTestersTransport(
 			return jsonResponse(readBackStatus, `{"errors":[{"status":"500","code":"UNEXPECTED_ERROR","title":"An unexpected error occurred.","detail":"Request failed."}]}`)
 		}
 
-		prefix := "/v1/betaTesters/"
-		suffix := "/relationships/betaGroups"
-		if !strings.HasPrefix(req.URL.Path, prefix) || !strings.HasSuffix(req.URL.Path, suffix) {
+		if req.URL.Path != "/v1/betaTesters" {
 			t.Fatalf("unexpected read-back path %q", req.URL.Path)
 		}
-		testerID := strings.TrimSuffix(strings.TrimPrefix(req.URL.Path, prefix), suffix)
-
-		groups := membership[testerID]
-		linkages := make([]string, 0, len(groups))
-		for _, groupID := range groups {
-			linkages = append(linkages, `{"type":"betaGroups","id":"`+groupID+`"}`)
+		query := req.URL.Query()
+		if query.Get("filter[betaGroups]") != "group-1" {
+			t.Fatalf("read-back filter[betaGroups] = %q, want group-1", query.Get("filter[betaGroups]"))
 		}
-		return jsonResponse(http.StatusOK, `{"data":[`+strings.Join(linkages, ",")+`],"links":{}}`)
+		requested := strings.Split(query.Get("filter[id]"), ",")
+		if len(requested) == 0 || requested[0] == "" {
+			t.Fatalf("expected the read-back to filter by tester ID, got %q", req.URL.RawQuery)
+		}
+
+		matches := make([]string, 0, len(requested))
+		for _, testerID := range requested {
+			for _, groupID := range membership[testerID] {
+				if groupID == "group-1" {
+					matches = append(matches, `{"type":"betaTesters","id":"`+testerID+`"}`)
+					break
+				}
+			}
+		}
+		return jsonResponse(http.StatusOK, `{"data":[`+strings.Join(matches, ",")+`],"links":{}}`)
 	})
 
 	return &requests
@@ -201,7 +211,7 @@ func TestBetaGroupsAddTestersPartialMembershipStillFails(t *testing.T) {
 	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
-	stubAddTestersTransport(t, http.StatusConflict, betaGroupAddTestersStateConflictBody, map[string][]string{
+	requests := stubAddTestersTransport(t, http.StatusConflict, betaGroupAddTestersStateConflictBody, map[string][]string{
 		"tester-1": {"group-1"},
 		"tester-2": {},
 	}, http.StatusOK)
@@ -219,6 +229,11 @@ func TestBetaGroupsAddTestersPartialMembershipStillFails(t *testing.T) {
 	if !strings.Contains(err.Error(), "already in group group-1: tester-1") ||
 		!strings.Contains(err.Error(), "not in group group-1: tester-2") {
 		t.Fatalf("expected the diagnostic to name both sides, got %v", err)
+	}
+	// One read-back resolves the whole batch: the requested testers are
+	// filtered server-side rather than read one membership at a time.
+	if got := *requests; len(got) != 2 {
+		t.Fatalf("expected one POST and one batched read-back, got %v", got)
 	}
 }
 

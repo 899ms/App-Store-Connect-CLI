@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
@@ -64,34 +65,48 @@ func isBetaGroupMembershipConflict(err error) bool {
 }
 
 // readBackBetaGroupMembership resolves which requested testers are already in
-// the group by reading each tester's beta group linkages. It is only called
-// after a failed add, so the extra reads never touch the success path.
+// the group. It asks App Store Connect for the intersection directly
+// (GET /v1/betaTesters?filter[betaGroups]=GROUP&filter[id]=TESTER,...), so the
+// cost is one request per betaTesterResolveChunkSize requested testers,
+// regardless of how many testers the group holds. It is only called after a
+// failed add, so these reads never touch the success path.
 func readBackBetaGroupMembership(
 	ctx context.Context,
 	client *asc.Client,
 	groupID string,
 	testerIDs []string,
 ) (betaGroupMembershipReadBack, error) {
-	result := betaGroupMembershipReadBack{groupID: groupID}
+	result := betaGroupMembershipReadBack{groupID: strings.TrimSpace(groupID)}
 	if client == nil {
-		return result, fmt.Errorf("client is required")
+		return betaGroupMembershipReadBack{}, fmt.Errorf("client is required")
 	}
-	groupID = strings.TrimSpace(groupID)
-	if groupID == "" {
-		return result, fmt.Errorf("groupID is required")
+	if result.groupID == "" {
+		return betaGroupMembershipReadBack{}, fmt.Errorf("groupID is required")
 	}
 
+	requested := make([]string, 0, len(testerIDs))
 	for _, testerID := range testerIDs {
-		testerID = strings.TrimSpace(testerID)
-		if testerID == "" {
-			continue
+		if trimmed := strings.TrimSpace(testerID); trimmed != "" {
+			requested = append(requested, trimmed)
 		}
+	}
+	if len(requested) == 0 {
+		return result, nil
+	}
 
-		groupIDs, err := betaTesterGroupIDs(ctx, client, testerID)
+	members := make(map[string]struct{}, len(requested))
+	for chunk := range slices.Chunk(requested, betaTesterResolveChunkSize) {
+		found, err := betaGroupMembersMatching(ctx, client, result.groupID, chunk)
 		if err != nil {
-			return betaGroupMembershipReadBack{groupID: groupID}, err
+			return betaGroupMembershipReadBack{}, err
 		}
-		if _, ok := groupIDs[groupID]; ok {
+		for testerID := range found {
+			members[testerID] = struct{}{}
+		}
+	}
+
+	for _, testerID := range requested {
+		if _, ok := members[testerID]; ok {
 			result.present = append(result.present, testerID)
 			continue
 		}
@@ -100,10 +115,22 @@ func readBackBetaGroupMembership(
 	return result, nil
 }
 
-// betaTesterGroupIDs returns every beta group the tester currently belongs to.
-func betaTesterGroupIDs(ctx context.Context, client *asc.Client, testerID string) (map[string]struct{}, error) {
+// betaGroupMembersMatching returns the subset of testerIDs that App Store
+// Connect reports as members of the group.
+func betaGroupMembersMatching(
+	ctx context.Context,
+	client *asc.Client,
+	groupID string,
+	testerIDs []string,
+) (map[string]struct{}, error) {
+	options := []asc.BetaTestersOption{
+		asc.WithBetaTestersGroupIDs([]string{groupID}),
+		asc.WithBetaTestersIDs(testerIDs),
+		asc.WithBetaTestersLimit(200),
+	}
+
 	requestCtx, cancel := shared.ContextWithTimeout(ctx)
-	first, err := client.GetBetaTesterBetaGroupsRelationships(requestCtx, testerID, asc.WithLinkagesLimit(200))
+	first, err := client.GetBetaTesters(requestCtx, "", options...)
 	cancel()
 	if err != nil {
 		return nil, err
@@ -112,21 +139,21 @@ func betaTesterGroupIDs(ctx context.Context, client *asc.Client, testerID string
 	all, err := asc.PaginateAll(ctx, first, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
 		requestCtx, cancel := shared.ContextWithTimeout(ctx)
 		defer cancel()
-		return client.GetBetaTesterBetaGroupsRelationships(requestCtx, testerID, asc.WithLinkagesNextURL(nextURL))
+		return client.GetBetaTesters(requestCtx, "", asc.WithBetaTestersNextURL(nextURL))
 	})
 	if err != nil {
 		return nil, err
 	}
-	resp, ok := all.(*asc.LinkagesResponse)
+	resp, ok := all.(*asc.BetaTestersResponse)
 	if !ok || resp == nil {
-		return nil, fmt.Errorf("unexpected beta tester group relationships response type")
+		return nil, fmt.Errorf("unexpected beta testers response type")
 	}
 
-	groupIDs := make(map[string]struct{}, len(resp.Data))
-	for _, linkage := range resp.Data {
-		if groupID := strings.TrimSpace(linkage.ID); groupID != "" {
-			groupIDs[groupID] = struct{}{}
+	members := make(map[string]struct{}, len(resp.Data))
+	for _, tester := range resp.Data {
+		if testerID := strings.TrimSpace(tester.ID); testerID != "" {
+			members[testerID] = struct{}{}
 		}
 	}
-	return groupIDs, nil
+	return members, nil
 }
