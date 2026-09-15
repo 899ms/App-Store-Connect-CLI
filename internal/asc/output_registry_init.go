@@ -206,6 +206,7 @@ func registerAllOutputRenderers() {
 	registerRows(offerCodeValuesRows)
 	registerRows(appPricePointsRows)
 	registerRows(appPriceScheduleRows)
+	registerRows(appPriceScheduleNotConfiguredRows)
 	registerRows(appPricesRows)
 	registerRowsWithSingleResourceAdapter(buildsRows)
 	registerRows(buildsCountRows)
