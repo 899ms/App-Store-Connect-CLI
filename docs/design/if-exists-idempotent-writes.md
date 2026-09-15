@@ -40,10 +40,18 @@ state" (`ENTITY_ERROR.RELATIONSHIP.INVALID` on `POST /v1/appStoreVersions`),
 and for validation of unrelated attributes. The rule is therefore two-step and
 keyed on the exact Apple error code:
 
-1. The create request fails with HTTP 409 **and** `errors[0].code` is one of
-   the codes the command recorded as "already exists" (exact, case-insensitive
-   match; a longer code such as
+1. The create request fails with HTTP 409 **and** at least one `errors[].code`
+   in the response is one of the codes the command recorded as "already exists"
+   (exact, case-insensitive match; a longer code such as
    `ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE.DIFFERENT_ACCOUNT` does not match).
+   Every entry is matched, not only `errors[0]`: Apple can report several causes
+   for one 409 and the existence cause is not always first. A duplicate
+   `versionString` on `POST /v1/appStoreVersions` arrives as
+   `ENTITY_ERROR.RELATIONSHIP.INVALID` followed by
+   `ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE` (verified live, see the table).
+   `asc.APIError.AllCodes` carries the full list; `Code`, `Title` and `Detail`
+   still come from `errors[0]`, so nothing changes about the message a failing
+   command prints.
 2. The CLI reads back the resource by its natural key (the same lookup a caller
    would use to find it), and only when that read returns the resource is the
    409 treated as "already exists".
@@ -55,8 +63,8 @@ Error codes keyed on, per command:
 
 | Command | Natural key read-back | Apple 409 code(s) accepted | Evidence |
 | --- | --- | --- | --- |
-| `versions create` | `GET /v1/apps/{id}/appStoreVersions?filter[versionString]=&filter[platform]=` | `ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE` (source pointer `/data/attributes/versionString`, detail "The version number has been previously used.") | Verified from Apple's response body quoted in developer forum thread 741290 and fastlane/codemagic reports; the same thread shows the non-existence 409 `ENTITY_ERROR.RELATIONSHIP.INVALID` ("You cannot create a new version of the App in the current state.") that must keep failing. |
-| `review details-create` | `GET /v1/appStoreVersions/{id}/appStoreReviewDetail` | `ENTITY_ERROR.RELATIONSHIP.INVALID`, `ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE`, `ENTITY_ERROR.ATTRIBUTE.INVALID.ALREADY_EXISTS` | Not verified live (creating a duplicate detail is a mutation). A version owns at most one detail, so the duplicate surfaces on the `appStoreVersion` relationship or as a duplicate-attribute code; the read-back is the decisive check. |
+| `versions create` | `GET /v1/apps/{id}/appStoreVersions?filter[versionString]=&filter[platform]=` | `ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE` (source pointer `/data/attributes/versionString`, detail "The version number has been previously used.") | **Verified live** against app `6759231657` on 2026-09-15: re-creating the existing version string returns two errors, `errors[0]` = `ENTITY_ERROR.RELATIONSHIP.INVALID` ("You cannot create a new version of the App in the current state.", pointer `/data/relationships/app`) and `errors[1]` = the duplicate code above. A 409 carrying only the relationship rejection (a genuinely new version string the app cannot accept yet) has no duplicate code and keeps failing. |
+| `review details-create` | `GET /v1/appStoreVersions/{id}/appStoreReviewDetail` | `STATE_ERROR.ALREADY_EXISTS`, `ENTITY_ERROR.RELATIONSHIP.INVALID`, `ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE`, `ENTITY_ERROR.ATTRIBUTE.INVALID.ALREADY_EXISTS` | **Verified live** against app `6759231657` on 2026-09-15: creating a detail for a version that already has one returns 409 `STATE_ERROR.ALREADY_EXISTS` ("Resource already exists." / "The given app version already has an existing review."). The relationship and duplicate-attribute codes are kept as defensive alternates; every other `STATE_ERROR.*` keeps failing, and the read-back is the decisive check. |
 | `localizations create` / `update` / `metadata push` | `GET /v1/appStoreVersions/{id}/appStoreVersionLocalizations` filtered by locale | `ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE` (detail "Entity with locale: ... already exists. Try updating.") | Detail text verified from developer forum threads 677931 and 776315; code to be confirmed with the PR2 fixture. |
 | `pricing availability create` | `GET /v1/apps/{id}/appAvailabilityV2` | `ENTITY_ERROR.RELATIONSHIP.INVALID` (pointer `/data/relationships/app`), `ENTITY_ERROR.ATTRIBUTE.INVALID.ALREADY_EXISTS` | `internal/asc/pricing_test.go` already replays a 409 `ENTITY_ERROR.RELATIONSHIP.INVALID` for `POST /v2/appAvailabilities`, and `web apps availability create` treats an existing record as this same condition. **This code is ambiguous on this endpoint**: Apple also returns it for the public-API bootstrap rejection, which is classified first (by its `territoryAvailabilities.territory` detail) and keeps its own remediation. The read-back is decisive either way, since the bootstrap rejection creates nothing. Detail text not verified live. |
 | `bundle-ids capabilities add` | `GET /v1/bundleIds/{id}/bundleIdCapabilities` filtered by capability type | `ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE`, `ENTITY_ERROR.ATTRIBUTE.INVALID.ALREADY_EXISTS` | To be confirmed with the PR4 fixture. `ENTITY_ERROR.ATTRIBUTE.TYPE` (unsupported capability) is also a 409 and must keep failing. |
@@ -69,9 +77,11 @@ and `ENTITY_ERROR.ATTRIBUTE.INVALID.ALREADY_EXISTS` on
 `POST /iris/v1/inAppPurchaseSubmissions`.
 
 The shared helper `shared.ResolveIfExistsConflict` implements the rule: it
-requires `errors.Is(err, asc.ErrConflict)`, an `*asc.APIError` whose code is in
-the command's list (`shared.IsIfExistsConflict`), and a successful read-back.
-It never swallows a non-409 error or a 409 with an unlisted code.
+requires `errors.Is(err, asc.ErrConflict)`, an `*asc.APIError` **any** of whose
+codes is in the command's list (`shared.IsIfExistsConflict`, which walks
+`AllCodes` and falls back to `Code` when a caller built the error by hand), and
+a successful read-back. It never swallows a non-409 error or a 409 none of whose
+codes is listed.
 
 ### Output contract
 
@@ -94,7 +104,9 @@ It never swallows a non-409 error or a 409 with an unlisted code.
 1. `if-exists-core`: shared flag and helpers, receipt fields, `versions create`
    (`update` routes to `PATCH /v1/appStoreVersions/{id}` with `--copyright` and
    `--release-type`; `--copy-metadata-from` still runs against the existing
-   version), `review details-create` (`update` routes to
+   version, and because that copy PATCHes the existing version's localizations
+   the receipt reports `updated` even when the version resource itself had
+   nothing to PATCH), `review details-create` (`update` routes to
    `PATCH /v1/appStoreReviewDetails/{id}` with the same attributes).
 2. `if-exists-localizations`: `localizations create`/`update` and
    `metadata push`.
