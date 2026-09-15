@@ -18,8 +18,9 @@ var shellSafeWordPattern = regexp.MustCompile(`^[A-Za-z0-9._/:=+-]+$`)
 // reads differently inside a double-quoted argument: $ and ` expand in
 // PowerShell and Git Bash, % and ! expand in cmd.exe, and " and \ are escape
 // characters in Git Bash but literals in cmd.exe, so a doubled or trailing
-// backslash changes the argument or invalidates the command.
-const windowsUnneutralCharacters = "\"$`%!\\"
+// backslash changes the argument or invalidates the command. PowerShell also
+// treats the three curly double-quote runes as string delimiters.
+const windowsUnneutralCharacters = "\"$`%!\\\u201c\u201d\u201e"
 
 // ShellQuote renders value as one literal argument so a printed command can be
 // copied into the user's shell unchanged. ok reports whether that is possible.
@@ -40,7 +41,9 @@ func ShellQuote(value string) (string, bool) {
 	if !utf8.ValidString(value) || asc.HasInterpretedTerminalSequence(value) {
 		return "", false
 	}
-	if shellSafeWordPattern.MatchString(value) {
+	// zsh expands a bare leading '=' as a command path (for example, =ls), so
+	// route it through the platform-specific quoted rendering.
+	if shellSafeWordPattern.MatchString(value) && !strings.HasPrefix(value, "=") {
 		return value, true
 	}
 	if runtime.GOOS == "windows" {

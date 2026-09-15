@@ -3,6 +3,7 @@ package shared
 import (
 	"flag"
 	"io"
+	"os/exec"
 	"runtime"
 	"slices"
 	"testing"
@@ -20,7 +21,7 @@ func TestShellQuoteSafeWordsStayBare(t *testing.T) {
 func TestShellQuoteQuotesMetacharacters(t *testing.T) {
 	// Values that are not safe words must never be printed bare, whichever
 	// platform rendering applies.
-	for _, value := range []string{"", "My Key", "$(whoami)", "`id`", "~/keys", "@args", "%PATH%", "a;b", "a&b", "it's"} {
+	for _, value := range []string{"", "My Key", "=ls", "$(whoami)", "`id`", "~/keys", "@args", "%PATH%", "a;b", "a&b", "it's"} {
 		got, ok := ShellQuote(value)
 		if !ok {
 			continue
@@ -57,6 +58,27 @@ func TestPosixShellQuote(t *testing.T) {
 	}
 }
 
+func TestShellQuoteKeepsLeadingEqualsLiteralInZsh(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("zsh quoting is only relevant on POSIX platforms")
+	}
+	if _, err := exec.LookPath("zsh"); err != nil {
+		t.Skip("zsh is not installed")
+	}
+
+	rendered, ok := ShellQuote("=ls")
+	if !ok {
+		t.Fatal("ShellQuote(\"=ls\") reported the value as unquotable")
+	}
+	output, err := exec.Command("zsh", "-f", "-c", `printf '%s' `+rendered).CombinedOutput()
+	if err != nil {
+		t.Fatalf("zsh round trip failed: %v (%s)", err, output)
+	}
+	if got := string(output); got != "=ls" {
+		t.Fatalf("zsh round trip = %q, want literal %q", got, "=ls")
+	}
+}
+
 func TestWindowsShellQuote(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -74,6 +96,9 @@ func TestWindowsShellQuote(t *testing.T) {
 		{name: "cmd variable", value: "%PATH%", wantOK: false},
 		{name: "cmd delayed expansion", value: "a!b!", wantOK: false},
 		{name: "embedded double quote", value: `a"b`, wantOK: false},
+		{name: "powershell left curly double quote", value: "a\u201cb", wantOK: false},
+		{name: "powershell right curly double quote", value: "a\u201db", wantOK: false},
+		{name: "powershell low curly double quote", value: "a\u201eb", wantOK: false},
 		{name: "unc path", value: `\\server\share path`, wantOK: false},
 		{name: "trailing backslash", value: `C:\keys\`, wantOK: false},
 	}
@@ -162,6 +187,14 @@ func TestRootFlagsForReinvocation(t *testing.T) {
 			args: []string{"--profile", "my key"},
 			want: func(t *testing.T) []string {
 				return []string{"--profile", quoted(t, "my key")}
+			},
+			wantOK: true,
+		},
+		{
+			name: "leading equals profile is quoted",
+			args: []string{"--profile", "=ls"},
+			want: func(t *testing.T) []string {
+				return []string{"--profile", quoted(t, "=ls")}
 			},
 			wantOK: true,
 		},
