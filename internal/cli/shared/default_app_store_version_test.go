@@ -64,6 +64,7 @@ func TestResolveDefaultAppStoreVersionFallsBackToLiveVersion(t *testing.T) {
 			{"type":"appStoreVersions","id":"ver-live-old","attributes":{"versionString":"1.0.0","platform":"IOS","appStoreState":"READY_FOR_SALE","appVersionState":"READY_FOR_DISTRIBUTION","createdDate":"2025-01-01T00:00:00Z"}},
 			{"type":"appStoreVersions","id":"ver-live","attributes":{"versionString":"1.1.0","platform":"IOS","appStoreState":"READY_FOR_SALE","appVersionState":"READY_FOR_DISTRIBUTION","createdDate":"2025-06-01T00:00:00Z"}}
 		],"links":{"next":""}}`,
+		"|READY_FOR_DISTRIBUTION|": `{"data":[],"links":{"next":""}}`,
 	}, &log)
 
 	resolved, err := ResolveDefaultAppStoreVersion(context.Background(), client, "app-1", "")
@@ -73,8 +74,8 @@ func TestResolveDefaultAppStoreVersionFallsBackToLiveVersion(t *testing.T) {
 	if resolved.ID != "ver-live" || resolved.VersionString != "1.1.0" || resolved.State != "READY_FOR_DISTRIBUTION" || resolved.Source != DefaultAppStoreVersionSourceLive {
 		t.Fatalf("unexpected resolution: %+v", resolved)
 	}
-	if len(log) != 2 {
-		t.Fatalf("expected editable then live requests, got %v", log)
+	if len(log) != 3 {
+		t.Fatalf("expected editable then both live requests, got %v", log)
 	}
 }
 
@@ -175,6 +176,7 @@ func TestResolveDefaultAppStoreVersionErrorsWhenNoVersionExists(t *testing.T) {
 	client := defaultVersionTestClient(t, map[string]string{
 		"|" + defaultVersionEditableFilter + "|": `{"data":[],"links":{"next":""}}`,
 		"READY_FOR_SALE||":                       `{"data":[],"links":{"next":""}}`,
+		"|READY_FOR_DISTRIBUTION|":               `{"data":[],"links":{"next":""}}`,
 	}, nil)
 
 	_, err := ResolveDefaultAppStoreVersion(context.Background(), client, "app-1", "")
@@ -192,5 +194,48 @@ func TestResolveDefaultAppStoreVersionErrorsWhenNoVersionExists(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("expected %q in error %q", want, err.Error())
 		}
+	}
+}
+
+// Apple returns appStoreState and appVersionState inconsistently, and the
+// READY_FOR_DISTRIBUTION-to-READY_FOR_SALE remapping is client-side only, so a
+// live version exposed under only the modern spelling must still resolve.
+func TestResolveDefaultAppStoreVersionFindsLiveVersionByModernState(t *testing.T) {
+	var log []string
+	client := defaultVersionTestClient(t, map[string]string{
+		"|" + defaultVersionEditableFilter + "|": `{"data":[],"links":{"next":""}}`,
+		"READY_FOR_SALE||":                       `{"data":[],"links":{"next":""}}`,
+		"|READY_FOR_DISTRIBUTION|": `{"data":[
+			{"type":"appStoreVersions","id":"ver-modern","attributes":{"versionString":"3.0.0","platform":"IOS","appVersionState":"READY_FOR_DISTRIBUTION","createdDate":"2026-01-01T00:00:00Z"}}
+		],"links":{"next":""}}`,
+	}, &log)
+
+	resolved, err := ResolveDefaultAppStoreVersion(context.Background(), client, "app-1", "")
+	if err != nil {
+		t.Fatalf("ResolveDefaultAppStoreVersion() error: %v", err)
+	}
+	if resolved.ID != "ver-modern" || resolved.VersionString != "3.0.0" || resolved.Source != DefaultAppStoreVersionSourceLive {
+		t.Fatalf("unexpected resolution: %+v", resolved)
+	}
+}
+
+// A version Apple reports under both live spellings must be counted once,
+// otherwise the duplicate would look like a second candidate.
+func TestResolveDefaultAppStoreVersionDeduplicatesLiveCandidates(t *testing.T) {
+	const both = `{"data":[
+		{"type":"appStoreVersions","id":"ver-live","attributes":{"versionString":"1.0.0","platform":"IOS","appStoreState":"READY_FOR_SALE","appVersionState":"READY_FOR_DISTRIBUTION","createdDate":"2025-01-01T00:00:00Z"}}
+	],"links":{"next":""}}`
+	client := defaultVersionTestClient(t, map[string]string{
+		"|" + defaultVersionEditableFilter + "|": `{"data":[],"links":{"next":""}}`,
+		"READY_FOR_SALE||":                       both,
+		"|READY_FOR_DISTRIBUTION|":               both,
+	}, nil)
+
+	resolved, err := ResolveDefaultAppStoreVersion(context.Background(), client, "app-1", "")
+	if err != nil {
+		t.Fatalf("ResolveDefaultAppStoreVersion() error: %v", err)
+	}
+	if resolved.ID != "ver-live" {
+		t.Fatalf("unexpected resolution: %+v", resolved)
 	}
 }

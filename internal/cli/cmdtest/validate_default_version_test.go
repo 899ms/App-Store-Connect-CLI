@@ -16,6 +16,8 @@ import (
 const (
 	editableVersionStateQuery = "filter[appVersionState]=DEVELOPER_REJECTED,INVALID_BINARY,METADATA_REJECTED,PREPARE_FOR_SUBMISSION,READY_FOR_REVIEW,REJECTED,WAITING_FOR_REVIEW"
 	liveVersionStateQuery     = "filter[appStoreState]=READY_FOR_SALE"
+	// The live tier queries both state spellings; see defaultLiveAppVersionStates.
+	liveVersionModernStateQuery = "filter[appVersionState]=READY_FOR_DISTRIBUTION"
 )
 
 func runValidateWithFixture(t *testing.T, fixture validateFixture, args ...string) (string, string, error) {
@@ -71,8 +73,9 @@ func TestValidateDefaultsToLiveVersionWhenNoEditableVersion(t *testing.T) {
 	fixture := validValidateFixture()
 	fixture.versions = ""
 	fixture.versionsByQuery = map[string]string{
-		editableVersionStateQuery: `{"data":[],"links":{"next":""}}`,
-		liveVersionStateQuery:     `{"data":[{"type":"appStoreVersions","id":"ver-1","attributes":{"platform":"IOS","versionString":"1.0","appStoreState":"READY_FOR_SALE","appVersionState":"READY_FOR_DISTRIBUTION","createdDate":"2026-01-01T00:00:00Z"}}],"links":{"next":""}}`,
+		editableVersionStateQuery:   `{"data":[],"links":{"next":""}}`,
+		liveVersionStateQuery:       `{"data":[{"type":"appStoreVersions","id":"ver-1","attributes":{"platform":"IOS","versionString":"1.0","appStoreState":"READY_FOR_SALE","appVersionState":"READY_FOR_DISTRIBUTION","createdDate":"2026-01-01T00:00:00Z"}}],"links":{"next":""}}`,
+		liveVersionModernStateQuery: `{"data":[],"links":{"next":""}}`,
 	}
 
 	_, stderr, runErr := runValidateWithFixture(t, fixture, "validate", "--app", "app-1")
@@ -127,8 +130,9 @@ func TestValidateDefaultVersionErrorsWhenNoVersionExists(t *testing.T) {
 	fixture := validValidateFixture()
 	fixture.versions = ""
 	fixture.versionsByQuery = map[string]string{
-		editableVersionStateQuery: `{"data":[],"links":{"next":""}}`,
-		liveVersionStateQuery:     `{"data":[],"links":{"next":""}}`,
+		editableVersionStateQuery:   `{"data":[],"links":{"next":""}}`,
+		liveVersionStateQuery:       `{"data":[],"links":{"next":""}}`,
+		liveVersionModernStateQuery: `{"data":[],"links":{"next":""}}`,
 	}
 
 	stdout, _, runErr := runValidateWithFixture(t, fixture, "validate", "--app", "app-1")

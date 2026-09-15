@@ -80,8 +80,9 @@ func TestLocalizationsListDefaultsToEditableVersionWhenVersionOmitted(t *testing
 func TestLocalizationsListDefaultsToLiveVersionWithPlatform(t *testing.T) {
 	var log []string
 	installLocalizationsDefaultVersionTransport(t, map[string]string{
-		editableVersionStateQuery + "&filter[platform]=MAC_OS": `{"data":[],"links":{"next":""}}`,
-		liveVersionStateQuery + "&filter[platform]=MAC_OS":     `{"data":[{"type":"appStoreVersions","id":"ver-1","attributes":{"platform":"MAC_OS","versionString":"2.0.0","appStoreState":"READY_FOR_SALE","createdDate":"2026-01-01T00:00:00Z"}}],"links":{"next":""}}`,
+		editableVersionStateQuery + "&filter[platform]=MAC_OS":   `{"data":[],"links":{"next":""}}`,
+		liveVersionStateQuery + "&filter[platform]=MAC_OS":       `{"data":[{"type":"appStoreVersions","id":"ver-1","attributes":{"platform":"MAC_OS","versionString":"2.0.0","appStoreState":"READY_FOR_SALE","createdDate":"2026-01-01T00:00:00Z"}}],"links":{"next":""}}`,
+		liveVersionModernStateQuery + "&filter[platform]=MAC_OS": `{"data":[],"links":{"next":""}}`,
 	}, &log)
 
 	_, stderr, runErr := runLocalizationsList(t, "localizations", "list", "--app", "app-1", "--platform", "MAC_OS")
