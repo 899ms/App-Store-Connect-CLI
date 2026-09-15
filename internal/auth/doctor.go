@@ -139,7 +139,7 @@ func inspectStorage(options DoctorOptions) DoctorSection {
 		check := DoctorCheck{
 			Status:         DoctorWarn,
 			Message:        fmt.Sprintf("Config file permissions are too permissive (%#o)", info.Mode().Perm()),
-			Recommendation: fmt.Sprintf("Run: chmod 600 %q", configPath),
+			Recommendation: fmt.Sprintf("Run: %s", FilePermissionRemediationCommand(configPath)),
 		}
 		if options.Fix {
 			if err := os.Chmod(configPath, 0o600); err == nil {
@@ -344,9 +344,9 @@ func inspectPrivateKeyPath(path string, options DoctorOptions) DoctorCheck {
 	if filePermissionsTooPermissive(info.Mode()) {
 		check.Status = DoctorWarn
 		check.Message = fmt.Sprintf("%s - permissions %#o (expected 0600)", path, info.Mode().Perm())
-		check.Recommendation = fmt.Sprintf("Run: chmod 600 %q", path)
+		check.Recommendation = fmt.Sprintf("Run: %s", FilePermissionRemediationCommand(path))
 		if options.Fix {
-			if err := os.Chmod(path, 0o600); err == nil {
+			if changed, err := FixPrivateKeyFilePermissions(path); err == nil && changed {
 				check.Status = DoctorOK
 				check.Message = fmt.Sprintf("%s - permissions fixed to 0600", path)
 				check.FixApplied = true

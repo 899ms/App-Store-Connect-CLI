@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -627,6 +628,167 @@ func TestAuthLoginCommand(t *testing.T) {
 				t.Fatalf("expected insecure permissions error, got %v", err)
 			}
 			assertAuthDiagnostic(t, err, shared.DiagnosticFilePermissionsInsecure, "--private-key")
+		})
+	})
+
+	t.Run("insecure private key permissions print exact remediation", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows does not expose POSIX key permissions")
+		}
+		withTempRepo(t, func(string) {
+			keyPath := writeTempECDSAKeyFile(t)
+			if err := os.Chmod(keyPath, 0o644); err != nil {
+				t.Fatalf("set key permissions: %v", err)
+			}
+			cmd := AuthLoginCommand()
+			if err := cmd.FlagSet.Parse([]string{
+				"--name", "demo",
+				"--key-id", "KEY",
+				"--issuer-id", "ISS",
+				"--private-key", keyPath,
+			}); err != nil {
+				t.Fatalf("Parse() error: %v", err)
+			}
+			var execErr error
+			_, stderr := captureAuthOutput(t, func() {
+				execErr = cmd.Exec(context.Background(), []string{})
+			})
+			if execErr == nil || !strings.Contains(execErr.Error(), "private key file is too permissive") {
+				t.Fatalf("expected insecure permissions error, got %v", execErr)
+			}
+			assertAuthDiagnostic(t, execErr, shared.DiagnosticFilePermissionsInsecure, "--private-key")
+			wantCommand := fmt.Sprintf("chmod 600 %q", keyPath)
+			if !strings.Contains(stderr, wantCommand) {
+				t.Fatalf("stderr = %q, want remediation %q", stderr, wantCommand)
+			}
+			if !strings.Contains(stderr, "--fix-permissions") {
+				t.Fatalf("stderr = %q, want --fix-permissions hint", stderr)
+			}
+			info, err := os.Stat(keyPath)
+			if err != nil {
+				t.Fatalf("Stat() error: %v", err)
+			}
+			if info.Mode().Perm() != 0o644 {
+				t.Fatalf("permissions = %#o, want 0644 unchanged without --fix-permissions", info.Mode().Perm())
+			}
+		})
+	})
+
+	t.Run("fix-permissions repairs insecure key and completes login", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows does not expose POSIX key permissions")
+		}
+		withTempRepo(t, func(repo string) {
+			keyPath := writeTempECDSAKeyFile(t)
+			if err := os.Chmod(keyPath, 0o644); err != nil {
+				t.Fatalf("set key permissions: %v", err)
+			}
+			cmd := AuthLoginCommand()
+			if err := cmd.FlagSet.Parse([]string{
+				"--name", "demo",
+				"--key-id", "KEY",
+				"--issuer-id", "ISS",
+				"--private-key", keyPath,
+				"--bypass-keychain",
+				"--local",
+				"--fix-permissions",
+			}); err != nil {
+				t.Fatalf("Parse() error: %v", err)
+			}
+			var execErr error
+			stdout, stderr := captureAuthOutput(t, func() {
+				execErr = cmd.Exec(context.Background(), []string{})
+			})
+			if execErr != nil {
+				t.Fatalf("Exec() error: %v (stderr=%q)", execErr, stderr)
+			}
+			info, err := os.Stat(keyPath)
+			if err != nil {
+				t.Fatalf("Stat() error: %v", err)
+			}
+			if info.Mode().Perm() != 0o600 {
+				t.Fatalf("permissions = %#o, want 0600 after repair", info.Mode().Perm())
+			}
+			if !strings.Contains(stderr, "0600") || !strings.Contains(stderr, keyPath) {
+				t.Fatalf("stderr = %q, want repair notice naming the key file", stderr)
+			}
+			if !strings.Contains(stdout, "Successfully registered API key 'demo'") {
+				t.Fatalf("stdout = %q, want successful login", stdout)
+			}
+			if _, err := os.Stat(filepath.Join(repo, ".asc", "config.json")); err != nil {
+				t.Fatalf("expected local config written: %v", err)
+			}
+		})
+	})
+
+	t.Run("fix-permissions leaves an owner-only key silent", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows does not expose POSIX key permissions")
+		}
+		withTempRepo(t, func(string) {
+			keyPath := writeTempECDSAKeyFile(t)
+			cmd := AuthLoginCommand()
+			if err := cmd.FlagSet.Parse([]string{
+				"--name", "demo",
+				"--key-id", "KEY",
+				"--issuer-id", "ISS",
+				"--private-key", keyPath,
+				"--bypass-keychain",
+				"--local",
+				"--fix-permissions",
+			}); err != nil {
+				t.Fatalf("Parse() error: %v", err)
+			}
+			var execErr error
+			_, stderr := captureAuthOutput(t, func() {
+				execErr = cmd.Exec(context.Background(), []string{})
+			})
+			if execErr != nil {
+				t.Fatalf("Exec() error: %v (stderr=%q)", execErr, stderr)
+			}
+			if strings.Contains(stderr, "0600") {
+				t.Fatalf("stderr = %q, want no repair notice for an already secure key", stderr)
+			}
+		})
+	})
+
+	t.Run("fix-permissions rejects an unsupported key identity", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows does not expose POSIX key permissions")
+		}
+		withTempRepo(t, func(string) {
+			keyPath := writeTempECDSAKeyFile(t)
+			if err := os.Chmod(keyPath, 0o644); err != nil {
+				t.Fatalf("set key permissions: %v", err)
+			}
+			link := filepath.Join(filepath.Dir(keyPath), "link.p8")
+			if err := os.Symlink(keyPath, link); err != nil {
+				t.Fatalf("Symlink() error: %v", err)
+			}
+			cmd := AuthLoginCommand()
+			if err := cmd.FlagSet.Parse([]string{
+				"--name", "demo",
+				"--key-id", "KEY",
+				"--issuer-id", "ISS",
+				"--private-key", link,
+				"--fix-permissions",
+			}); err != nil {
+				t.Fatalf("Parse() error: %v", err)
+			}
+			err := cmd.Exec(context.Background(), []string{})
+			if err == nil || !strings.Contains(err.Error(), "failed to fix private key permissions") {
+				t.Fatalf("expected repair failure, got %v", err)
+			}
+			if errors.Is(err, flag.ErrHelp) {
+				t.Fatalf("repair failure must not be a usage error: %v", err)
+			}
+			info, statErr := os.Stat(keyPath)
+			if statErr != nil {
+				t.Fatalf("Stat() error: %v", statErr)
+			}
+			if info.Mode().Perm() != 0o644 {
+				t.Fatalf("permissions = %#o, want 0644 untouched", info.Mode().Perm())
+			}
 		})
 	})
 

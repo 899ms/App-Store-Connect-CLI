@@ -418,6 +418,21 @@ func withNetworkDiagnostic(rendered, cause error) error {
 	return shared.WithDiagnostic(rendered, code, "")
 }
 
+// printPrivateKeyPermissionRemediation follows an over-permissive key failure
+// with the exact command that repairs the file and the flag that applies it, so
+// a first login recovers without consulting auth doctor. Other private-key
+// failures print nothing.
+func printPrivateKeyPermissionRemediation(cause error, keyPath string) {
+	if kind, ok := authsvc.PrivateKeyErrorKindOf(cause); !ok || kind != authsvc.PrivateKeyPermissionsInsecure {
+		return
+	}
+	fmt.Fprintf(
+		os.Stderr,
+		"To fix, run:\n  %s\nOr re-run with --fix-permissions to let asc change the file to 0600.\n",
+		shared.SanitizeTerminal(authsvc.FilePermissionRemediationCommand(keyPath)),
+	)
+}
+
 func withPrivateKeyDiagnostic(rendered, cause error) error {
 	kind, ok := authsvc.PrivateKeyErrorKindOf(cause)
 	if !ok {
@@ -523,6 +538,7 @@ func AuthLoginCommand() *ffcli.Command {
 	local := fs.Bool("local", false, "When bypassing keychain, write to ./.asc/config.json")
 	network := fs.Bool("network", false, "Validate credentials with a lightweight API request")
 	skipValidation := fs.Bool("skip-validation", false, "Skip JWT and network validation checks")
+	fixPermissions := fs.Bool("fix-permissions", false, "Change an over-permissive private key file to 0600 before reading it")
 
 	return &ffcli.Command{
 		Name:       "login",
@@ -538,12 +554,18 @@ Add --local to write ./.asc/config.json for the current repo.
 --name may be omitted on a first login: with no stored profiles the key is saved
 as "default". Once profiles exist, --name is required and the error lists them.
 
+The private key file must not be readable by other users. An over-permissive key
+fails validation and prints the exact chmod command that repairs it; pass
+--fix-permissions to let asc change the file to 0600 first and report what it
+changed.
+
 Examples:
   asc auth login --name "MyKey" --key-id "ABC123" --issuer-id "DEF456" --private-key /path/to/AuthKey.p8
   asc auth login --name "MyIndividualKey" --key-id "ABC123" --key-type individual --private-key /path/to/AuthKey.p8
   asc auth login --bypass-keychain --local --name "MyKey" --key-id "ABC123" --issuer-id "DEF456" --private-key /path/to/AuthKey.p8
   asc auth login --network --name "MyKey" --key-id "ABC123" --issuer-id "DEF456" --private-key /path/to/AuthKey.p8
   asc auth login --skip-validation --name "MyKey" --key-id "ABC123" --issuer-id "DEF456" --private-key /path/to/AuthKey.p8
+  asc auth login --fix-permissions --name "MyKey" --key-id "ABC123" --issuer-id "DEF456" --private-key /path/to/AuthKey.p8
 
 When using system keychain storage, the encrypted key material is stored in keychain
 so commands continue to work even if the original .p8 file is removed.`,
@@ -595,8 +617,20 @@ so commands continue to work even if the original .p8 file is removed.`,
 				return err
 			}
 
+			if *fixPermissions {
+				changed, err := authsvc.FixPrivateKeyFilePermissions(*keyPath)
+				if err != nil {
+					return withPrivateKeyDiagnostic(fmt.Errorf("auth login: failed to fix private key permissions: %w", err), err)
+				}
+				if changed {
+					fmt.Fprintf(os.Stderr, "Changed private key file permissions to 0600: %s\n", shared.SanitizeTerminal(*keyPath))
+				}
+			}
+
 			if err := authsvc.ValidateKeyFile(*keyPath); err != nil {
-				return withPrivateKeyDiagnostic(shared.UsageErrorf("auth login: invalid private key: %v", err), err)
+				rendered := withPrivateKeyDiagnostic(shared.UsageErrorf("auth login: invalid private key: %v", err), err)
+				printPrivateKeyPermissionRemediation(err, *keyPath)
+				return rendered
 			}
 
 			if !*skipValidation {

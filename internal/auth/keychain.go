@@ -296,7 +296,7 @@ func validateKeyFileForOS(path, goos string) error {
 		return newPrivateKeyError(PrivateKeyInvalidFormat, errors.New("private key path is a directory"))
 	}
 	if filePermissionsTooPermissiveForOS(info.Mode(), goos) {
-		return newPrivateKeyError(PrivateKeyPermissionsInsecure, fmt.Errorf("private key file is too permissive; run: chmod 600 %q", path))
+		return newPrivateKeyError(PrivateKeyPermissionsInsecure, fmt.Errorf("private key file is too permissive; run: %s", FilePermissionRemediationCommand(path)))
 	}
 
 	data, err := io.ReadAll(file)

@@ -506,7 +506,7 @@ Ensure your `.p8` file:
 
 * Starts with `-----BEGIN PRIVATE KEY-----`
 * Is ECDSA format (App Store Connect uses P-256/ES256)
-* Has correct permissions: `chmod 600 AuthKey_*.p8`
+* Has correct permissions: `chmod 600 AuthKey_*.p8`, or re-run `asc auth login --fix-permissions` to let asc change the file to `0600`
 
 ### JWT generation failed
 
