@@ -581,7 +581,8 @@ func developerAppGroupDiagnosticCode(err error) shared.DiagnosticCode {
 	case errors.As(err, &urlErr),
 		errors.Is(err, context.DeadlineExceeded),
 		errors.Is(err, context.Canceled),
-		errors.Is(err, io.ErrUnexpectedEOF):
+		errors.Is(err, io.ErrUnexpectedEOF),
+		errors.Is(err, io.EOF):
 		return shared.DiagnosticRequestFailed
 	default:
 		return shared.DiagnosticInternalError

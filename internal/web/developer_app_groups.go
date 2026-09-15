@@ -1118,6 +1118,12 @@ func developerAppGroupCapabilityReferences(current developerBundleIDResponse) ([
 	}
 	references := make([]developerResource, 0, len(current.Included))
 	for _, resource := range current.Included {
+		// An included resource with no type cannot be told apart from a
+		// capability, and developerBundleIDCapabilities would drop it from the
+		// replacement PATCH; the graph is unreadable rather than complete.
+		if strings.TrimSpace(resource.Type) == "" {
+			return nil, fmt.Errorf("cannot safely update Bundle ID %q: Developer Portal returned an included resource without a type", current.Data.ID)
+		}
 		if resource.Type != "bundleIdCapabilities" {
 			continue
 		}
