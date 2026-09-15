@@ -711,6 +711,18 @@ func decodeStrictDeveloperRelationship(raw json.RawMessage) ([]developerResource
 	return relationship.Data, nil
 }
 
+// developerAppGroupAcceptedCreateError keeps an explicit portal refusal a
+// refusal while reporting a 2xx envelope that carries no verdict as an
+// accepted but unverified create: the group may already exist, so a blind
+// retry is unsafe.
+func developerAppGroupAcceptedCreateError(err error) error {
+	var resultErr *DeveloperPortalResultError
+	if errors.As(err, &resultErr) {
+		return err
+	}
+	return &DeveloperAppGroupUnverifiedError{Err: fmt.Errorf("developer portal accepted the create but %w", err)}
+}
+
 // CreateDeveloperAppGroup registers an App Group through Developer Portal.
 func (c *Client) CreateDeveloperAppGroup(ctx context.Context, request DeveloperAppGroupCreateRequest) (*DeveloperAppGroup, error) {
 	request.Name = strings.TrimSpace(request.Name)
@@ -742,14 +754,16 @@ func (c *Client) CreateDeveloperAppGroup(ctx context.Context, request DeveloperA
 	}
 	var response developerAppGroupCreateResponse
 	if err := json.Unmarshal(body, &response); err != nil {
-		return nil, &DeveloperAppGroupUnreadableResponseError{Err: fmt.Errorf("failed to parse Developer Portal App Group create response: %w", err)}
+		// The portal answered 2xx, so the group may already be registered; a
+		// retry is not safe until the operator re-reads the team's list.
+		return nil, &DeveloperAppGroupUnverifiedError{Err: fmt.Errorf("developer portal accepted the create but failed to parse Developer Portal App Group create response: %w", err)}
 	}
 	if err := validateDeveloperPortalLegacyResponse(response.developerPortalLegacyResponse); err != nil {
-		return nil, err
+		return nil, developerAppGroupAcceptedCreateError(err)
 	}
 	group, err := decodeDeveloperAppGroup(response.ApplicationGroup)
 	if err != nil {
-		return nil, developerAppGroupResponseError(err)
+		return nil, &DeveloperAppGroupUnverifiedError{Err: fmt.Errorf("developer portal accepted the create but its receipt could not be read: %w", err)}
 	}
 	return &group, nil
 }
@@ -1131,8 +1145,15 @@ func developerRelationshipUnresolved(raw json.RawMessage) bool {
 	if _, resolved := members["data"]; resolved {
 		return false
 	}
-	_, hasLinks := members["links"]
-	return hasLinks
+	links, hasLinks := members["links"]
+	if !hasLinks {
+		return false
+	}
+	// A links member that is not itself a readable links object makes the
+	// whole relationship malformed rather than merely unselected, so the
+	// strict decoder handles it instead of the included fallback.
+	var linkMembers map[string]json.RawMessage
+	return json.Unmarshal(links, &linkMembers) == nil && linkMembers != nil
 }
 
 // developerBundleIDAppGroupsState reads the APP_GROUPS capability of a Bundle

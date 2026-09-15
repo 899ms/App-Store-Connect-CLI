@@ -1770,6 +1770,10 @@ func TestAppGroupMutationsFailClosedWithoutAnyCapabilityGraph(t *testing.T) {
 			"data":{"id":"bundle-1","type":"bundleIds","attributes":{"identifier":"com.example.app"},"relationships":{"bundleIdCapabilities":{}}},
 			"included":[{"type":"bundleIdCapabilities","id":"push-1","attributes":{"enabled":true,"settings":[]},"relationships":{"capability":{"data":{"type":"capabilities","id":"PUSH_NOTIFICATIONS"}}}}]
 		}`,
+		"malformed links relationship with an included graph": `{
+			"data":{"id":"bundle-1","type":"bundleIds","attributes":{"identifier":"com.example.app"},"relationships":{"bundleIdCapabilities":{"links":"invalid"}}},
+			"included":[{"type":"bundleIdCapabilities","id":"push-1","attributes":{"enabled":true,"settings":[]},"relationships":{"capability":{"data":{"type":"capabilities","id":"PUSH_NOTIFICATIONS"}}}}]
+		}`,
 	}
 	for bundleName, bundle := range bundles {
 		t.Run(bundleName, func(t *testing.T) {
@@ -1961,6 +1965,64 @@ func TestListDeveloperAppGroupsClassifiesUnreadableResponses(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "Access denied") {
 			t.Fatalf("unexpected message: %v", err)
+		}
+	})
+}
+
+// TestCreateDeveloperAppGroupReportsUnreadableReceiptAsUnverified keeps a 2xx
+// create whose receipt cannot be read from being reported as a write that
+// never happened.
+func TestCreateDeveloperAppGroupReportsUnreadableReceiptAsUnverified(t *testing.T) {
+	bodies := map[string]string{
+		"malformed body":     `{"resultCode":0,`,
+		"missing resultCode": `{"applicationGroup":{"name":"Shared","identifier":"group.com.example.shared","applicationGroup":"GROUP12345"}}`,
+		"incomplete receipt": `{"resultCode":0,"applicationGroup":{"name":"Shared"}}`,
+	}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			client := newDeveloperAppGroupsTestClient(t, func(requestNumber int, request *http.Request) (*http.Response, error) {
+				switch requestNumber {
+				case 1:
+					return assertDeveloperPortalBootstrap(t, request), nil
+				case 2:
+					return developerPortalTestResponse(http.StatusOK, `{"resultCode":0,"applicationGroupList":[]}`, http.Header{"csrf": {"primed-csrf"}, "csrf_ts": {"primed-ts"}}), nil
+				case 3:
+					return developerPortalTestResponse(http.StatusOK, body, nil), nil
+				default:
+					t.Fatalf("unexpected request %d", requestNumber)
+					return nil, nil
+				}
+			})
+			_, err := client.CreateDeveloperAppGroup(context.Background(), DeveloperAppGroupCreateRequest{Name: "Shared", Identifier: "group.com.example.shared"})
+			var unverified *DeveloperAppGroupUnverifiedError
+			if !errors.As(err, &unverified) {
+				t.Fatalf("error %v is not reported as an accepted but unverified create", err)
+			}
+			if !strings.Contains(err.Error(), "accepted the create") {
+				t.Fatalf("unexpected message: %v", err)
+			}
+		})
+	}
+
+	t.Run("explicit refusal stays a refusal", func(t *testing.T) {
+		client := newDeveloperAppGroupsTestClient(t, func(requestNumber int, request *http.Request) (*http.Response, error) {
+			switch requestNumber {
+			case 1:
+				return assertDeveloperPortalBootstrap(t, request), nil
+			case 2:
+				return developerPortalTestResponse(http.StatusOK, `{"resultCode":0,"applicationGroupList":[]}`, http.Header{"csrf": {"primed-csrf"}, "csrf_ts": {"primed-ts"}}), nil
+			default:
+				return developerPortalTestResponse(http.StatusOK, `{"resultCode":1200,"userString":"Identifier already exists"}`, nil), nil
+			}
+		})
+		_, err := client.CreateDeveloperAppGroup(context.Background(), DeveloperAppGroupCreateRequest{Name: "Shared", Identifier: "group.com.example.shared"})
+		var unverified *DeveloperAppGroupUnverifiedError
+		if errors.As(err, &unverified) {
+			t.Fatalf("a refused create must not be reported as unverified: %v", err)
+		}
+		var resultErr *DeveloperPortalResultError
+		if !errors.As(err, &resultErr) || resultErr.ResultCode != 1200 {
+			t.Fatalf("expected an explicit portal refusal, got %v", err)
 		}
 	})
 }
