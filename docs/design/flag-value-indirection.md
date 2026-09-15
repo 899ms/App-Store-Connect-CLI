@@ -93,7 +93,14 @@ matching the Codemagic `cli-tools` convention that agents already know.
   read touches is one the operator named.
 - Rewriting stops at the first unknown flag token, and at a malformed
   spelling such as `---flag`, so the unknown-flag and bad-flag-syntax
-  diagnostics stay authoritative for that invocation. The walk accepts the
+  diagnostics stay authoritative for that invocation. One boundary follows
+  from that rule: on `asc search`, a flag-shaped query term is not a flag, so
+  a supported flag placed after it (`asc search query --app --limit @env:X`)
+  is left literal and rejected by the command's own interspersed parse.
+  Putting the supported flags before flag-shaped query terms resolves them.
+- The generated command docs and the root help state the exclusions alongside
+  the indirection tip, so a page never promises resolution for `--output` or
+  the root selectors. The walk accepts the
   same prefixes as `hasValidFlagPrefix`, which is what final parsing accepts.
 
 ## Placement
