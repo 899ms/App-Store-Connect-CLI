@@ -20,6 +20,9 @@ func TestBuildsAddGroupsInternalGroupAddsGroup(t *testing.T) {
 
 	requestCount := 0
 	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if resp, handled, err := serveAddGroupsPreflightState(req); handled {
+			return resp, err
+		}
 		requestCount++
 		switch requestCount {
 		case 1:
@@ -99,6 +102,9 @@ func TestBuildsAddGroupsAddsMixedInternalAndExternalGroups(t *testing.T) {
 
 	requestCount := 0
 	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if resp, handled, err := serveAddGroupsPreflightState(req); handled {
+			return resp, err
+		}
 		requestCount++
 		switch requestCount {
 		case 1:
@@ -179,6 +185,9 @@ func TestBuildsAddGroupsSkipInternalAddsOnlyExternalGroups(t *testing.T) {
 
 	requestCount := 0
 	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if resp, handled, err := serveAddGroupsPreflightState(req); handled {
+			return resp, err
+		}
 		requestCount++
 		switch requestCount {
 		case 1:
@@ -260,6 +269,9 @@ func TestBuildsAddGroupsSkipInternalWithOnlyInternalGroupsIsNoOp(t *testing.T) {
 
 	requestCount := 0
 	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if resp, handled, err := serveAddGroupsPreflightState(req); handled {
+			return resp, err
+		}
 		requestCount++
 		switch requestCount {
 		case 1:

@@ -155,20 +155,10 @@ func ResolveBetaGroupsFromList(inputGroups []string, groups *asc.BetaGroupsRespo
 
 // AddBuildBetaGroups applies resolved beta groups to a build, optionally skipping internal groups.
 func AddBuildBetaGroups(ctx context.Context, client buildBetaGroupsMutationClient, buildID string, groups []ResolvedBetaGroup, opts AddBuildBetaGroupsOptions) (*AddBuildBetaGroupsResult, error) {
-	groupIDsToAdd := make([]string, 0, len(groups))
-	skippedInternalGroups := make([]ResolvedBetaGroup, 0, len(groups))
-	skippedInternalAllBuildsGroups := make([]ResolvedBetaGroup, 0, len(groups))
-	for _, group := range groups {
-		if group.IsInternalGroup && opts.SkipInternal {
-			skippedInternalGroups = append(skippedInternalGroups, group)
-			continue
-		}
-		if group.IsInternalGroup && group.HasAccessToAllBuilds && opts.SkipInternalWithAllBuilds {
-			skippedInternalAllBuildsGroups = append(skippedInternalAllBuildsGroups, group)
-			continue
-		}
-		groupIDsToAdd = append(groupIDsToAdd, group.ID)
-	}
+	plan := PlanBuildBetaGroupAssignment(groups, opts)
+	groupIDsToAdd := plan.GroupIDsToAdd()
+	skippedInternalGroups := plan.SkippedInternalGroups
+	skippedInternalAllBuildsGroups := plan.SkippedInternalAllBuildsGroups
 
 	if len(groupIDsToAdd) == 0 {
 		return &AddBuildBetaGroupsResult{

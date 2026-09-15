@@ -30,6 +30,14 @@ func BuildsAddGroupsCommand() *ffcli.Command {
 		ShortHelp:  "Add beta groups to a build for TestFlight distribution.",
 		LongHelp: `Add beta groups to a build for TestFlight distribution.
 
+The build state is checked before the assignment request. When the build cannot
+accept the groups the command names the failing precondition and the command
+that clears it, and does not send the request:
+  - processing, failed, or invalid processing state
+  - expired build
+  - missing export compliance, processing exception, export-compliance review,
+    or a failed beta app review, for external groups
+
 Examples:
   asc builds add-groups --build-id "BUILD_ID" --group "GROUP_ID"
   asc builds add-groups --app "123456789" --latest --group "GROUP_ID"
@@ -79,11 +87,20 @@ Examples:
 				return fmt.Errorf("builds add-groups: %w", err)
 			}
 
-			addResult, err := shared.AddBuildBetaGroups(requestCtx, client, buildID, resolvedGroups, shared.AddBuildBetaGroupsOptions{
+			addOptions := shared.AddBuildBetaGroupsOptions{
 				SkipInternal: *skipInternal,
-			})
+			}
+			plan := shared.PlanBuildBetaGroupAssignment(resolvedGroups, addOptions)
+			if err := shared.PreflightBuildBetaGroupAssignment(requestCtx, client, buildID, plan, shared.BuildBetaGroupPreflightOptions{
+				OperationName: "builds add-groups",
+				Submit:        *submit,
+			}); err != nil {
+				return err
+			}
+
+			addResult, err := shared.AddBuildBetaGroups(requestCtx, client, buildID, resolvedGroups, addOptions)
 			if err != nil {
-				return fmt.Errorf("builds add-groups: failed to add groups: %w", err)
+				return shared.ReportBuildBetaGroupAssignmentFailure(buildID, "builds add-groups", err)
 			}
 
 			submissionResult, err := shared.SubmitBuildBetaReviewIfNeeded(requestCtx, client, buildID, resolvedGroups, addResult.AddedGroupIDs, *submit, "builds add-groups")
