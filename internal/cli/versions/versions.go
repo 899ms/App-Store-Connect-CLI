@@ -599,6 +599,7 @@ version. Any other 409 keeps failing.`,
 			resp, err := client.CreateAppStoreVersion(requestCtx, resolvedAppID, attrs)
 			action := asc.IdempotentWriteActionCreated
 			copyMetadata := copyMetadataFromValue != ""
+			conflictHandled := false
 			if err != nil {
 				existing, handled, resolveErr := shared.ResolveIfExistsConflict(ifExistsMode, err, versionsCreateExistsCodes, func() (*asc.AppStoreVersionResponse, bool, error) {
 					return findExistingAppStoreVersion(requestCtx, client, resolvedAppID, attrs.VersionString, normalizedPlatform)
@@ -632,22 +633,12 @@ version. Any other 409 keeps failing.`,
 						action = asc.IdempotentWriteActionUpdated
 					}
 				}
-				fmt.Fprintf(os.Stderr, "versions create: version %s (%s, %s) already exists as %s; %s (--if-exists %s)\n",
-					attrs.VersionString, normalizedPlatform, resolvedAppID, resp.Data.ID, ifExistsOutcomeText(action), ifExistsMode)
+				conflictHandled = true
 			}
 
-			result := &asc.AppStoreVersionDetailResult{
-				ID:            resp.Data.ID,
-				VersionString: resp.Data.Attributes.VersionString,
-				Platform:      string(resp.Data.Attributes.Platform),
-				State:         shared.ResolveAppStoreVersionState(resp.Data.Attributes),
-				IdempotentWriteReceipt: asc.IdempotentWriteReceipt{
-					AlreadyExists: action != asc.IdempotentWriteActionCreated,
-					Action:        action,
-				},
-			}
+			var copySummary *asc.AppStoreVersionMetadataCopySummary
 			if copyMetadata {
-				copySummary, err := copyVersionMetadataFromSource(
+				copySummary, err = copyVersionMetadataFromSource(
 					requestCtx,
 					client,
 					resolvedAppID,
@@ -662,7 +653,31 @@ version. Any other 409 keeps failing.`,
 				if len(copySummary.SkippedLocales) > 0 {
 					fmt.Fprintf(os.Stderr, "Warning: skipped source locales not enabled on destination: %s\n", strings.Join(copySummary.SkippedLocales, ", "))
 				}
-				result.MetadataCopy = copySummary
+				// The copy PATCHes the existing version's localizations, so a
+				// copy that changed something makes the resolved conflict an
+				// update even when the version resource itself had nothing to
+				// PATCH. A copy that changed nothing leaves the version
+				// untouched and keeps the skipped receipt honest.
+				if conflictHandled && copySummary.CopiedFieldUpdates > 0 {
+					action = asc.IdempotentWriteActionUpdated
+				}
+			}
+
+			if conflictHandled {
+				fmt.Fprintf(os.Stderr, "versions create: version %s (%s, %s) already exists as %s; %s (--if-exists %s)\n",
+					attrs.VersionString, normalizedPlatform, resolvedAppID, resp.Data.ID, ifExistsOutcomeText(action), ifExistsMode)
+			}
+
+			result := &asc.AppStoreVersionDetailResult{
+				ID:            resp.Data.ID,
+				VersionString: resp.Data.Attributes.VersionString,
+				Platform:      string(resp.Data.Attributes.Platform),
+				State:         shared.ResolveAppStoreVersionState(resp.Data.Attributes),
+				IdempotentWriteReceipt: asc.IdempotentWriteReceipt{
+					AlreadyExists: action != asc.IdempotentWriteActionCreated,
+					Action:        action,
+				},
+				MetadataCopy: copySummary,
 			}
 
 			return shared.PrintOutput(result, *output.Output, *output.Pretty)
@@ -674,10 +689,13 @@ version. Any other 409 keeps failing.`,
 // string is already taken on POST /v1/appStoreVersions. Apple answers the
 // duplicate with ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE on the
 // /data/attributes/versionString pointer ("The version number has been
-// previously used."). The same endpoint also returns 409
+// previously used."). Live against app 6759231657 on 2026-09-15 that code
+// arrives as the *second* entry of the errors[] array, behind
 // ENTITY_ERROR.RELATIONSHIP.INVALID ("You cannot create a new version of the
-// App in the current state.") and STATE_ERROR.*; those are not existence
-// conflicts and keep failing.
+// App in the current state."), so shared.IsIfExistsConflict matches every code
+// in the response. A 409 that carries only the relationship rejection, or
+// STATE_ERROR.*, is not an existence conflict and keeps failing; so does a
+// duplicate whose read-back finds no such version string.
 var versionsCreateExistsCodes = []string{"ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE"}
 
 // findExistingAppStoreVersion reads back the version a 409 conflict referred

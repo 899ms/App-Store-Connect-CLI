@@ -402,12 +402,15 @@ Examples:
 
 // reviewDetailsCreateExistsCodes lists the Apple 409 codes accepted as "an
 // appStoreReviewDetail already exists for this appStoreVersion" on
-// POST /v1/appStoreReviewDetails. The version owns at most one detail, so the
-// duplicate surfaces as a rejected appStoreVersion relationship
-// (ENTITY_ERROR.RELATIONSHIP.INVALID) or as a duplicate attribute code. The
-// read-back of GET /v1/appStoreVersions/{id}/appStoreReviewDetail is what
-// finally proves existence; STATE_ERROR.* keeps failing.
+// POST /v1/appStoreReviewDetails. Live against app 6759231657 on 2026-09-15
+// Apple answers this conflict with STATE_ERROR.ALREADY_EXISTS ("Resource
+// already exists." / "The given app version already has an existing review.");
+// the relationship and duplicate-attribute codes are kept because the version
+// owns at most one detail and Apple has reported the same conflict through
+// them. The read-back of GET /v1/appStoreVersions/{id}/appStoreReviewDetail is
+// what finally proves existence; every other STATE_ERROR.* keeps failing.
 var reviewDetailsCreateExistsCodes = []string{
+	"STATE_ERROR.ALREADY_EXISTS",
 	"ENTITY_ERROR.RELATIONSHIP.INVALID",
 	"ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE",
 	"ENTITY_ERROR.ATTRIBUTE.INVALID.ALREADY_EXISTS",
