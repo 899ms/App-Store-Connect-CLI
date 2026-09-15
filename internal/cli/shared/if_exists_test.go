@@ -11,8 +11,20 @@ import (
 )
 
 func TestParseIfExistsModeAcceptsSupportedValuesOnly(t *testing.T) {
-	if mode, err := ParseIfExistsMode("", IfExistsSkip); err != nil || mode != IfExistsFail {
-		t.Fatalf("empty = %q, %v; want fail", mode, err)
+	// The flag defaults to "fail", so an empty raw value can only come from an
+	// explicit --if-exists "" (or an all-whitespace value). Accepting it would
+	// silently ignore an unsupported value.
+	for _, raw := range []string{"", "   "} {
+		_, err := ParseIfExistsMode(raw, IfExistsSkip)
+		if err == nil {
+			t.Fatalf("ParseIfExistsMode(%q) = nil error; want usage error", raw)
+		}
+		if !errors.Is(err, flag.ErrHelp) {
+			t.Fatalf("ParseIfExistsMode(%q) = %v; want usage-class error", raw, err)
+		}
+		if !strings.Contains(err.Error(), "fail, skip") {
+			t.Fatalf("ParseIfExistsMode(%q) = %v; want the supported modes listed", raw, err)
+		}
 	}
 	if mode, err := ParseIfExistsMode(" Skip ", IfExistsSkip); err != nil || mode != IfExistsSkip {
 		t.Fatalf("skip = %q, %v; want skip", mode, err)

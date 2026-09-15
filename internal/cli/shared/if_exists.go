@@ -36,11 +36,12 @@ func BindIfExistsFlag(fs *flag.FlagSet, supported ...IfExistsMode) *string {
 // ParseIfExistsMode validates the raw --if-exists value against the modes the
 // command supports. It returns a usage-class error (exit code 2) before any
 // HTTP request so an unsupported value is never silently ignored.
+//
+// BindIfExistsFlag defaults the flag to fail, so an empty or all-whitespace raw
+// value can only come from an explicitly supplied --if-exists "" and is
+// rejected rather than silently read as fail.
 func ParseIfExistsMode(raw string, supported ...IfExistsMode) (IfExistsMode, error) {
 	value := IfExistsMode(strings.ToLower(strings.TrimSpace(raw)))
-	if value == "" {
-		return IfExistsFail, nil
-	}
 	modes := ifExistsModeNames(supported)
 	for _, mode := range modes {
 		if string(value) == mode {
