@@ -23,6 +23,10 @@ type PushExecutionOptions struct {
 	AllowDeletes bool
 	Confirm      bool
 	ReviewDir    string
+	// IfExists selects what an apply does when App Store Connect rejects a
+	// localization create because the locale already exists. An empty value
+	// means fail, which is the historical behavior.
+	IfExists string
 }
 
 // ExecutePush computes and optionally applies a metadata push plan.
@@ -54,6 +58,11 @@ func ExecutePushWithWarnings(ctx context.Context, opts PushExecutionOptions) (Pu
 	}
 	if strings.TrimSpace(opts.ReviewDir) != "" && !opts.DryRun && !opts.Confirm {
 		return PushPlanResult{}, nil, shared.UsageError("--confirm is required when applying an approved metadata plan")
+	}
+
+	ifExistsMode, err := shared.ParseIfExistsMode(opts.IfExists, shared.IfExistsSkip, shared.IfExistsUpdate)
+	if err != nil {
+		return PushPlanResult{}, nil, err
 	}
 
 	platformValue := strings.TrimSpace(opts.Platform)
@@ -231,15 +240,19 @@ func ExecutePushWithWarnings(ctx context.Context, opts PushExecutionOptions) (Pu
 		remoteAppInfoItems,
 		remoteVersionItems,
 		opts.AllowDeletes,
+		metadataIfExistsOptions{mode: ifExistsMode, prefix: errorPrefix},
 	)
 	result.Actions = actions
 	result.Total = len(actions)
 	for _, action := range actions {
-		if action.Status == "failed" {
+		switch action.Status {
+		case metadataActionStatusFailed:
 			result.Failed++
-			continue
+		case metadataActionStatusSkipped:
+			result.Skipped++
+		default:
+			result.Succeeded++
 		}
-		result.Succeeded++
 	}
 	result.Applied = applyErr == nil && result.Failed == 0
 
