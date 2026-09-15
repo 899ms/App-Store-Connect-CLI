@@ -6,6 +6,11 @@ import (
 	"io/fs"
 	"os"
 	"runtime"
+	"strings"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/kballard/go-shellquote"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/rootfs"
 )
@@ -26,8 +31,30 @@ func filePermissionsTooPermissiveForOS(mode fs.FileMode, goos string) bool {
 // run to tighten an over-permissive credential file. Callers print it so a
 // failed read names the one command that repairs the file, and so the
 // recommendation text never drifts between `auth doctor` and `auth login`.
+//
+// The path is quoted for a POSIX shell, so a path holding metacharacters such
+// as `$(...)`, a backtick, or `$VAR` is pasted literally instead of being
+// expanded, and a leading dash is anchored so chmod reads it as a file rather
+// than a flag. A path carrying control characters cannot be displayed as a
+// command to copy at all, so it is escaped into an inert Go-quoted form.
 func FilePermissionRemediationCommand(path string) string {
-	return fmt.Sprintf("chmod 600 %q", path)
+	target := path
+	if strings.HasPrefix(target, "-") {
+		target = "./" + target
+	}
+	if !utf8.ValidString(target) || containsNonDisplayableRune(target) {
+		return fmt.Sprintf("chmod 600 %q", target)
+	}
+	return shellquote.Join("chmod", "600", target)
+}
+
+func containsNonDisplayableRune(value string) bool {
+	for _, r := range value {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return true
+		}
+	}
+	return false
 }
 
 // FixPrivateKeyFilePermissions tightens an over-permissive private key file to

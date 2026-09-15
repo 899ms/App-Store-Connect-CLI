@@ -103,8 +103,8 @@ Register and store App Store Connect API key credentials.
 
 The private key file must not be readable by other users. Without
 `--fix-permissions`, login fails with the `file_permissions_insecure`
-diagnostic and prints the exact `chmod 600 "<path>"` command that repairs it.
-With `--fix-permissions`, asc changes the file to `0600`, reports the change on
+diagnostic and prints the exact, shell-quoted `chmod 600` command that repairs
+it. With `--fix-permissions`, asc changes the file to `0600`, reports the change on
 stderr, and continues through the normal validation path. A symlinked or
 non-regular key path is rejected instead of being changed.
 

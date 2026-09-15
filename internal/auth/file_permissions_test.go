@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/kballard/go-shellquote"
 )
 
 func TestFilePermissionsTooPermissiveForOS(t *testing.T) {
@@ -42,12 +44,32 @@ func TestValidateKeyFileForOSWindowsSkipsUnixPermissionCheck(t *testing.T) {
 }
 
 func TestFilePermissionRemediationCommand(t *testing.T) {
-	command := FilePermissionRemediationCommand("/tmp/keys/AuthKey.p8")
-	if command != `chmod 600 "/tmp/keys/AuthKey.p8"` {
+	if command := FilePermissionRemediationCommand("/tmp/keys/AuthKey.p8"); command != "chmod 600 /tmp/keys/AuthKey.p8" {
 		t.Fatalf("FilePermissionRemediationCommand() = %q", command)
 	}
-	if escaped := FilePermissionRemediationCommand("/tmp/ke\ny.p8"); strings.Contains(escaped, "\n") {
-		t.Fatalf("remediation command must escape control characters, got %q", escaped)
+	if command := FilePermissionRemediationCommand("-rf.p8"); command != "chmod 600 ./-rf.p8" {
+		t.Fatalf("a leading dash must be anchored, got %q", command)
+	}
+	if command := FilePermissionRemediationCommand("/tmp/ke\ny.p8"); strings.ContainsAny(command, "\n\r") {
+		t.Fatalf("control characters must be escaped, got %q", command)
+	}
+
+	for _, path := range []string{
+		"/tmp/my keys/AuthKey.p8",
+		"/tmp/$(id)/AuthKey.p8",
+		"/tmp/`whoami`/AuthKey.p8",
+		"/tmp/$HOME/AuthKey.p8",
+		`/tmp/quo"te/AuthKey.p8`,
+		"/tmp/semi;rm -rf/AuthKey.p8",
+	} {
+		command := FilePermissionRemediationCommand(path)
+		words, err := shellquote.Split(command)
+		if err != nil {
+			t.Fatalf("Split(%q) error: %v", command, err)
+		}
+		if len(words) != 3 || words[0] != "chmod" || words[1] != "600" || words[2] != path {
+			t.Fatalf("Split(%q) = %#v, want chmod 600 %q with no shell expansion", command, words, path)
+		}
 	}
 }
 

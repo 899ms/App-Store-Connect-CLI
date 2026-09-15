@@ -11,7 +11,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"flag"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -657,7 +656,10 @@ func TestAuthLoginCommand(t *testing.T) {
 				t.Fatalf("expected insecure permissions error, got %v", execErr)
 			}
 			assertAuthDiagnostic(t, execErr, shared.DiagnosticFilePermissionsInsecure, "--private-key")
-			wantCommand := fmt.Sprintf("chmod 600 %q", keyPath)
+			wantCommand := authsvc.FilePermissionRemediationCommand(keyPath)
+			if !strings.HasPrefix(wantCommand, "chmod 600 ") || !strings.Contains(wantCommand, keyPath) {
+				t.Fatalf("remediation command = %q, want a chmod 600 command naming the key", wantCommand)
+			}
 			if !strings.Contains(stderr, wantCommand) {
 				t.Fatalf("stderr = %q, want remediation %q", stderr, wantCommand)
 			}
