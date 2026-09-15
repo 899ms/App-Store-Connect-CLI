@@ -274,7 +274,7 @@ func resolveMultipleAppInfoAgeRating(ctx context.Context, client *asc.Client, re
 			Kind:        "app info",
 			Description: fmt.Sprintf("app %q", strings.TrimSpace(appID)),
 			Candidates:  shared.AppInfoAmbiguousCandidates(candidates),
-			Hint:        fmt.Sprintf("Inspect them with `asc apps info list --app %q` and run `asc age-rating` with --app-info-id explicitly.", strings.TrimSpace(appID)),
+			Hint:        fmt.Sprintf("Inspect them with `asc apps info list --app %q`, then read the declaration with `asc age-rating view --app-info-id <ID>`.", strings.TrimSpace(appID)),
 		})
 	}
 
