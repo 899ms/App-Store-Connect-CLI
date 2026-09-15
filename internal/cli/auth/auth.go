@@ -1346,6 +1346,40 @@ Examples:
 	}
 }
 
+// authTokenConfirmRequiredMessage explains the --confirm gate in one line. It
+// keeps the "required" wording so the failure stays classified as
+// missing_required with usage exit code 2.
+const authTokenConfirmRequiredMessage = "--confirm is required because `asc auth token` prints a live bearer token to stdout, " +
+	"where it can leak into shell history, logs, or CI output"
+
+// authTokenConfirmInvocation reconstructs the exact command that satisfies the
+// --confirm gate, preserving the root --profile override and every command flag
+// the caller already supplied so agents can re-run it verbatim.
+func authTokenConfirmInvocation(fs *flag.FlagSet) string {
+	parts := []string{"asc"}
+	parts = append(parts, shared.RootFlagsForReinvocation()...)
+	parts = append(parts, "auth", "token")
+	if fs != nil {
+		// flag.Visit walks only the flags that were set, in lexical order, so
+		// the rendered invocation is deterministic.
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "confirm" {
+				// Re-added last, including when it was passed as --confirm=false.
+				return
+			}
+			if boolFlag, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && boolFlag.IsBoolFlag() {
+				if f.Value.String() == "true" {
+					parts = append(parts, "--"+f.Name)
+				}
+				return
+			}
+			parts = append(parts, "--"+f.Name, shared.ShellQuote(f.Value.String()))
+		})
+	}
+	parts = append(parts, "--confirm")
+	return shared.SanitizeTerminal(strings.Join(parts, " "))
+}
+
 // AuthTokenCommand prints a signed JWT for direct API calls.
 func AuthTokenCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("auth token", flag.ExitOnError)
@@ -1385,7 +1419,12 @@ Examples:
 				return shared.UsageError(err.Error())
 			}
 			if !*confirm {
-				return shared.UsageError("--confirm is required")
+				// UsageError writes the "Error:" line first, so the exact
+				// re-invocation is appended straight after it and still lands
+				// ahead of the usage page ffcli renders for flag.ErrHelp.
+				usageErr := shared.UsageError(authTokenConfirmRequiredMessage)
+				fmt.Fprintf(os.Stderr, "Re-run: %s\n", authTokenConfirmInvocation(fs))
+				return usageErr
 			}
 
 			cred, err := shared.ResolveAuthCredentials(trimmedName)
