@@ -126,6 +126,10 @@ Examples:
 			if nextValue != "" {
 				parent.ID = ""
 			}
+			// Every page after the first is addressed by the previous
+			// response's next URL, so a 404 there belongs to that URL.
+			pageParent := parent
+			pageParent.ID = ""
 
 			switch kind {
 			case relationshipSingle:
@@ -147,14 +151,14 @@ Examples:
 						return fmt.Errorf("pre-release-versions relationships view: failed to fetch: %w", shared.DescribeRelationshipLookupFailure(err, relationshipType, parent))
 					}
 					resp, err := asc.PaginateAll(requestCtx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-						return getPreReleaseRelationshipList(ctx, client, relationshipType, versionValue, asc.WithLinkagesNextURL(nextURL))
+						page, err := getPreReleaseRelationshipList(ctx, client, relationshipType, versionValue, asc.WithLinkagesNextURL(nextURL))
+						if err != nil {
+							return nil, shared.DescribeRelationshipLookupFailure(err, relationshipType, pageParent)
+						}
+						return page, nil
 					})
 					if err != nil {
-						// Later pages are addressed by the response's next
-						// URL, so a 404 there belongs to that URL.
-						pageParent := parent
-						pageParent.ID = ""
-						return fmt.Errorf("pre-release-versions relationships view: %w", shared.DescribeRelationshipLookupFailure(err, relationshipType, pageParent))
+						return fmt.Errorf("pre-release-versions relationships view: %w", err)
 					}
 					return shared.PrintOutput(resp, *output.Output, *output.Pretty)
 				}

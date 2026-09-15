@@ -140,20 +140,32 @@ Examples:
 			if nextValue != "" {
 				parent.ID = ""
 			}
+			// Every page after the first is addressed by the previous
+			// response's next URL, so a 404 there belongs to that URL.
+			pageParent := parent
+			pageParent.ID = ""
 
 			if *paginate {
 				paginateOpts := append(opts, asc.WithLinkagesLimit(200))
 				resp, err := shared.PaginateWithSpinner(
 					requestCtx,
 					func(ctx context.Context) (asc.PaginatedResponse, error) {
-						return getBetaTesterRelationshipList(ctx, client, relationshipType, testerValue, paginateOpts...)
+						page, err := getBetaTesterRelationshipList(ctx, client, relationshipType, testerValue, paginateOpts...)
+						if err != nil {
+							return nil, shared.DescribeRelationshipLookupFailure(err, relationshipType, parent)
+						}
+						return page, nil
 					},
 					func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-						return getBetaTesterRelationshipList(ctx, client, relationshipType, testerValue, asc.WithLinkagesNextURL(nextURL))
+						page, err := getBetaTesterRelationshipList(ctx, client, relationshipType, testerValue, asc.WithLinkagesNextURL(nextURL))
+						if err != nil {
+							return nil, shared.DescribeRelationshipLookupFailure(err, relationshipType, pageParent)
+						}
+						return page, nil
 					},
 				)
 				if err != nil {
-					return fmt.Errorf("testflight beta-testers relationships view: %w", shared.DescribeRelationshipLookupFailure(err, relationshipType, parent))
+					return fmt.Errorf("testflight beta-testers relationships view: %w", err)
 				}
 
 				return shared.PrintOutput(resp, *output.Output, *output.Pretty)

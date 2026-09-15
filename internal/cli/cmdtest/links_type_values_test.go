@@ -272,6 +272,104 @@ func TestLinksNotFoundNamesMissingResource(t *testing.T) {
 	}
 }
 
+func TestLinksPaginateLaterPageNotFoundBlamesPageURL(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		path string
+		body string
+		want string
+	}{
+		{
+			name: "builds links paginate",
+			args: []string{"builds", "links", "view", "--build-id", "build-1", "--type", "individualTesters", "--paginate", "--output", "json"},
+			path: "/v1/builds/build-1/relationships/individualTesters",
+			body: notFoundBody("builds", "build-1"),
+			want: "builds links view: page 2: the build referenced by the requested page URL was not found",
+		},
+		{
+			name: "testflight groups links paginate",
+			args: []string{"testflight", "groups", "links", "view", "--group-id", "group-1", "--type", "betaTesters", "--paginate", "--output", "json"},
+			path: "/v1/betaGroups/group-1/relationships/betaTesters",
+			body: notFoundBody("betaGroups", "group-1"),
+			want: "testflight groups links view: page 2: the group referenced by the requested page URL was not found",
+		},
+		{
+			name: "testflight testers links paginate",
+			args: []string{"testflight", "testers", "links", "view", "--tester-id", "tester-1", "--type", "apps", "--paginate", "--output", "json"},
+			path: "/v1/betaTesters/tester-1/relationships/apps",
+			body: notFoundBody("betaTesters", "tester-1"),
+			want: "testflight testers links view: page 2: the tester referenced by the requested page URL was not found",
+		},
+		{
+			name: "testflight pre-release links paginate",
+			args: []string{"testflight", "pre-release", "links", "view", "--id", "pr-1", "--type", "builds", "--paginate", "--output", "json"},
+			path: "/v1/preReleaseVersions/pr-1/relationships/builds",
+			body: notFoundBody("preReleaseVersions", "pr-1"),
+			want: "testflight pre-release links view: page 2: the pre-release version referenced by the requested page URL was not found",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			setupAuth(t)
+			t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+			server := newPaginatedNotFoundServer(t, test.path, test.body)
+			useLinksServerClient(t, server)
+
+			root := RootCommand("1.2.3")
+			root.FlagSet.SetOutput(io.Discard)
+
+			var runErr error
+			stdout, _ := captureOutput(t, func() {
+				if err := root.Parse(test.args); err != nil {
+					t.Fatalf("parse error: %v", err)
+				}
+				runErr = root.Run(context.Background())
+			})
+
+			if runErr == nil {
+				t.Fatal("expected not-found error")
+			}
+			if stdout != "" {
+				t.Fatalf("stdout = %q, want empty", stdout)
+			}
+			if got := cmd.ExitCodeFromError(runErr); got != cmd.ExitNotFound {
+				t.Fatalf("exit code = %d, want %d (%v)", got, cmd.ExitNotFound, runErr)
+			}
+			if runErr.Error() != test.want {
+				t.Fatalf("error = %q, want %q", runErr, test.want)
+			}
+		})
+	}
+}
+
+// newPaginatedNotFoundServer serves one linkage page carrying a links.next URL
+// and then 404s that next page, so a --paginate failure comes from the page URL
+// rather than from the ID the command started with.
+func newPaginatedNotFoundServer(t *testing.T, path, notFoundBody string) *httptest.Server {
+	t.Helper()
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodGet || req.URL.Path != path {
+			t.Errorf("unexpected request: %s %s", req.Method, req.URL.String())
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if req.URL.Query().Get("cursor") == "NEXT" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(notFoundBody))
+			return
+		}
+		nextURL := "https://api.appstoreconnect.apple.com" + path + "?cursor=NEXT"
+		_, _ = w.Write([]byte(`{"data":[{"type":"betaTesters","id":"linkage-1"}],"links":{"self":"` + server.URL + path + `","next":"` + nextURL + `"}}`))
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
 // useLinksServerClient points the shared command client factory at the test
 // server so the links commands exercise real transport and error parsing.
 func useLinksServerClient(t *testing.T, server *httptest.Server) {
