@@ -36,11 +36,12 @@ func BindIfExistsFlag(fs *flag.FlagSet, supported ...IfExistsMode) *string {
 // ParseIfExistsMode validates the raw --if-exists value against the modes the
 // command supports. It returns a usage-class error (exit code 2) before any
 // HTTP request so an unsupported value is never silently ignored.
+//
+// BindIfExistsFlag defaults the flag to fail, so an empty or all-whitespace raw
+// value can only come from an explicitly supplied --if-exists "" and is
+// rejected rather than silently read as fail.
 func ParseIfExistsMode(raw string, supported ...IfExistsMode) (IfExistsMode, error) {
 	value := IfExistsMode(strings.ToLower(strings.TrimSpace(raw)))
-	if value == "" {
-		return IfExistsFail, nil
-	}
 	modes := ifExistsModeNames(supported)
 	for _, mode := range modes {
 		if string(value) == mode {
@@ -63,10 +64,20 @@ func ifExistsModeNames(supported []IfExistsMode) []string {
 	return modes
 }
 
-// IsIfExistsConflict reports whether err is an HTTP 409 whose Apple error code
-// is one of the codes the calling command recorded as "already exists". Every
-// other 409 (for example STATE_ERROR.* or a relationship rejection on a
-// command that keys on a duplicate attribute) is not an existence conflict.
+// IsIfExistsConflict reports whether err is an HTTP 409 any of whose Apple
+// error codes is one the calling command recorded as "already exists". Every
+// other 409 (for example an unlisted STATE_ERROR.* or a relationship rejection
+// on a command that keys on a duplicate attribute) is not an existence
+// conflict.
+//
+// Apple can report several causes for one 409, and the existence cause is not
+// always the first: a duplicate versionString on POST /v1/appStoreVersions
+// arrives as ENTITY_ERROR.RELATIONSHIP.INVALID ("You cannot create a new
+// version of the App in the current state.") followed by
+// ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE ("The version number has been
+// previously used."), verified live against app 6759231657 on 2026-09-15. Every
+// code in the response is therefore matched, and the command's read-back stays
+// the decisive existence check.
 func IsIfExistsConflict(err error, existsCodes []string) bool {
 	if err == nil || !errors.Is(err, asc.ErrConflict) {
 		return false
@@ -75,10 +86,16 @@ func IsIfExistsConflict(err error, existsCodes []string) bool {
 	if !ok || apiErr == nil {
 		return false
 	}
-	code := strings.TrimSpace(apiErr.Code)
-	for _, candidate := range existsCodes {
-		if strings.EqualFold(code, strings.TrimSpace(candidate)) {
-			return true
+	codes := apiErr.AllCodes
+	if len(codes) == 0 {
+		codes = []string{apiErr.Code}
+	}
+	for _, code := range codes {
+		code = strings.TrimSpace(code)
+		for _, candidate := range existsCodes {
+			if strings.EqualFold(code, strings.TrimSpace(candidate)) {
+				return true
+			}
 		}
 	}
 	return false
