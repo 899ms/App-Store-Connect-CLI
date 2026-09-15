@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	rootcmd "github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
 // addGroupsPreflightFixture serves the requests that precede the beta-group
@@ -26,6 +28,10 @@ type addGroupsPreflightFixture struct {
 	postStatus int
 	postBody   string
 
+	// buildReadDelay slows the build state read so the preflight budget can
+	// expire before it returns.
+	buildReadDelay time.Duration
+
 	buildReads           int
 	buildBetaDetailReads int
 	postCount            int
@@ -40,6 +46,13 @@ func (f *addGroupsPreflightFixture) transport() roundTripFunc {
 			return jsonResponse(http.StatusOK, f.betaGroups)
 		case req.Method == http.MethodGet && req.URL.Path == "/v1/builds/build-1":
 			f.buildReads++
+			if f.buildReadDelay > 0 {
+				select {
+				case <-time.After(f.buildReadDelay):
+				case <-req.Context().Done():
+					return nil, req.Context().Err()
+				}
+			}
 			status := f.buildStatus
 			if status == 0 {
 				status = http.StatusOK
@@ -336,4 +349,32 @@ func serveAddGroupsPreflightState(req *http.Request) (*http.Response, bool, erro
 		return resp, true, err
 	}
 	return nil, false, nil
+}
+
+func TestBuildsAddGroupsSlowPreflightReadStillAttemptsAdd(t *testing.T) {
+	restoreBudget := shared.SetBuildBetaGroupPreflightBudgetForTesting(20 * time.Millisecond)
+	t.Cleanup(restoreBudget)
+
+	fixture := &addGroupsPreflightFixture{
+		t:              t,
+		betaGroups:     addGroupsInternalGroupPayload,
+		build:          addGroupsValidBuildPayload,
+		buildReadDelay: 400 * time.Millisecond,
+	}
+
+	stdout, stderr, runErr := runAddGroupsPreflight(t, fixture,
+		"builds", "add-groups", "--build-id", "build-1", "--group", "group-internal")
+
+	if runErr != nil {
+		t.Fatalf("unexpected error: %v (stderr=%q)", runErr, stderr)
+	}
+	if fixture.postCount != 1 {
+		t.Fatalf("expected one beta-group POST after the preflight timed out, got %d", fixture.postCount)
+	}
+	if !strings.Contains(stdout, `"groupIds":["group-internal"]`) {
+		t.Fatalf("expected internal group in output, got %q", stdout)
+	}
+	if !strings.Contains(stderr, "could not verify build build-1 state") {
+		t.Fatalf("expected preflight warning in stderr, got %q", stderr)
+	}
 }

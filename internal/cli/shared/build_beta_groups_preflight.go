@@ -7,9 +7,48 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 )
+
+// buildBetaGroupPreflightBudget bounds the best-effort state reads. Without it
+// a slow or hanging read could consume the whole command deadline, which would
+// leave no time for the assignment the preflight is supposed to fall back to.
+const buildBetaGroupPreflightBudget = 20 * time.Second
+
+// buildBetaGroupPreflightBudgetOverride lets tests shrink the budget.
+var buildBetaGroupPreflightBudgetOverride time.Duration
+
+// SetBuildBetaGroupPreflightBudgetForTesting shrinks the preflight read budget.
+// It returns a restore function to reset the previous value.
+func SetBuildBetaGroupPreflightBudgetForTesting(budget time.Duration) func() {
+	previous := buildBetaGroupPreflightBudgetOverride
+	buildBetaGroupPreflightBudgetOverride = budget
+	return func() {
+		buildBetaGroupPreflightBudgetOverride = previous
+	}
+}
+
+// buildBetaGroupPreflightContext bounds the state reads and reserves at least
+// half of any remaining command deadline for the assignment itself, so a slow
+// read cannot starve the mutation it precedes.
+func buildBetaGroupPreflightContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	budget := buildBetaGroupPreflightBudget
+	if buildBetaGroupPreflightBudgetOverride > 0 {
+		budget = buildBetaGroupPreflightBudgetOverride
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		half := time.Until(deadline) / 2
+		if half <= 0 {
+			return ctx, func() {}
+		}
+		if half < budget {
+			budget = half
+		}
+	}
+	return context.WithTimeout(ctx, budget)
+}
 
 // Build processing states relevant to beta-group assignment.
 const (
@@ -127,7 +166,10 @@ func PreflightBuildBetaGroupAssignment(
 		return nil
 	}
 
-	build, err := client.GetBuild(ctx, buildID)
+	preflightCtx, cancelPreflight := buildBetaGroupPreflightContext(ctx)
+	defer cancelPreflight()
+
+	build, err := client.GetBuild(preflightCtx, buildID)
 	if err != nil {
 		warnBuildBetaGroupPreflightRead(buildID, err)
 		return nil
@@ -144,7 +186,7 @@ func PreflightBuildBetaGroupAssignment(
 		return nil
 	}
 
-	detail, err := client.GetBuildBuildBetaDetail(ctx, buildID)
+	detail, err := client.GetBuildBuildBetaDetail(preflightCtx, buildID)
 	if err != nil {
 		warnBuildBetaGroupPreflightRead(buildID, err)
 		return nil
