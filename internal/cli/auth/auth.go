@@ -1346,6 +1346,55 @@ Examples:
 	}
 }
 
+// authTokenConfirmRequiredMessage explains the --confirm gate in one line. It
+// keeps the "required" wording so the failure stays classified as
+// missing_required with usage exit code 2.
+const authTokenConfirmRequiredMessage = "--confirm is required because `asc auth token` prints a live bearer token to stdout, " +
+	"where it can leak into shell history, logs, or CI output"
+
+// authTokenConfirmInvocation reconstructs the exact command that satisfies the
+// --confirm gate, preserving the root --profile and --strict-auth overrides and
+// every command flag the caller already supplied so agents can re-run it
+// verbatim. ok is false when a supplied value cannot be rendered as a copyable
+// shell argument, in which case no suggestion is printed at all.
+func authTokenConfirmInvocation(fs *flag.FlagSet) (string, bool) {
+	rootFlags, ok := shared.RootFlagsForReinvocation()
+	if !ok {
+		return "", false
+	}
+	parts := []string{"asc"}
+	parts = append(parts, rootFlags...)
+	parts = append(parts, "auth", "token")
+	if fs != nil {
+		// flag.Visit walks only the flags that were set, in lexical order, so
+		// the rendered invocation is deterministic.
+		fs.Visit(func(f *flag.Flag) {
+			if !ok || f.Name == "confirm" {
+				// --confirm is re-added last, including when the caller passed
+				// --confirm=false.
+				return
+			}
+			if boolFlag, isBool := f.Value.(interface{ IsBoolFlag() bool }); isBool && boolFlag.IsBoolFlag() {
+				if f.Value.String() == "true" {
+					parts = append(parts, "--"+f.Name)
+				}
+				return
+			}
+			quoted, quotable := shared.ShellQuote(f.Value.String())
+			if !quotable {
+				ok = false
+				return
+			}
+			parts = append(parts, "--"+f.Name, quoted)
+		})
+	}
+	if !ok {
+		return "", false
+	}
+	parts = append(parts, "--confirm")
+	return strings.Join(parts, " "), true
+}
+
 // AuthTokenCommand prints a signed JWT for direct API calls.
 func AuthTokenCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("auth token", flag.ExitOnError)
@@ -1385,7 +1434,14 @@ Examples:
 				return shared.UsageError(err.Error())
 			}
 			if !*confirm {
-				return shared.UsageError("--confirm is required")
+				// UsageError writes the "Error:" line first, so the exact
+				// re-invocation is appended straight after it and still lands
+				// ahead of the usage page ffcli renders for flag.ErrHelp.
+				usageErr := shared.UsageError(authTokenConfirmRequiredMessage)
+				if invocation, ok := authTokenConfirmInvocation(fs); ok {
+					fmt.Fprintf(os.Stderr, "Re-run: %s\n", invocation)
+				}
+				return usageErr
 			}
 
 			cred, err := shared.ResolveAuthCredentials(trimmedName)
