@@ -6,6 +6,7 @@ import (
 	"flag"
 	"io"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -30,9 +31,12 @@ func isolateAuthTokenProfile(t *testing.T) {
 
 func TestAuthTokenMissingConfirmPrintsExactReinvocation(t *testing.T) {
 	tests := []struct {
-		name      string
-		args      []string
+		name string
+		args []string
+		// wantRerun holds the POSIX rendering; posixOnly cases assert quoting
+		// that shared.ShellQuote only emits off Windows.
 		wantRerun string
+		posixOnly bool
 	}{
 		{
 			name:      "bare invocation",
@@ -63,11 +67,18 @@ func TestAuthTokenMissingConfirmPrintsExactReinvocation(t *testing.T) {
 			name:      "shell-quotes values so the printed command cannot expand",
 			args:      []string{"--profile", "$(whoami) key", "auth", "token", "--name", "it's mine"},
 			wantRerun: `asc --profile '$(whoami) key' auth token --name 'it'\''s mine' --confirm`,
+			posixOnly: true,
 		},
 	}
 
+	const wantReason = "Error: --confirm is required because `asc auth token` prints a live bearer token to stdout, " +
+		"where it can leak into shell history, logs, or CI output\n"
+
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			if test.posixOnly && runtime.GOOS == "windows" {
+				t.Skip("PowerShell quoting is covered by the shared package unit tests")
+			}
 			isolateAuthTokenProfile(t)
 
 			root := RootCommand("1.2.3")
@@ -92,12 +103,41 @@ func TestAuthTokenMissingConfirmPrintsExactReinvocation(t *testing.T) {
 			}
 			// The reason line and the exact re-invocation must lead stderr, ahead
 			// of the usage page ffcli renders for flag.ErrHelp.
-			wantBlock := "Error: --confirm is required because `asc auth token` prints a live bearer token to stdout, " +
-				"where it can leak into shell history, logs, or CI output\n" +
-				"Re-run: " + test.wantRerun + "\n"
+			wantBlock := wantReason + "Re-run: " + test.wantRerun + "\n"
 			if !strings.HasPrefix(stderr, wantBlock) {
 				t.Fatalf("stderr = %q, want prefix %q", stderr, wantBlock)
 			}
 		})
+	}
+}
+
+// TestAuthTokenMissingConfirmOmitsUnprintableReinvocation covers the values
+// that have no exact, terminal-safe rendering: the gate still explains itself,
+// but no re-run line is printed rather than one that would run with a
+// different profile than the caller supplied.
+func TestAuthTokenMissingConfirmOmitsUnprintableReinvocation(t *testing.T) {
+	isolateAuthTokenProfile(t)
+
+	root := RootCommand("1.2.3")
+	root.FlagSet.SetOutput(io.Discard)
+
+	var runErr error
+	_, stderr := captureOutput(t, func() {
+		if err := root.Parse([]string{"--profile", "a\x1b[31mb", "auth", "token"}); err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+		runErr = root.Run(context.Background())
+	})
+
+	if !errors.Is(runErr, flag.ErrHelp) {
+		t.Fatalf("expected flag.ErrHelp usage error, got %v", runErr)
+	}
+	wantReason := "Error: --confirm is required because `asc auth token` prints a live bearer token to stdout, " +
+		"where it can leak into shell history, logs, or CI output\n"
+	if !strings.HasPrefix(stderr, wantReason) {
+		t.Fatalf("stderr = %q, want prefix %q", stderr, wantReason)
+	}
+	if strings.Contains(stderr, "Re-run:") {
+		t.Fatalf("expected no re-run suggestion for an unprintable profile, got %q", stderr)
 	}
 }

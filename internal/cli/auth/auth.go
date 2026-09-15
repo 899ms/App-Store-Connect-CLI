@@ -1353,31 +1353,46 @@ const authTokenConfirmRequiredMessage = "--confirm is required because `asc auth
 	"where it can leak into shell history, logs, or CI output"
 
 // authTokenConfirmInvocation reconstructs the exact command that satisfies the
-// --confirm gate, preserving the root --profile override and every command flag
-// the caller already supplied so agents can re-run it verbatim.
-func authTokenConfirmInvocation(fs *flag.FlagSet) string {
+// --confirm gate, preserving the root --profile and --strict-auth overrides and
+// every command flag the caller already supplied so agents can re-run it
+// verbatim. ok is false when a supplied value cannot be rendered as a copyable
+// shell argument, in which case no suggestion is printed at all.
+func authTokenConfirmInvocation(fs *flag.FlagSet) (string, bool) {
+	rootFlags, ok := shared.RootFlagsForReinvocation()
+	if !ok {
+		return "", false
+	}
 	parts := []string{"asc"}
-	parts = append(parts, shared.RootFlagsForReinvocation()...)
+	parts = append(parts, rootFlags...)
 	parts = append(parts, "auth", "token")
 	if fs != nil {
 		// flag.Visit walks only the flags that were set, in lexical order, so
 		// the rendered invocation is deterministic.
 		fs.Visit(func(f *flag.Flag) {
-			if f.Name == "confirm" {
-				// Re-added last, including when it was passed as --confirm=false.
+			if !ok || f.Name == "confirm" {
+				// --confirm is re-added last, including when the caller passed
+				// --confirm=false.
 				return
 			}
-			if boolFlag, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && boolFlag.IsBoolFlag() {
+			if boolFlag, isBool := f.Value.(interface{ IsBoolFlag() bool }); isBool && boolFlag.IsBoolFlag() {
 				if f.Value.String() == "true" {
 					parts = append(parts, "--"+f.Name)
 				}
 				return
 			}
-			parts = append(parts, "--"+f.Name, shared.ShellQuote(f.Value.String()))
+			quoted, quotable := shared.ShellQuote(f.Value.String())
+			if !quotable {
+				ok = false
+				return
+			}
+			parts = append(parts, "--"+f.Name, quoted)
 		})
 	}
+	if !ok {
+		return "", false
+	}
 	parts = append(parts, "--confirm")
-	return shared.SanitizeTerminal(strings.Join(parts, " "))
+	return strings.Join(parts, " "), true
 }
 
 // AuthTokenCommand prints a signed JWT for direct API calls.
@@ -1423,7 +1438,9 @@ Examples:
 				// re-invocation is appended straight after it and still lands
 				// ahead of the usage page ffcli renders for flag.ErrHelp.
 				usageErr := shared.UsageError(authTokenConfirmRequiredMessage)
-				fmt.Fprintf(os.Stderr, "Re-run: %s\n", authTokenConfirmInvocation(fs))
+				if invocation, ok := authTokenConfirmInvocation(fs); ok {
+					fmt.Fprintf(os.Stderr, "Re-run: %s\n", invocation)
+				}
 				return usageErr
 			}
 

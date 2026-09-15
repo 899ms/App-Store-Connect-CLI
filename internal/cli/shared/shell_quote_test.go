@@ -3,62 +3,193 @@ package shared
 import (
 	"flag"
 	"io"
+	"runtime"
 	"slices"
 	"testing"
 )
 
-func TestShellQuote(t *testing.T) {
+func TestShellQuoteSafeWordsStayBare(t *testing.T) {
+	for _, value := range []string{"release-2026.1", "/tmp/AuthKey_ABC123.p8", "json", "MyKey", "1.2.3"} {
+		got, ok := ShellQuote(value)
+		if !ok || got != value {
+			t.Fatalf("ShellQuote(%q) = (%q, %t), want (%q, true)", value, got, ok, value)
+		}
+	}
+}
+
+func TestShellQuoteQuotesMetacharacters(t *testing.T) {
+	// Values that are not safe words must never be printed bare, whichever
+	// platform rendering applies.
+	for _, value := range []string{"", "My Key", "$(whoami)", "`id`", "~/keys", "@args", "%PATH%", "a;b", "a&b", "it's"} {
+		got, ok := ShellQuote(value)
+		if !ok {
+			continue
+		}
+		if got == value {
+			t.Fatalf("ShellQuote(%q) = %q, want it quoted", value, got)
+		}
+		if quote := got[:1]; quote != "'" && quote != `"` {
+			t.Fatalf("ShellQuote(%q) = %q, want a quoted argument", value, got)
+		}
+	}
+}
+
+func TestPosixShellQuote(t *testing.T) {
 	tests := []struct {
 		name  string
 		value string
 		want  string
 	}{
-		{name: "safe word stays bare", value: "release-2026.1", want: "release-2026.1"},
-		{name: "path stays bare", value: "/tmp/AuthKey_ABC123.p8", want: "/tmp/AuthKey_ABC123.p8"},
 		{name: "empty value", value: "", want: "''"},
 		{name: "spaces", value: "My Key", want: "'My Key'"},
 		{name: "command substitution stays inert", value: "$(whoami)", want: "'$(whoami)'"},
 		{name: "backticks stay inert", value: "`id`", want: "'`id`'"},
 		{name: "tilde is not expanded", value: "~/keys", want: "'~/keys'"},
-		{name: "embedded single quote", value: "it's", want: `'it'\''s'`},
-		{name: "control characters are escaped", value: "a\x1b[31mred\nb", want: `$'a\x1b[31mred\nb'`},
-		{name: "control characters with quotes", value: "a\t\"b\"'c'", want: `$'a\t"b"\'c\''`},
+		{name: "embedded apostrophe", value: "O'Brien key", want: `'O'\''Brien key'`},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := ShellQuote(test.value); got != test.want {
-				t.Fatalf("ShellQuote(%q) = %q, want %q", test.value, got, test.want)
+			if got := posixShellQuote(test.value); got != test.want {
+				t.Fatalf("posixShellQuote(%q) = %q, want %q", test.value, got, test.want)
 			}
 		})
 	}
 }
 
-func TestShellQuoteNeverEmitsRawControlCharacters(t *testing.T) {
-	for _, value := range []string{"a\x1b]0;title\x07b", "line\r\nnext", "bell\a"} {
-		quoted := ShellQuote(value)
-		for _, r := range quoted {
-			if r < 0x20 || r == 0x7f {
-				t.Fatalf("ShellQuote(%q) = %q leaked control rune %U", value, quoted, r)
+func TestWindowsShellQuote(t *testing.T) {
+	tests := []struct {
+		name   string
+		value  string
+		want   string
+		wantOK bool
+	}{
+		{name: "empty value", value: "", want: `""`, wantOK: true},
+		{name: "spaces", value: "My Key", want: `"My Key"`, wantOK: true},
+		{name: "apostrophe is literal in double quotes", value: "O'Brien key", want: `"O'Brien key"`, wantOK: true},
+		{name: "splat", value: "@args", want: `"@args"`, wantOK: true},
+		{name: "semicolon", value: "a;b", want: `"a;b"`, wantOK: true},
+		{name: "powershell variable", value: "$env:PATH", wantOK: false},
+		{name: "powershell escape", value: "a`b", wantOK: false},
+		{name: "cmd variable", value: "%PATH%", wantOK: false},
+		{name: "cmd delayed expansion", value: "a!b!", wantOK: false},
+		{name: "embedded double quote", value: `a"b`, wantOK: false},
+		{name: "unc path", value: `\\server\share path`, wantOK: false},
+		{name: "trailing backslash", value: `C:\keys\`, wantOK: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := windowsShellQuote(test.value)
+			if ok != test.wantOK {
+				t.Fatalf("windowsShellQuote(%q) = (%q, %t), want ok %t", test.value, got, ok, test.wantOK)
 			}
-		}
+			if got != test.want {
+				t.Fatalf("windowsShellQuote(%q) = %q, want %q", test.value, got, test.want)
+			}
+		})
+	}
+}
+
+func TestShellQuoteUsesPlatformRendering(t *testing.T) {
+	const value = "My Key"
+	want, wantOK := posixShellQuote(value), true
+	if runtime.GOOS == "windows" {
+		want, wantOK = windowsShellQuote(value)
+	}
+	got, ok := ShellQuote(value)
+	if got != want || ok != wantOK {
+		t.Fatalf("ShellQuote(%q) = (%q, %t), want (%q, %t)", value, got, ok, want, wantOK)
+	}
+}
+
+func TestShellQuoteRejectsValuesItCannotRenderExactly(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{name: "ansi escape", value: "a\x1b[31mred"},
+		{name: "newline", value: "line\nnext"},
+		{name: "tab", value: "a\tb"},
+		{name: "bell", value: "bell\a"},
+		{name: "bidi override", value: "a\u202eb"},
+		{name: "invalid utf-8", value: "a\xffb"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := ShellQuote(test.value)
+			if ok {
+				t.Fatalf("ShellQuote(%q) = %q, want it reported as unquotable", test.value, got)
+			}
+			if got != "" {
+				t.Fatalf("ShellQuote(%q) returned %q alongside ok=false", test.value, got)
+			}
+		})
 	}
 }
 
 func TestRootFlagsForReinvocation(t *testing.T) {
+	quoted := func(t *testing.T, value string) string {
+		t.Helper()
+		rendered, ok := ShellQuote(value)
+		if !ok {
+			t.Fatalf("ShellQuote(%q) reported the value as unquotable", value)
+		}
+		return rendered
+	}
+
 	tests := []struct {
-		name string
-		args []string
-		want []string
+		name   string
+		args   []string
+		want   func(*testing.T) []string
+		wantOK bool
 	}{
-		{name: "no root flags", args: []string{}, want: []string{}},
-		{name: "profile", args: []string{"--profile", "release"}, want: []string{"--profile", "release"}},
-		{name: "profile is quoted", args: []string{"--profile", "my key"}, want: []string{"--profile", "'my key'"}},
-		{name: "strict auth", args: []string{"--strict-auth"}, want: []string{"--strict-auth"}},
+		{
+			name:   "no root flags",
+			args:   []string{},
+			want:   func(*testing.T) []string { return []string{} },
+			wantOK: true,
+		},
+		{
+			name:   "profile",
+			args:   []string{"--profile", "release"},
+			want:   func(*testing.T) []string { return []string{"--profile", "release"} },
+			wantOK: true,
+		},
+		{
+			name: "profile is quoted",
+			args: []string{"--profile", "my key"},
+			want: func(t *testing.T) []string {
+				return []string{"--profile", quoted(t, "my key")}
+			},
+			wantOK: true,
+		},
+		{
+			name:   "strict auth",
+			args:   []string{"--strict-auth"},
+			want:   func(*testing.T) []string { return []string{"--strict-auth"} },
+			wantOK: true,
+		},
 		{
 			name: "report flags",
 			args: []string{"--profile", "release", "--report", "junit", "--report-file", "out dir/report.xml"},
-			want: []string{"--profile", "release", "--report", "junit", "--report-file", "'out dir/report.xml'"},
+			want: func(t *testing.T) []string {
+				return []string{"--profile", "release", "--report", "junit", "--report-file", quoted(t, "out dir/report.xml")}
+			},
+			wantOK: true,
+		},
+		{
+			name:   "unrenderable profile",
+			args:   []string{"--profile", "a\x1bb"},
+			want:   func(*testing.T) []string { return nil },
+			wantOK: false,
+		},
+		{
+			name:   "unrenderable report path",
+			args:   []string{"--report", "junit", "--report-file", "out\ndir/report.xml"},
+			want:   func(*testing.T) []string { return nil },
+			wantOK: false,
 		},
 	}
 
@@ -78,8 +209,12 @@ func TestRootFlagsForReinvocation(t *testing.T) {
 				t.Fatalf("Parse() error: %v", err)
 			}
 
-			if got := RootFlagsForReinvocation(); !slices.Equal(got, test.want) {
-				t.Fatalf("RootFlagsForReinvocation() = %q, want %q", got, test.want)
+			got, ok := RootFlagsForReinvocation()
+			if ok != test.wantOK {
+				t.Fatalf("RootFlagsForReinvocation() ok = %t, want %t (args %q)", ok, test.wantOK, got)
+			}
+			if want := test.want(t); !slices.Equal(got, want) {
+				t.Fatalf("RootFlagsForReinvocation() = %q, want %q", got, want)
 			}
 		})
 	}
