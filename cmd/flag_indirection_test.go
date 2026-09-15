@@ -33,6 +33,8 @@ func newIndirectionTestTree() *ffcli.Command {
 	updateFlags.String("format", "", "")
 	updateFlags.String("profile", "", "")
 	updateFlags.Bool("confirm", false, "")
+	var enabled shared.OptionalBool
+	updateFlags.Var(&enabled, "enabled", "")
 	updateFlags.Int("limit", 0, "")
 	shared.BindOnceCSVFlag(updateFlags, "events", "")
 	var tags shared.MultiStringFlag
@@ -54,6 +56,7 @@ func TestResolveFlagValueIndirectionRewritesArgs(t *testing.T) {
 	t.Setenv("ASC_TEST_SECRET", "hunter2")
 	t.Setenv("ASC_TEST_EVENTS", "A,B")
 	t.Setenv("ASC_TEST_FORMAT", "json")
+	t.Setenv("ASC_TEST_ENABLED", "true")
 	notesPath := filepath.Join(t.TempDir(), "notes.txt")
 	if err := os.WriteFile(notesPath, []byte("From file\n"), 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
@@ -93,6 +96,11 @@ func TestResolveFlagValueIndirectionRewritesArgs(t *testing.T) {
 			name: "typed and custom values resolve before parsing",
 			args: []string{"localizations", "update", "--events", "@env:ASC_TEST_EVENTS", "--tag", "@env:ASC_TEST_SECRET", "--tag", "@@x", "--limit", "@env:ASC_TEST_EVENTS"},
 			want: []string{"localizations", "update", "--events", "A,B", "--tag", "hunter2", "--tag", "@x", "--limit", "A,B"},
+		},
+		{
+			name: "explicit-value boolean resolves like any value flag",
+			args: []string{"localizations", "update", "--enabled", "@env:ASC_TEST_ENABLED"},
+			want: []string{"localizations", "update", "--enabled", "true"},
 		},
 		{
 			name: "boolean flag never consumes an indirect value",

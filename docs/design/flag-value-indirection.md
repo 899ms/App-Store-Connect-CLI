@@ -41,7 +41,13 @@ matching the Codemagic `cli-tools` convention that agents already know.
   - A command-local flag that shares one of those names is not excluded:
     `signing run --profile` is a provisioning-profile path with a single
     reader, so it resolves like any other value flag.
-- Boolean flags never take an indirect value.
+- A flag that takes no value never consumes an indirect one: the walk skips
+  anything whose `flag.Value` reports `IsBoolFlag()`, so the following token
+  stays positional. A `shared.OptionalBool` in its default explicit-value mode
+  requires `--enabled true` and therefore does take a value token, so it
+  resolves like any other value flag and the resolved text goes through the
+  same boolean parsing. The line is "does this flag consume a value token",
+  not "is this value a boolean".
 - Command-local flags stay resolvable even when they select a format:
   `--format` on `signing fetch`, `signing resign`, `assets previews`, and
   `assets screenshots download` is read only from its own parsed `FlagSet`, so

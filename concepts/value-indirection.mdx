@@ -44,7 +44,8 @@ asc localizations update --id "LOCALIZATION_ID" --promotional-text @@channel
 * `@env:NAME` fails with a usage error (exit code 2) when `NAME` is unset or empty. The error names the variable, never its value.
 * `@file:PATH` resolves relative paths against the working directory. The file must be a regular file (not a symlink at the final path component), non-empty after trimming the trailing line ending, and at most 1 MiB. Missing or unreadable files fail with a usage error that names the flag and the path.
 * Only one trailing line ending (`\n` or a complete `\r\n` pair) is removed. Interior whitespace, additional trailing blank lines, and a lone trailing `\r` are preserved.
-* Boolean flags never take an indirect value.
+* A boolean flag that takes no value (`--paginate`, `--confirm`, `--debug`) never consumes an indirect value: the following token stays a positional argument.
+* A flag that requires an explicit boolean value (`--enabled true`) does take a value token, so `--enabled @env:FEATURE_ON` resolves and then validates the resolved text like any other value.
 * `--output` is never resolved on any command, under either of its meanings (the format enum and the output path).
 * The root selectors `--profile`, `--report`, and `--report-file` are never resolved: they choose how `asc` itself runs and are read directly from the command line. The exclusion follows the flag's owner, not its name, so a command-local flag that happens to share a name resolves normally (for example `asc signing run --profile @env:PROFILE_PATH`).
 * Positional arguments and anything after `--` are never resolved.
