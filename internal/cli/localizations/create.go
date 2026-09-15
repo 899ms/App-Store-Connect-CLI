@@ -56,7 +56,9 @@ Examples:
 the locale already exists on that version. fail (default) returns the error.
 skip reads the existing localization back, prints it unchanged, and exits 0.
 update applies the same fields to the existing localization with
-PATCH /v1/appStoreVersionLocalizations/{id}. Any other 409 keeps failing.`,
+PATCH /v1/appStoreVersionLocalizations/{id}; when no metadata field was
+supplied there is nothing to apply, so update behaves like skip. Any other
+409 keeps failing.`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
@@ -120,7 +122,7 @@ PATCH /v1/appStoreVersionLocalizations/{id}. Any other 409 keeps failing.`,
 					return fmt.Errorf("localizations create: failed to create: %w", err)
 				}
 				outcome := "left unchanged"
-				if ifExistsMode == shared.IfExistsUpdate {
+				if ifExistsMode == shared.IfExistsUpdate && hasUpdatableVersionLocalizationFields(attrs) {
 					updated, updateErr := client.UpdateAppStoreVersionLocalization(requestCtx, existing.Data.ID, attrs)
 					if updateErr != nil {
 						return fmt.Errorf("localizations create: update existing localization %s: %w", existing.Data.ID, updateErr)
@@ -220,4 +222,17 @@ func findExistingVersionLocalization(ctx context.Context, client *asc.Client, ve
 		}
 	}
 	return nil, false, nil
+}
+
+// hasUpdatableVersionLocalizationFields reports whether the caller supplied any
+// attribute the PATCH can carry. A locale-only create has nothing to update, so
+// --if-exists update resolves it like skip instead of sending an empty PATCH
+// that a non-editable localization could reject.
+func hasUpdatableVersionLocalizationFields(attrs asc.AppStoreVersionLocalizationAttributes) bool {
+	return strings.TrimSpace(attrs.Description) != "" ||
+		strings.TrimSpace(attrs.Keywords) != "" ||
+		strings.TrimSpace(attrs.WhatsNew) != "" ||
+		strings.TrimSpace(attrs.PromotionalText) != "" ||
+		strings.TrimSpace(attrs.SupportURL) != "" ||
+		strings.TrimSpace(attrs.MarketingURL) != ""
 }

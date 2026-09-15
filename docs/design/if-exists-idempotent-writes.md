@@ -25,7 +25,11 @@ Create-style commands gain one shared flag:
 - `skip` treats an existing resource as success. The command exits 0, leaves the
   resource unchanged, and reports that it already existed.
 - `update` routes the same inputs to the corresponding update/PATCH call on the
-  existing resource when one exists. Commands without a meaningful update
+  existing resource when one exists. When the invocation supplied nothing the
+  update call can carry (`versions create` without `--copyright` or
+  `--release-type`, `localizations create` with only `--locale`), `update`
+  resolves like `skip` instead of sending an empty PATCH that a non-editable
+  resource could reject. Commands without a meaningful update
   (`bundle-ids capabilities add`, `review items add`) reject `update` as a
   usage error (exit 2) and document `skip` as the idempotent form.
 

@@ -133,6 +133,42 @@ func TestLocalizationsCreateIfExistsSkipEmitsNoCreateReadinessWarning(t *testing
 	}
 }
 
+// A locale-only create has nothing the PATCH can carry, so --if-exists update
+// resolves it like skip rather than sending an empty PATCH that a non-editable
+// localization could reject. This mirrors versions create --if-exists update.
+func TestLocalizationsCreateIfExistsUpdateWithoutUpdatableFieldsDoesNotPatch(t *testing.T) {
+	_, stderr, seen, runErr := runIfExistsCommand(t, []string{
+		"localizations", "create", "--version", "version-1", "--locale", "ja",
+		"--if-exists", "update", "--output", "json",
+	}, func(req ifExistsRequest) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodPost && req.Path == "/v1/appStoreVersionLocalizations":
+			return jsonResponse(http.StatusConflict, localizationDuplicate409)
+		case req.Method == http.MethodGet && req.Path == "/v1/appStoreVersions/version-1/appStoreVersionLocalizations":
+			return jsonResponse(http.StatusOK, existingLocalizationsList)
+		case req.Method == http.MethodGet && req.Path == "/v1/appStoreVersionLocalizations/loc-ja":
+			return jsonResponse(http.StatusOK, existingLocalizationDetail)
+		default:
+			t.Fatalf("unexpected request %s %s; an empty PATCH must not be sent", req.Method, req.Path)
+			return nil, nil
+		}
+	})
+	if runErr != nil {
+		t.Fatalf("run error: %v", runErr)
+	}
+	if len(seen) != 3 {
+		t.Fatalf("requests = %+v, want POST, the locale read-back, and the detail re-read only", seen)
+	}
+	for _, req := range seen {
+		if req.Method == http.MethodPatch {
+			t.Fatalf("unexpected PATCH %+v; nothing was updatable", req)
+		}
+	}
+	if !strings.Contains(stderr, "left unchanged") {
+		t.Fatalf("stderr = %q, want the left-unchanged outcome", stderr)
+	}
+}
+
 func TestLocalizationsCreateDefaultIfExistsFailPreservesConflict(t *testing.T) {
 	stdout, _, seen, runErr := runIfExistsCommand(t, []string{
 		"localizations", "create", "--version", "version-1", "--locale", "ja",
