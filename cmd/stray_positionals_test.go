@@ -161,7 +161,7 @@ func TestGroupCommandsAreNeverCheckedForStrayOperands(t *testing.T) {
 	if len(snitch.Subcommands) == 0 {
 		t.Fatal("snitch is no longer a command group; add it to the stray-operand exclusion list")
 	}
-	if strayPositionalOperands(invocationAnalysis{command: snitch}, []string{"snitch", "report text"}, "asc snitch") != nil {
+	if strayPositionalOperands(invocationAnalysis{command: snitch}, "asc snitch") != nil {
 		t.Fatal("group commands must never report stray operands")
 	}
 }

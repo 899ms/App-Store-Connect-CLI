@@ -34,23 +34,18 @@ func commandAcceptsOperandsPath(commandName string) bool {
 
 // strayPositionalOperands returns the operands a flag-only leaf command was
 // handed and cannot use. It returns nothing for command groups, which report
-// their own unknown-child diagnostics, for the commands that accept operands,
-// and for any invocation carrying a `--` terminator, where the operator has
-// explicitly marked the tail as a payload.
+// their own unknown-child diagnostics, and nothing for the commands that accept
+// operands. A `--` terminator is not an exemption: it stops flag parsing, but
+// it does not turn an operand into something a flag-only command can use.
 //
 // The operands come from the leaf command's own FlagSet, so they are exactly
 // what ffcli would have passed to Exec. A command the tree walk resolved but
 // ffcli did not select has an unparsed FlagSet and therefore no operands, which
 // keeps a disagreement between the two walks from inventing a diagnostic.
-func strayPositionalOperands(analysis invocationAnalysis, args []string, commandName string) []string {
+func strayPositionalOperands(analysis invocationAnalysis, commandName string) []string {
 	command := analysis.command
 	if command == nil || len(command.Subcommands) > 0 || command.FlagSet == nil {
 		return nil
-	}
-	for _, arg := range args {
-		if arg == "--" {
-			return nil
-		}
 	}
 	if commandAcceptsOperands(command, commandName) {
 		return nil

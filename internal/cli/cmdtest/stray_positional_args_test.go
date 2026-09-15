@@ -62,6 +62,12 @@ func TestStrayPositionalOperandsNameTheTokenAndFlag(t *testing.T) {
 			wantErr: `Error: unexpected arguments "123", "456"`,
 			noHint:  true,
 		},
+		{
+			name:    "operand behind the argument terminator",
+			args:    []string{"apps", "view", "--id", "app-1", "--", "stray"},
+			wantErr: `Error: unexpected argument "stray"`,
+			noHint:  true,
+		},
 	}
 
 	for _, test := range tests {

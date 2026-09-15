@@ -141,7 +141,7 @@ func Run(args []string, versionInfo string) int {
 	// the command runs, so `asc apps view 123` names the stray token and the
 	// flag it belongs to instead of dropping it silently or reporting only the
 	// missing flag.
-	if operands := strayPositionalOperands(analysis, args, commandName); len(operands) > 0 {
+	if operands := strayPositionalOperands(analysis, commandName); len(operands) > 0 {
 		printStrayPositionalOperands(commandName, operands, analysis.command.FlagSet)
 		if err := writeUsageJUnitReport(commandName, strayPositionalError(operands)); err != nil {
 			printUsageJUnitReportFailure(commandName, versionInfo, analysis, err)
