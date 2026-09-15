@@ -539,6 +539,7 @@ func registerAllOutputRenderers() {
 	registerRows(subscriptionDeleteResultRows)
 	registerRows(betaTesterDeleteResultRows)
 	registerRows(betaTesterGroupsUpdateResultRows)
+	registerRows(betaGroupTestersUpdateResultRows)
 	registerRows(betaTesterAppsUpdateResultRows)
 	registerRows(betaTesterBuildsUpdateResultRows)
 	registerRows(appBetaTestersUpdateResultRows)
