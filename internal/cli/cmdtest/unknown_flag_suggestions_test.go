@@ -103,6 +103,26 @@ func TestUnknownFlagSuggestsTheIntendedFlag(t *testing.T) {
 				"For help:\n  asc subscriptions list --help\n",
 		},
 		{
+			name: "a path-valued --output answers --path",
+			args: []string{"testflight", "testers", "export", "--app", "app-1", "--path", "PRIVATE_VALUE"},
+			want: "Error: unknown flag `--path` for `asc testflight testers export`\n" +
+				"Try:\n  --output\n" +
+				"For help:\n  asc testflight testers export --help\n",
+		},
+		{
+			name: "signing resign --path names both path flags",
+			args: []string{"signing", "resign", "--ipa", "in.ipa", "--path", "PRIVATE_VALUE"},
+			want: "Error: unknown flag `--path` for `asc signing resign`\n" +
+				"Try:\n  --ipa\n  --output\n" +
+				"For help:\n  asc signing resign --help\n",
+		},
+		{
+			name: "a format-only --output does not answer --path",
+			args: []string{"apps", "list", "--path", "PRIVATE_VALUE"},
+			want: "Error: unknown flag `--path` for `asc apps list`\n" +
+				"For help:\n  asc apps list --help\n",
+		},
+		{
 			name: "no comparable flag leaves the Try block out",
 			args: []string{"categories", "list", "--app", "PRIVATE_VALUE"},
 			want: "Error: unknown flag `--app` for `asc categories list`\n" +

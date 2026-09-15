@@ -231,6 +231,32 @@ func TestUnknownFlagSuggestionRankingTiers(t *testing.T) {
 			want:     nil,
 		},
 		{
+			name: "a path-valued output flag answers an unknown path flag",
+			flags: func(fs *flag.FlagSet) {
+				fs.String("output", "", "Output CSV file path (required)")
+			},
+			unknown: "--path",
+			want:    []string{"output"},
+		},
+		{
+			name: "a path-first output flag answers an unknown path flag",
+			flags: func(fs *flag.FlagSet) {
+				fs.String("output", "", "Path for the newly re-signed IPA (required)")
+				fs.String("ipa", "", "Path to the IPA to re-sign (required)")
+			},
+			unknown: "--path",
+			want:    []string{"ipa", "output"},
+		},
+		{
+			name: "a format-only output flag is not a path destination",
+			flags: func(fs *flag.FlagSet) {
+				fs.String("output", "", "Output format: json, table, markdown (default: json)")
+				fs.String("platform", "", "Filter by platform")
+			},
+			unknown: "--path",
+			want:    nil,
+		},
+		{
 			name: "selector fallback stays silent when another input is required",
 			flags: func(fs *flag.FlagSet) {
 				fs.String("org", "", "Apple Ads organization ID (or ASC_ADS_ORG_ID env)")
@@ -307,5 +333,43 @@ func TestRemovedFlagGuidanceSuggestionsFollowTheRule(t *testing.T) {
 	)
 	if strings.Join(excluded, ",") != "build-number" {
 		t.Fatalf("suggestions = %v, want only [build-number]", excluded)
+	}
+}
+
+// TestConditionalSynonymTargetsExistSomewhere holds the help-text-dependent
+// synonyms to the same standard as the plain table: every target is a real flag
+// somewhere in the CLI, and it is only offered when its own help text agrees.
+func TestConditionalSynonymTargetsExistSomewhere(t *testing.T) {
+	root := RootCommand("1.0.0")
+	usages := make(map[string][]string)
+	walkCommandTree(root, func(_ string, command *ffcli.Command) {
+		if command.FlagSet == nil {
+			return
+		}
+		command.FlagSet.VisitAll(func(item *flag.Flag) {
+			usages[item.Name] = append(usages[item.Name], item.Usage)
+		})
+	})
+
+	for key, conditionals := range conditionalSynonyms {
+		for _, conditional := range conditionals {
+			if conditional.target == key {
+				t.Fatalf("conditional synonym %q maps to itself", key)
+			}
+			seen, ok := usages[conditional.target]
+			if !ok {
+				t.Fatalf("conditional synonym %q target --%s is not defined by any command", key, conditional.target)
+			}
+			matched := false
+			for _, usage := range seen {
+				if conditional.when(usage) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				t.Fatalf("conditional synonym %q target --%s never satisfies its own condition", key, conditional.target)
+			}
+		}
 	}
 }

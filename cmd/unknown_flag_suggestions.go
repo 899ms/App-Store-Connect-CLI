@@ -31,9 +31,37 @@ var flagSynonyms = map[string][]string{
 	"group":      {"group-id"},
 	"group-id":   {"group"},
 	"id":         {"app"},
-	"path":       {"file", "dir", "ipa", "output"},
+	"path":       {"file", "dir", "ipa"},
 	"version":    {"version-id", "app-store-version-id"},
 	"version-id": {"version", "app-store-version-id", "id"},
+}
+
+// conditionalSynonym is a synonym target that is only right when the target's
+// own help text agrees. `--output` is the format selector on most commands but
+// a filesystem destination on a few, and only the latter can be what a caller
+// meant by `--path`.
+type conditionalSynonym struct {
+	target string
+	when   func(usage string) bool
+}
+
+// conditionalSynonyms holds the synonyms that depend on the target's help text.
+var conditionalSynonyms = map[string][]conditionalSynonym{
+	"path": {{target: "output", when: isPathValuedUsage}},
+	"dir":  {{target: "output", when: isPathValuedUsage}},
+	"file": {{target: "output", when: isPathValuedUsage}},
+}
+
+// pathValuedUsagePattern matches help text that describes a filesystem
+// destination, such as "Output CSV file path", "Path for the newly re-signed
+// IPA", or "Output directory for signing files", and not a format selector such
+// as "Output format: json, table, markdown".
+var pathValuedUsagePattern = regexp.MustCompile(`(?i)\b(paths?|directory|directories|folder|destination)\b`)
+
+// isPathValuedUsage reports whether a flag's help text describes a filesystem
+// destination rather than a value such as an output format.
+func isPathValuedUsage(usage string) bool {
+	return pathValuedUsagePattern.MatchString(usage)
 }
 
 // identifierFlagNouns names the resource words whose flag spellings operators
@@ -71,7 +99,8 @@ type unknownFlagSuggestionOptions struct {
 // unknownFlagSuggestions ranks up to maxUnknownFlagSuggestions defined flags of
 // one command for an unknown flag spelling. Tiers, highest first:
 //
-//  1. curated synonyms for that spelling;
+//  1. curated synonyms for that spelling, including the ones that depend on the
+//     target's help text;
 //  2. nearest defined flag name by prefix and edit distance (suggest.Flags);
 //  3. when the spelling is an invented identifier and nothing above matched,
 //     the command's own identifier selectors.
@@ -89,10 +118,10 @@ func unknownFlagSuggestions(flags *flag.FlagSet, flagName string, options unknow
 		return nil
 	}
 
-	defined := make(map[string]struct{}, len(candidates))
+	defined := make(map[string]string, len(candidates))
 	names := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
-		defined[candidate.Name] = struct{}{}
+		defined[candidate.Name] = candidate.Usage
 		names = append(names, candidate.Name)
 	}
 
@@ -118,6 +147,11 @@ func unknownFlagSuggestions(flags *flag.FlagSet, flagName string, options unknow
 
 	for _, synonym := range flagSynonyms[name] {
 		add(synonym)
+	}
+	for _, conditional := range conditionalSynonyms[name] {
+		if usage, ok := defined[conditional.target]; ok && conditional.when(usage) {
+			add(conditional.target)
+		}
 	}
 	for _, nearest := range suggest.Flags(name, names) {
 		add(nearest)
