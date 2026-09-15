@@ -88,3 +88,29 @@ func TestResolveIfExistsConflictRequiresConflictAndReadBack(t *testing.T) {
 		t.Fatalf("read-back failure = handled %t, %v; want conflict with read-back cause", handled, err)
 	}
 }
+
+func TestIsIfExistsConflictMatchesCodeBeyondTheFirstError(t *testing.T) {
+	codes := []string{"ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE"}
+
+	// Apple's live 409 for a duplicate versionString reports the
+	// not-in-this-state relationship error first and the duplicate second, so
+	// matching only the first code misses the existence conflict.
+	duplicateSecond := &asc.APIError{
+		Code:       "ENTITY_ERROR.RELATIONSHIP.INVALID",
+		StatusCode: http.StatusConflict,
+		AllCodes:   []string{"ENTITY_ERROR.RELATIONSHIP.INVALID", "ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE"},
+	}
+	if !IsIfExistsConflict(duplicateSecond, codes) {
+		t.Fatal("IsIfExistsConflict = false, want true for a duplicate code carried by a later error")
+	}
+
+	// A 409 whose every code is unrelated is still not an existence conflict.
+	stateOnly := &asc.APIError{
+		Code:       "ENTITY_ERROR.RELATIONSHIP.INVALID",
+		StatusCode: http.StatusConflict,
+		AllCodes:   []string{"ENTITY_ERROR.RELATIONSHIP.INVALID", "STATE_ERROR"},
+	}
+	if IsIfExistsConflict(stateOnly, codes) {
+		t.Fatal("IsIfExistsConflict = true, want false when no error carries a listed code")
+	}
+}

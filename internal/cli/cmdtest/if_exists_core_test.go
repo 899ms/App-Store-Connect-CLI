@@ -13,11 +13,16 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 )
 
-// Apple's real 409 body for a duplicate versionString on POST /v1/appStoreVersions.
-const versionsDuplicate409 = `{"errors":[{"id":"0b9c4f2e-1d0e-4f5a-9c6b-3e2f1a7d8c90","status":"409","code":"ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE","title":"The provided entity includes an attribute with a value that has already been used","detail":"The version number has been previously used.","source":{"pointer":"/data/attributes/versionString"}}]}`
+// Apple's real 409 body for a duplicate versionString on POST /v1/appStoreVersions,
+// captured live against app 6759231657 on 2026-09-15. Apple reports two errors
+// and the duplicate is the second one, so the conflict matcher has to inspect
+// every entry in errors[] rather than only the first.
+const versionsDuplicate409 = `{"errors":[{"id":"b068c5c0-b3fa-4d12-aa89-f1b9aa061b28","status":"409","code":"ENTITY_ERROR.RELATIONSHIP.INVALID","title":"The provided entity includes a relationship with an invalid value","detail":"You cannot create a new version of the App in the current state.","source":{"pointer":"/data/relationships/app"}},{"id":"eb1884a7-e427-42db-ac95-26c49c84a5c2","status":"409","code":"ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE","title":"The provided entity includes an attribute with a value that has already been used","detail":"The version number has been previously used.","source":{"pointer":"/data/attributes/versionString"}}]}`
 
-// Apple's 409 body when an appStoreReviewDetail already exists for the version.
-const reviewDetailExists409 = `{"errors":[{"id":"6a1e3b2c-9d4f-4a8e-b7c0-2f5d1e8a9b3c","status":"409","code":"ENTITY_ERROR.RELATIONSHIP.INVALID","title":"The provided entity includes a relationship with an invalid value","detail":"There is already an appStoreReviewDetail for this appStoreVersion.","source":{"pointer":"/data/relationships/appStoreVersion"}}]}`
+// Apple's 409 body when an appStoreReviewDetail already exists for the version,
+// captured live against app 6759231657 on 2026-09-15. Apple answers this
+// existence conflict with STATE_ERROR.ALREADY_EXISTS.
+const reviewDetailExists409 = `{"errors":[{"id":"a48854d3-ef2e-4eea-9451-228c907bf1ad","status":"409","code":"STATE_ERROR.ALREADY_EXISTS","title":"Resource already exists.","detail":"The given app version already has an existing review."}]}`
 
 // Apple's 409 on POST /v1/appStoreVersions when the app cannot take a new
 // version yet; it is not an existence conflict and must keep failing.
@@ -197,7 +202,7 @@ func TestVersionsCreateIfExistsUpdateWithoutUpdatableFlagsSkips(t *testing.T) {
 // when there is nothing to PATCH on the version itself, matching the documented
 // behavior: skip leaves the version untouched, update still copies metadata.
 func TestVersionsCreateIfExistsUpdateCopiesMetadataWithoutUpdatableFlags(t *testing.T) {
-	stdout, _, seen, runErr := runIfExistsCommand(t, []string{
+	stdout, stderr, seen, runErr := runIfExistsCommand(t, []string{
 		"versions", "create", "--app", "app-1", "--version", "2.0.0", "--platform", "IOS",
 		"--copy-metadata-from", "1.9.0", "--if-exists", "update", "--output", "json",
 	}, func(req ifExistsRequest) (*http.Response, error) {
@@ -243,8 +248,14 @@ func TestVersionsCreateIfExistsUpdateCopiesMetadataWithoutUpdatableFlags(t *test
 	if result.MetadataCopy.SourceVersion != "1.9.0" || result.MetadataCopy.CopiedLocales != 1 {
 		t.Fatalf("metadataCopy = %+v, want the 1.9.0 copy to have run", *result.MetadataCopy)
 	}
-	if result.Action != "skipped" {
-		t.Fatalf("action = %q, want skipped when the version itself had nothing to PATCH", result.Action)
+	// The metadata copy PATCHes the existing version's localizations, so the
+	// receipt must report a mutation even though the version resource itself
+	// had nothing to PATCH.
+	if result.Action != "updated" {
+		t.Fatalf("action = %q, want updated when the metadata copy ran against the existing version", result.Action)
+	}
+	if !strings.Contains(stderr, "updated it in place") {
+		t.Fatalf("stderr = %q, want the update diagnostic rather than left unchanged", stderr)
 	}
 	sawCopyPatch := false
 	for _, req := range seen {
@@ -298,7 +309,9 @@ func TestVersionsCreateDefaultIfExistsFailPreservesConflict(t *testing.T) {
 	if runErr == nil || !errors.Is(runErr, asc.ErrConflict) {
 		t.Fatalf("run error = %v, want the 409 conflict", runErr)
 	}
-	if !strings.Contains(runErr.Error(), "The version number has been previously used.") {
+	// Apple's own errors[0] detail is what the CLI has always surfaced for this
+	// body; --if-exists fail must keep printing it verbatim.
+	if !strings.Contains(runErr.Error(), "You cannot create a new version of the App in the current state.") {
 		t.Fatalf("run error = %v, want Apple detail preserved", runErr)
 	}
 	if stdout != "" {
@@ -326,8 +339,8 @@ func TestVersionsCreateIfExistsSkipStillFailsWhenReadBackFindsNothing(t *testing
 	if runErr == nil || !errors.Is(runErr, asc.ErrConflict) {
 		t.Fatalf("run error = %v, want the original 409", runErr)
 	}
-	if !strings.Contains(runErr.Error(), "The version number has been previously used.") {
-		t.Fatalf("run error = %v, want original duplicate detail", runErr)
+	if !strings.Contains(runErr.Error(), "You cannot create a new version of the App in the current state.") {
+		t.Fatalf("run error = %v, want the original conflict", runErr)
 	}
 	if stdout != "" {
 		t.Fatalf("stdout = %q, want empty", stdout)
@@ -507,5 +520,53 @@ func TestReviewDetailsCreateIfExistsSkipStillFailsWhenReadBackFindsNothing(t *te
 	}
 	if len(seen) != 2 {
 		t.Fatalf("requests = %+v, want POST then read-back", seen)
+	}
+}
+
+// A metadata copy that changes nothing leaves the existing version untouched,
+// so the receipt must stay skipped rather than claim an update.
+func TestVersionsCreateIfExistsUpdateKeepsSkippedWhenMetadataCopyChangesNothing(t *testing.T) {
+	stdout, stderr, _, runErr := runIfExistsCommand(t, []string{
+		"versions", "create", "--app", "app-1", "--version", "2.0.0", "--platform", "IOS",
+		"--copy-metadata-from", "1.9.0", "--if-exists", "update", "--output", "json",
+	}, func(req ifExistsRequest) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodPost && req.Path == "/v1/appStoreVersions":
+			return jsonResponse(http.StatusConflict, versionsDuplicate409)
+		case req.Method == http.MethodGet && req.Path == "/v1/apps/app-1/appStoreVersions":
+			if strings.Contains(req.Query, "filter%5BversionString%5D=1.9.0") {
+				return jsonResponse(http.StatusOK, sourceVersionsList)
+			}
+			return jsonResponse(http.StatusOK, existingVersionsList)
+		case req.Method == http.MethodGet && req.Path == "/v1/appStoreVersions/version-source/appStoreVersionLocalizations":
+			// The source locale carries none of the copyable fields.
+			return jsonResponse(http.StatusOK, `{"data":[{"type":"appStoreVersionLocalizations","id":"loc-source-en","attributes":{"locale":"en-US"}}]}`)
+		case req.Method == http.MethodGet && req.Path == "/v1/appStoreVersions/version-existing/appStoreVersionLocalizations":
+			return jsonResponse(http.StatusOK, destinationLocalizationsList)
+		default:
+			t.Fatalf("unexpected request %s %s?%s", req.Method, req.Path, req.Query)
+			return nil, nil
+		}
+	})
+	if runErr != nil {
+		t.Fatalf("run error: %v", runErr)
+	}
+	var result struct {
+		Action       string `json:"action"`
+		MetadataCopy *struct {
+			CopiedFieldUpdates int `json:"copiedFieldUpdates"`
+		} `json:"metadataCopy"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("unmarshal stdout: %v; stdout=%q", err, stdout)
+	}
+	if result.MetadataCopy == nil || result.MetadataCopy.CopiedFieldUpdates != 0 {
+		t.Fatalf("metadataCopy = %+v, want a copy that applied no field updates", result.MetadataCopy)
+	}
+	if result.Action != "skipped" {
+		t.Fatalf("action = %q, want skipped when the copy changed nothing", result.Action)
+	}
+	if !strings.Contains(stderr, "left unchanged") {
+		t.Fatalf("stderr = %q, want the left-unchanged diagnostic", stderr)
 	}
 }
