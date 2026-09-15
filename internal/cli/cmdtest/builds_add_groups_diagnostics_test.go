@@ -121,7 +121,7 @@ func TestBuildsAddGroupsDiagnoses422AfterAssignment(t *testing.T) {
 		t:          t,
 		external:   true,
 		postStatus: http.StatusUnprocessableEntity,
-		postBody:   `{"errors":[{"status":"422","code":"STATE_ERROR.ENTITY_STATE_INVALID","detail":"The build is not ready."}]}`,
+		postBody:   `{"errors":[{"status":"422","code":"STATE_ERROR.ENTITY_STATE_INVALID","detail":"The build is not ready.","meta":{"associatedErrors":{"betaGroups":[{"code":"BETA_GROUP_INVALID","detail":"The selected beta group is not eligible."}]}}}]}`,
 		buildBody:  `{"data":{"type":"builds","id":"build-1","attributes":{"processingState":"FAILED","expired":false}}}`,
 		detailBody: `{"data":{"type":"buildBetaDetails","id":"detail-1","attributes":{"externalBuildState":"MISSING_EXPORT_COMPLIANCE"}}}`,
 	}
@@ -148,6 +148,7 @@ func TestBuildsAddGroupsDiagnoses422AfterAssignment(t *testing.T) {
 	}
 	for _, want := range []string{
 		"The build is not ready.",
+		"The selected beta group is not eligible.",
 		"Current build state: processingState=FAILED",
 		"externalBuildState=MISSING_EXPORT_COMPLIANCE",
 		`--ipa "PATH_TO_IPA"`,
@@ -161,6 +162,9 @@ func TestBuildsAddGroupsDiagnoses422AfterAssignment(t *testing.T) {
 	}
 	if strings.Contains(stderr, "--file") {
 		t.Fatalf("stderr contains unsupported --file guidance: %q", stderr)
+	}
+	if codeAt, associatedAt := strings.Index(stderr, "(STATE_ERROR.ENTITY_STATE_INVALID)"), strings.Index(stderr, "Associated errors"); codeAt < 0 || associatedAt < 0 || codeAt > associatedAt {
+		t.Fatalf("top-level code must precede associated errors: %q", stderr)
 	}
 }
 

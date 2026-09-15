@@ -161,17 +161,19 @@ func externalBetaStateGuidance(buildID, state string) []string {
 }
 
 func appleUnprocessableDetail(apiErr *asc.APIError) string {
-	parts := make([]string, 0, 2)
-	if detail := strings.TrimSpace(apiErr.Detail); detail != "" {
-		parts = append(parts, detail)
-	} else if title := strings.TrimSpace(apiErr.Title); title != "" {
-		parts = append(parts, title)
-	}
-	if code := strings.TrimSpace(apiErr.Code); code != "" {
-		parts = append(parts, fmt.Sprintf("(%s)", code))
-	}
-	if len(parts) == 0 {
+	rendered := strings.TrimSpace(apiErr.Error())
+	if rendered == "" {
 		return "App Store Connect returned no error detail"
 	}
-	return strings.Join(parts, " ")
+
+	code := strings.TrimSpace(apiErr.Code)
+	if code == "" {
+		return rendered
+	}
+
+	sections := strings.SplitN(rendered, "\n\n", 2)
+	if sections[0] != code {
+		sections[0] = fmt.Sprintf("%s (%s)", sections[0], code)
+	}
+	return strings.Join(sections, "\n\n")
 }
