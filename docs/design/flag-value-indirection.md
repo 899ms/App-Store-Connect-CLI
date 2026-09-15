@@ -73,7 +73,18 @@ matching the Codemagic `cli-tools` convention that agents already know.
   text). Indirection keeps a secret out of `argv`, process listings, shell
   history, and telemetry; it is not a promise that every validator redacts a
   value the operator pointed at the wrong flag.
-- Positional arguments and everything after `--` are never resolved.
+- Positional arguments and everything after `--` are never resolved, but the
+  walk does not stop at the first positional. Commands that take a positional
+  first and then re-parse their own flags (`asc search "upload a build"
+  --limit 2`, `schema`, `workflow`) must still resolve those flags, and Go's
+  `flag` stopping at the first non-flag token is not a rule those commands
+  follow. Stopping the walk there would hand them a literal `@env:NAME`
+  string, which is a silently wrong value rather than an error.
+  The cost is narrow and acceptable: on a command that rejects positionals,
+  `asc optimize search plan junk --app @file:/missing` reports the unreadable
+  file before the unexpected-positional message. Both are exit-2 usage errors
+  naming a real problem with the same invalid command line, and the file the
+  read touches is one the operator named.
 - Rewriting stops at the first unknown flag token, and at a malformed
   spelling such as `---flag`, so the unknown-flag and bad-flag-syntax
   diagnostics stay authoritative for that invocation. The walk accepts the

@@ -474,3 +474,19 @@ func TestRunHelpKeepsBadFlagSyntaxAuthoritative(t *testing.T) {
 		t.Fatalf("stderr = %q, want the raw token, not a resolved value", stderr)
 	}
 }
+
+func TestResolveFlagValueIndirectionResolvesFlagsAfterAPositional(t *testing.T) {
+	// `asc search` takes the query as a positional and re-parses its own
+	// flags afterwards, so the walk must not stop at the first positional:
+	// stopping would hand the command a literal `@env:NAME` string.
+	t.Setenv("ASC_TEST_SEARCH_LIMIT", "2")
+	args := []string{"search", "upload a build", "--limit", "@env:ASC_TEST_SEARCH_LIMIT"}
+	got, err := resolveFlagValueIndirection(rootCommandForArgs("1.0.0", args), args)
+	if err != nil {
+		t.Fatalf("resolveFlagValueIndirection() error = %v", err)
+	}
+	want := []string{"search", "upload a build", "--limit", "2"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("resolveFlagValueIndirection() = %q, want %q", got, want)
+	}
+}
