@@ -144,24 +144,31 @@ Examples:
 					asc.WithLinkagesNextURL(*next),
 				}
 
+				// A next-page URL replaces the version path in the request, so
+				// a 404 belongs to that URL rather than to --version-id.
+				requestedVersionID := trimmedID
+				if trimmedNext != "" {
+					requestedVersionID = ""
+				}
+
 				if *paginate {
 					paginateOpts := append(opts, asc.WithLinkagesLimit(200))
 					firstPage, err := getAppStoreVersionRelationshipList(requestCtx, client, relationshipType, trimmedID, paginateOpts...)
 					if err != nil {
-						return fmt.Errorf("versions links: failed to fetch: %w", describeRelationshipLookupFailure(err, relationshipType, trimmedID))
+						return fmt.Errorf("versions links: failed to fetch: %w", describeRelationshipLookupFailure(err, relationshipType, requestedVersionID))
 					}
 					resp, err := asc.PaginateAll(requestCtx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
 						return getAppStoreVersionRelationshipList(ctx, client, relationshipType, trimmedID, asc.WithLinkagesNextURL(nextURL))
 					})
 					if err != nil {
-						return fmt.Errorf("versions links: %w", describeRelationshipLookupFailure(err, relationshipType, trimmedID))
+						return fmt.Errorf("versions links: %w", describeRelationshipLookupFailure(err, relationshipType, ""))
 					}
 					return shared.PrintOutput(resp, *output.Output, *output.Pretty)
 				}
 
 				resp, err := getAppStoreVersionRelationshipList(requestCtx, client, relationshipType, trimmedID, opts...)
 				if err != nil {
-					return fmt.Errorf("versions links: %w", describeRelationshipLookupFailure(err, relationshipType, trimmedID))
+					return fmt.Errorf("versions links: %w", describeRelationshipLookupFailure(err, relationshipType, requestedVersionID))
 				}
 				return shared.PrintOutput(resp, *output.Output, *output.Pretty)
 			default:
@@ -222,8 +229,9 @@ func appStoreVersionRelationshipValues() string {
 
 // describeRelationshipLookupFailure names the resource App Store Connect could
 // not find so a 404 says whether the version ID is unknown or the relationship
-// linkage is missing. A 404 that names neither, and every other failure, is
-// returned unchanged.
+// linkage is missing. An empty versionID means a next-page URL, not
+// --version-id, addressed the request. A 404 that names neither resource, and
+// every other failure, is returned unchanged.
 func describeRelationshipLookupFailure(err error, relationshipType, versionID string) error {
 	if err == nil || !asc.IsNotFound(err) {
 		return err
@@ -231,7 +239,7 @@ func describeRelationshipLookupFailure(err error, relationshipType, versionID st
 	if asc.IsMissingResourceOfType(err, "appStoreVersions") {
 		if versionID == "" {
 			return shared.NewErrorWithCause(
-				errors.New("the app store version referenced by --next was not found"),
+				errors.New("the app store version referenced by the requested page URL was not found"),
 				err,
 			)
 		}

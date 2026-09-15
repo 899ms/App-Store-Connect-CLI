@@ -179,6 +179,43 @@ func TestVersionsLinksUnclassifiedNotFoundKeepsAPIMessage(t *testing.T) {
 	}
 }
 
+func TestVersionsLinksNextURLNotFoundDoesNotBlameVersionFlag(t *testing.T) {
+	setupAuth(t)
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+	const body = `{"errors":[{"id":"9c8b7a65-0000-4a0a-9a3f-4f9e2d3b7c11","status":"404","code":"NOT_FOUND","title":"The specified resource does not exist","detail":"There is no resource of type 'appStoreVersions' with id 'other-version'"}]}`
+	server := newNotFoundServer(t, "/v1/appStoreVersions/other-version/relationships/customerReviews", body)
+	useVersionLinksServerClient(t, server)
+
+	root := RootCommand("1.2.3")
+	root.FlagSet.SetOutput(io.Discard)
+
+	var runErr error
+	_, _ = captureOutput(t, func() {
+		args := []string{
+			"versions", "links",
+			"--version-id", "version-1",
+			"--type", "customerReviews",
+			"--next", "https://api.appstoreconnect.apple.com/v1/appStoreVersions/other-version/relationships/customerReviews?cursor=NEXT",
+			"--output", "json",
+		}
+		if err := root.Parse(args); err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+		runErr = root.Run(context.Background())
+	})
+
+	if runErr == nil {
+		t.Fatal("expected not-found error")
+	}
+	if got := cmd.ExitCodeFromError(runErr); got != cmd.ExitNotFound {
+		t.Fatalf("exit code = %d, want %d (%v)", got, cmd.ExitNotFound, runErr)
+	}
+	want := "versions links: the app store version referenced by the requested page URL was not found"
+	if runErr.Error() != want {
+		t.Fatalf("error = %q, want %q", runErr, want)
+	}
+}
+
 // useVersionLinksServerClient points the general command client factory at the
 // test server so versions links exercises real transport and error parsing.
 func useVersionLinksServerClient(t *testing.T, server *httptest.Server) {
