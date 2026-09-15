@@ -122,7 +122,7 @@ func forceReadOnlyEnv(env []string) []string {
 	if !readonly.Enabled() {
 		return env
 	}
-	forced := make([]string, 0, len(env)+1)
+	forced := make([]string, 0, forcedEnvCapacity(len(env)))
 	for _, entry := range env {
 		if key, _, ok := strings.Cut(entry, "="); ok && key == readonly.EnvVar {
 			continue
@@ -130,6 +130,23 @@ func forceReadOnlyEnv(env []string) []string {
 		forced = append(forced, entry)
 	}
 	return append(forced, readonly.EnvVar+"=1")
+}
+
+// maxForcedEnvEntries bounds the capacity hint computed by forcedEnvCapacity.
+// A process environment is orders of magnitude smaller than this, so the clamp
+// never changes the allocation for a real environment; it only keeps the
+// arithmetic provably free of integer overflow.
+const maxForcedEnvEntries = 1 << 16
+
+// forcedEnvCapacity returns the capacity hint for the slice forceReadOnlyEnv
+// builds: one slot per inherited entry plus one for the forced entry. The
+// addition is clamped so no entry count can overflow it. The result is only a
+// hint, so append still grows the slice correctly beyond the clamp.
+func forcedEnvCapacity(entries int) int {
+	if entries > maxForcedEnvEntries {
+		return maxForcedEnvEntries + 1
+	}
+	return entries + 1
 }
 
 // runShellCommand executes a command string via bash -o pipefail -c when bash
