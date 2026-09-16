@@ -100,6 +100,28 @@ func TestResolveSessionDefaultsToSoleCachedAppleID(t *testing.T) {
 	}
 }
 
+func TestResolveSessionSanitizesSoleCachedAppleIDNotice(t *testing.T) {
+	dir := t.TempDir()
+	stderr := stubDefaultAppleIDResolverInputs(t, dir)
+	writeTestCachedWebSession(t, dir, "attacker@example.com\nINJECTED\x1b[31m\u202e")
+
+	var lookup string
+	tryResumeSessionFn = func(ctx context.Context, username string) (*webcore.AuthSession, bool, error) {
+		lookup = username
+		return &webcore.AuthSession{UserEmail: username}, true, nil
+	}
+
+	if _, _, err := resolveSession(context.Background(), "", "", ""); err != nil {
+		t.Fatalf("resolveSession() error = %v", err)
+	}
+	if got, want := lookup, "attacker@example.com\nINJECTED\x1b[31m\u202e"; got != want {
+		t.Fatalf("session lookup = %q, want unsanitized identity %q", got, want)
+	}
+	if got, want := stderr.String(), "Using cached web session for attacker@example.com INJECTED[31m; pass --apple-id to override\n"; got != want {
+		t.Fatalf("stderr = %q, want sanitized notice %q", got, want)
+	}
+}
+
 func TestResolveSessionSoleCachedAppleIDCanAutoReauthenticate(t *testing.T) {
 	dir := t.TempDir()
 	stderr := stubDefaultAppleIDResolverInputs(t, dir)

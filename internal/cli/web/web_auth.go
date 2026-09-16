@@ -546,7 +546,7 @@ func printEnvAppleIDNotice(appleID string) {
 	if sessionDefaultNoticeWriter == nil {
 		return
 	}
-	_, _ = fmt.Fprintf(sessionDefaultNoticeWriter, "Using web session for %s from %s; pass --apple-id to override\n", appleID, webAppleIDEnv)
+	_, _ = fmt.Fprintf(sessionDefaultNoticeWriter, "Using web session for %s from %s; pass --apple-id to override\n", shared.SanitizeTerminal(appleID), webAppleIDEnv)
 }
 
 // resolveDefaultCachedAppleID picks the Apple ID of the only cached web session
@@ -566,7 +566,7 @@ func resolveDefaultCachedAppleID() (appleID string, cacheEmpty bool, err error) 
 			return "", true, webcore.ErrNoCachedSession
 		}
 		if sessionDefaultNoticeWriter != nil {
-			_, _ = fmt.Fprintf(sessionDefaultNoticeWriter, "Using cached web session for %s; pass --apple-id to override\n", appleID)
+			_, _ = fmt.Fprintf(sessionDefaultNoticeWriter, "Using cached web session for %s; pass --apple-id to override\n", shared.SanitizeTerminal(appleID))
 		}
 		return appleID, false, nil
 	}
