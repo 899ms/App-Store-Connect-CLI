@@ -12,20 +12,25 @@ import (
 
 	rootcmd "github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
 type addGroupsDiagnosticsFixture struct {
 	t *testing.T
 
-	external     bool
-	groupInput   string
-	groupsBody   string
-	postStatus   int
-	postBody     string
-	buildStatus  int
-	buildBody    string
-	detailStatus int
-	detailBody   string
+	external              bool
+	groupInput            string
+	groupsBody            string
+	postStatus            int
+	postBody              string
+	buildStatus           int
+	buildBody             string
+	preflightBuildStatus  int
+	preflightBuildBody    string
+	detailStatus          int
+	detailBody            string
+	preflightDetailStatus int
+	preflightDetailBody   string
 
 	postCount   int
 	buildReads  int
@@ -56,17 +61,33 @@ func (f *addGroupsDiagnosticsFixture) transport() roundTripFunc {
 		case "GET /v1/builds/build-1":
 			f.buildReads++
 			status := f.buildStatus
+			body := f.buildBody
+			if f.preflightBuildBody != "" && f.buildReads == 1 {
+				status = f.preflightBuildStatus
+				body = f.preflightBuildBody
+			}
 			if status == 0 {
 				status = http.StatusOK
 			}
-			return jsonResponse(status, f.buildBody)
+			if body == "" {
+				body = `{"data":{"type":"builds","id":"build-1","attributes":{"processingState":"VALID","expired":false,"buildAudienceType":"APP_STORE_ELIGIBLE","usesNonExemptEncryption":false}}}`
+			}
+			return jsonResponse(status, body)
 		case "GET /v1/builds/build-1/buildBetaDetail":
 			f.detailReads++
 			status := f.detailStatus
+			body := f.detailBody
+			if f.preflightDetailBody != "" && f.detailReads == 1 {
+				status = f.preflightDetailStatus
+				body = f.preflightDetailBody
+			}
 			if status == 0 {
 				status = http.StatusOK
 			}
-			return jsonResponse(status, f.detailBody)
+			if body == "" {
+				body = `{"data":{"type":"buildBetaDetails","id":"detail-1","attributes":{"externalBuildState":"READY_FOR_BETA_TESTING"}}}`
+			}
+			return jsonResponse(status, body)
 		default:
 			f.t.Fatalf("unexpected request %s", request)
 			return nil, nil
@@ -252,28 +273,62 @@ func TestBuildsAddGroupsDryRunKeepsPreviewSuccessfulWhenStateReadFails(t *testin
 	}
 }
 
-func TestBuildsAddGroupsSuccessMakesNoDiagnosticReads(t *testing.T) {
+func TestBuildsAddGroupsSuccessPreflightsStateBeforePost(t *testing.T) {
 	fixture := &addGroupsDiagnosticsFixture{t: t, external: true}
 	stdout, stderr, runErr := runAddGroupsDiagnostics(t, fixture)
 	if runErr != nil {
 		t.Fatalf("unexpected error: %v (stderr=%q)", runErr, stderr)
 	}
-	if fixture.postCount != 1 || fixture.buildReads != 0 || fixture.detailReads != 0 {
-		t.Fatalf("requests = %v, want one POST and no diagnostic reads", fixture.requests)
+	if fixture.postCount != 1 || fixture.buildReads != 1 || fixture.detailReads != 1 {
+		t.Fatalf("requests = %v, want one preflight build/detail read and one POST", fixture.requests)
 	}
 	if !strings.Contains(stdout, `"groupIds":["group-1"]`) {
 		t.Fatalf("stdout = %q, want assignment receipt", stdout)
 	}
 }
 
+func TestBuildsAddGroupsSubmitBlocksInFlightReviewBeforeAnyPost(t *testing.T) {
+	for _, state := range []string{"WAITING_FOR_BETA_REVIEW", "IN_BETA_REVIEW"} {
+		t.Run(state, func(t *testing.T) {
+			fixture := &addGroupsDiagnosticsFixture{
+				t:          t,
+				external:   true,
+				detailBody: `{"data":{"type":"buildBetaDetails","id":"detail-1","attributes":{"externalBuildState":"` + state + `"}}}`,
+			}
+
+			_, stderr, runErr := runAddGroupsDiagnosticsArgs(t, fixture, "--submit", "--confirm")
+			if runErr == nil {
+				t.Fatal("expected in-flight review state to block assignment")
+			}
+			if fixture.postCount != 0 {
+				t.Fatalf("postCount = %d, want zero relationship or submission POSTs", fixture.postCount)
+			}
+			wantRequests := []string{
+				"GET /v1/builds/build-1/app",
+				"GET /v1/apps/app-1/betaGroups",
+				"GET /v1/builds/build-1",
+				"GET /v1/builds/build-1/buildBetaDetail",
+			}
+			if !reflect.DeepEqual(fixture.requests, wantRequests) {
+				t.Fatalf("requests = %v, want read-only preflight requests %v", fixture.requests, wantRequests)
+			}
+			if !strings.Contains(stderr, state) || !strings.Contains(stderr, "awaiting beta app review") {
+				t.Fatalf("stderr = %q, want state-specific preflight diagnostic", stderr)
+			}
+		})
+	}
+}
+
 func TestBuildsAddGroupsDiagnoses422AfterAssignment(t *testing.T) {
 	fixture := &addGroupsDiagnosticsFixture{
-		t:          t,
-		external:   true,
-		postStatus: http.StatusUnprocessableEntity,
-		postBody:   `{"errors":[{"status":"422","code":"STATE_ERROR.ENTITY_STATE_INVALID","detail":"The build is not ready.","meta":{"associatedErrors":{"betaGroups":[{"code":"BETA_GROUP_INVALID","detail":"The selected beta group is not eligible."}]}}}]}`,
-		buildBody:  `{"data":{"type":"builds","id":"build-1","attributes":{"processingState":"FAILED","expired":false}}}`,
-		detailBody: `{"data":{"type":"buildBetaDetails","id":"detail-1","attributes":{"externalBuildState":"MISSING_EXPORT_COMPLIANCE"}}}`,
+		t:                   t,
+		external:            true,
+		postStatus:          http.StatusUnprocessableEntity,
+		postBody:            `{"errors":[{"status":"422","code":"STATE_ERROR.ENTITY_STATE_INVALID","detail":"The build is not ready.","meta":{"associatedErrors":{"betaGroups":[{"code":"BETA_GROUP_INVALID","detail":"The selected beta group is not eligible."}]}}}]}`,
+		buildBody:           `{"data":{"type":"builds","id":"build-1","attributes":{"processingState":"FAILED","expired":false}}}`,
+		detailBody:          `{"data":{"type":"buildBetaDetails","id":"detail-1","attributes":{"externalBuildState":"MISSING_EXPORT_COMPLIANCE"}}}`,
+		preflightBuildBody:  `{"data":{"type":"builds","id":"build-1","attributes":{"processingState":"VALID","expired":false,"buildAudienceType":"APP_STORE_ELIGIBLE","usesNonExemptEncryption":false}}}`,
+		preflightDetailBody: `{"data":{"type":"buildBetaDetails","id":"detail-1","attributes":{"externalBuildState":"READY_FOR_BETA_TESTING"}}}`,
 	}
 	_, stderr, runErr := runAddGroupsDiagnostics(t, fixture)
 	if runErr == nil {
@@ -282,6 +337,8 @@ func TestBuildsAddGroupsDiagnoses422AfterAssignment(t *testing.T) {
 	wantRequests := []string{
 		"GET /v1/builds/build-1/app",
 		"GET /v1/apps/app-1/betaGroups",
+		"GET /v1/builds/build-1",
+		"GET /v1/builds/build-1/buildBetaDetail",
 		"POST /v1/builds/build-1/relationships/betaGroups",
 		"GET /v1/builds/build-1",
 		"GET /v1/builds/build-1/buildBetaDetail",
@@ -318,7 +375,7 @@ func TestBuildsAddGroupsDiagnoses422AfterAssignment(t *testing.T) {
 	}
 }
 
-func TestBuildsAddGroupsNon422DoesNotReadDiagnostics(t *testing.T) {
+func TestBuildsAddGroupsNon422DoesNotReadPostFailureDiagnostics(t *testing.T) {
 	fixture := &addGroupsDiagnosticsFixture{
 		t:          t,
 		external:   true,
@@ -329,8 +386,8 @@ func TestBuildsAddGroupsNon422DoesNotReadDiagnostics(t *testing.T) {
 	if runErr == nil {
 		t.Fatal("expected HTTP 409 failure")
 	}
-	if fixture.postCount != 1 || fixture.buildReads != 0 || fixture.detailReads != 0 {
-		t.Fatalf("requests = %v, want one POST and no diagnostic reads", fixture.requests)
+	if fixture.postCount != 1 || fixture.buildReads != 1 || fixture.detailReads != 1 {
+		t.Fatalf("requests = %v, want one preflight build/detail read and one POST", fixture.requests)
 	}
 	var apiErr *asc.APIError
 	if !errors.As(runErr, &apiErr) || apiErr.StatusCode != http.StatusConflict {
@@ -340,19 +397,20 @@ func TestBuildsAddGroupsNon422DoesNotReadDiagnostics(t *testing.T) {
 
 func TestBuildsAddGroupsDiagnosticReadFailurePreserves422(t *testing.T) {
 	fixture := &addGroupsDiagnosticsFixture{
-		t:           t,
-		external:    false,
-		postStatus:  http.StatusUnprocessableEntity,
-		postBody:    `{"errors":[{"status":"422","code":"STATE_ERROR.ENTITY_STATE_INVALID","detail":"The build is not ready."}]}`,
-		buildStatus: http.StatusInternalServerError,
-		buildBody:   `{"errors":[{"status":"500","code":"UNEXPECTED_ERROR","detail":"Unavailable."}]}`,
+		t:                  t,
+		external:           false,
+		postStatus:         http.StatusUnprocessableEntity,
+		postBody:           `{"errors":[{"status":"422","code":"STATE_ERROR.ENTITY_STATE_INVALID","detail":"The build is not ready."}]}`,
+		buildStatus:        http.StatusInternalServerError,
+		buildBody:          `{"errors":[{"status":"500","code":"UNEXPECTED_ERROR","detail":"Unavailable."}]}`,
+		preflightBuildBody: `{"data":{"type":"builds","id":"build-1","attributes":{"processingState":"VALID","expired":false}}}`,
 	}
 	_, stderr, runErr := runAddGroupsDiagnostics(t, fixture)
 	if runErr == nil {
 		t.Fatal("expected HTTP 422 failure")
 	}
-	if fixture.postCount != 1 || fixture.buildReads != 1 || fixture.detailReads != 0 {
-		t.Fatalf("requests = %v, want one POST, one build read, and no external detail read", fixture.requests)
+	if fixture.postCount != 1 || fixture.buildReads != 2 || fixture.detailReads != 0 {
+		t.Fatalf("requests = %v, want one preflight build read, one POST, and one diagnostic build read", fixture.requests)
 	}
 	if rootcmd.ExitCodeFromError(runErr) != rootcmd.HTTPStatusToExitCode(http.StatusUnprocessableEntity) {
 		t.Fatalf("exit code = %d, want original HTTP 422 mapping (stderr=%q)", rootcmd.ExitCodeFromError(runErr), stderr)
@@ -360,5 +418,127 @@ func TestBuildsAddGroupsDiagnosticReadFailurePreserves422(t *testing.T) {
 	var apiErr *asc.APIError
 	if !errors.As(runErr, &apiErr) || apiErr.StatusCode != http.StatusUnprocessableEntity {
 		t.Fatalf("error chain lost original API error: %v", runErr)
+	}
+}
+
+func TestBuildsAddGroupsPreflightBlocksProcessingBeforePost(t *testing.T) {
+	fixture := &addGroupsDiagnosticsFixture{
+		t:          t,
+		external:   true,
+		buildBody:  `{"data":{"type":"builds","id":"build-1","attributes":{"processingState":"PROCESSING","expired":false,"buildAudienceType":"APP_STORE_ELIGIBLE","usesNonExemptEncryption":false}}}`,
+		detailBody: `{"data":{"type":"buildBetaDetails","id":"detail-1","attributes":{"externalBuildState":"PROCESSING"}}}`,
+	}
+	_, stderr, runErr := runAddGroupsDiagnostics(t, fixture)
+	if runErr == nil {
+		t.Fatal("expected processing preflight failure")
+	}
+	if fixture.postCount != 0 {
+		t.Fatalf("postCount = %d, want zero", fixture.postCount)
+	}
+	if rootcmd.ExitCodeFromError(runErr) != rootcmd.ExitError {
+		t.Fatalf("exit code = %d, want validation exit", rootcmd.ExitCodeFromError(runErr))
+	}
+	if !strings.Contains(stderr, "processingState PROCESSING") || !strings.Contains(stderr, "asc builds wait") {
+		t.Fatalf("stderr = %q, want processing state and remediation", stderr)
+	}
+}
+
+func TestBuildsAddGroupsPreflightBlocksExpiredInternalBuildWithoutDetailRead(t *testing.T) {
+	fixture := &addGroupsDiagnosticsFixture{
+		t:         t,
+		buildBody: `{"data":{"type":"builds","id":"build-1","attributes":{"processingState":"VALID","expired":true}}}`,
+	}
+	_, stderr, runErr := runAddGroupsDiagnostics(t, fixture)
+	if runErr == nil {
+		t.Fatal("expected expired preflight failure")
+	}
+	if fixture.postCount != 0 || fixture.detailReads != 0 {
+		t.Fatalf("postCount=%d detailReads=%d, want zero post and detail reads", fixture.postCount, fixture.detailReads)
+	}
+	if !strings.Contains(stderr, "has expired") {
+		t.Fatalf("stderr = %q, want expiration diagnostic", stderr)
+	}
+}
+
+func TestBuildsAddGroupsPreflightBlocksExternalReviewNotReady(t *testing.T) {
+	fixture := &addGroupsDiagnosticsFixture{
+		t:          t,
+		external:   true,
+		buildBody:  `{"data":{"type":"builds","id":"build-1","attributes":{"processingState":"VALID","expired":false,"buildAudienceType":"APP_STORE_ELIGIBLE","usesNonExemptEncryption":false}}}`,
+		detailBody: `{"data":{"type":"buildBetaDetails","id":"detail-1","attributes":{"externalBuildState":"WAITING_FOR_BETA_REVIEW"}}}`,
+	}
+	_, stderr, runErr := runAddGroupsDiagnostics(t, fixture)
+	if runErr == nil {
+		t.Fatal("expected beta review preflight failure")
+	}
+	if fixture.postCount != 0 {
+		t.Fatalf("postCount = %d, want zero", fixture.postCount)
+	}
+	if !strings.Contains(stderr, "WAITING_FOR_BETA_REVIEW") || !strings.Contains(stderr, "asc builds info") {
+		t.Fatalf("stderr = %q, want review state and remediation", stderr)
+	}
+}
+
+func TestBuildsAddGroupsPreflightBlocksMissingEncryptionEvidence(t *testing.T) {
+	fixture := &addGroupsDiagnosticsFixture{
+		t:          t,
+		external:   true,
+		buildBody:  `{"data":{"type":"builds","id":"build-1","attributes":{"processingState":"VALID","expired":false,"buildAudienceType":"APP_STORE_ELIGIBLE"}}}`,
+		detailBody: `{"data":{"type":"buildBetaDetails","id":"detail-1","attributes":{"externalBuildState":"READY_FOR_BETA_TESTING"}}}`,
+	}
+	_, stderr, runErr := runAddGroupsDiagnostics(t, fixture)
+	if runErr == nil {
+		t.Fatal("expected missing encryption preflight failure")
+	}
+	if fixture.postCount != 0 {
+		t.Fatalf("postCount = %d, want zero", fixture.postCount)
+	}
+	if !strings.Contains(stderr, "usesNonExemptEncryption") || !strings.Contains(stderr, "asc builds update") {
+		t.Fatalf("stderr = %q, want encryption evidence and remediation", stderr)
+	}
+}
+
+func TestBuildsAddGroupsPreflightFailsClosedWhenBuildStateUnavailable(t *testing.T) {
+	fixture := &addGroupsDiagnosticsFixture{
+		t:           t,
+		external:    false,
+		buildStatus: http.StatusServiceUnavailable,
+		buildBody:   `{"errors":[{"status":"503","code":"SERVICE_UNAVAILABLE","detail":"temporarily unavailable"}]}`,
+	}
+	_, stderr, runErr := runAddGroupsDiagnostics(t, fixture)
+	if runErr == nil {
+		t.Fatal("expected unavailable preflight failure")
+	}
+	if fixture.postCount != 0 {
+		t.Fatalf("postCount = %d, want zero", fixture.postCount)
+	}
+	if rootcmd.ExitCodeFromError(runErr) != rootcmd.HTTPStatusToExitCode(http.StatusServiceUnavailable) {
+		t.Fatalf("exit code = %d, want provider HTTP 503 exit", rootcmd.ExitCodeFromError(runErr))
+	}
+	if !strings.Contains(stderr, "cannot verify build state for build build-1") {
+		t.Fatalf("stderr = %q, want fail-closed diagnostic", stderr)
+	}
+	if diagnostic, ok := shared.DiagnosticFromError(runErr); !ok || diagnostic.Code != shared.DiagnosticRequestFailed {
+		t.Fatalf("diagnostic = %+v (ok=%v), want request_failed", diagnostic, ok)
+	}
+}
+
+func TestBuildsAddGroupsPreflightFailsClosedWhenExternalStateUnavailable(t *testing.T) {
+	fixture := &addGroupsDiagnosticsFixture{
+		t:            t,
+		external:     true,
+		buildBody:    `{"data":{"type":"builds","id":"build-1","attributes":{"processingState":"VALID","expired":false,"buildAudienceType":"APP_STORE_ELIGIBLE","usesNonExemptEncryption":false}}}`,
+		detailStatus: http.StatusServiceUnavailable,
+		detailBody:   `{"errors":[{"status":"503","code":"SERVICE_UNAVAILABLE","detail":"temporarily unavailable"}]}`,
+	}
+	_, stderr, runErr := runAddGroupsDiagnostics(t, fixture)
+	if runErr == nil {
+		t.Fatal("expected unavailable external-state preflight failure")
+	}
+	if fixture.postCount != 0 {
+		t.Fatalf("postCount = %d, want zero", fixture.postCount)
+	}
+	if !strings.Contains(stderr, "cannot verify external beta state for build build-1") {
+		t.Fatalf("stderr = %q, want fail-closed external-state diagnostic", stderr)
 	}
 }
