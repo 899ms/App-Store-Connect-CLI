@@ -192,6 +192,15 @@ automation with `ASC_WEB_SESSION_CACHE_DIR` and
 operator's real session cache. An unset or `auto` backend still falls back to
 the keychain when the file cache is empty.
 
+A runner that cannot answer prompts can create the session non-interactively
+instead: `ASC_WEB_PASSWORD` supplies the Apple Account password and
+`ASC_WEB_2FA_CODE_COMMAND` names a shell command that prints the two-factor
+code. Both are read only when a fresh login is required, and a password taken
+from the environment is never written to the saved-password store. Set
+`ASC_WEB_DONT_STORE_PASSWORD=1` to turn off saved-password reads and writes
+altogether. See
+[Web session variables](/configuration/environment-variables#web-session-variables).
+
 ## Manage multiple profiles
 
 Switch between different API keys for multiple apps or teams:
