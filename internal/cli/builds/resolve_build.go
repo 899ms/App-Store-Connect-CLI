@@ -252,7 +252,7 @@ func resolveBuildByNumberSelectionSince(
 				return &asc.BuildResponse{Data: *selected}, nil
 			}
 			if selected != nil {
-				return nil, ambiguousBuildNumberSelection(appID, buildNumber, version, platform, shared.BuildCandidates([]asc.Resource[asc.BuildAttributes]{*selected, build}), strings.TrimSpace(buildsResp.Links.Next) != "")
+				return nil, ambiguousBuildNumberSelection(appID, buildNumber, version, platform, shared.BuildCandidates([]asc.Resource[asc.BuildAttributes]{*selected, build}), true)
 			}
 
 			selectedBuild := build
@@ -293,17 +293,18 @@ func noBuildFoundForBuildNumber(appID, buildNumber, version, platform string) er
 // more than one build. The caller has to narrow the selector, so this stays a
 // usage error, and the message names every matching build ID plus the flag
 // that accepts one of them.
-func ambiguousBuildNumberSelection(appID, buildNumber, version, platform string, candidates []shared.AmbiguousCandidate, morePages bool) error {
+func ambiguousBuildNumberSelection(appID, buildNumber, version, platform string, candidates []shared.AmbiguousCandidate, candidatesAreSample bool) error {
 	hint := describeBuildNumberSelectionHint(version, platform)
-	if morePages {
-		hint = strings.TrimSpace("More matching builds exist on later pages. " + hint)
+	if candidatesAreSample {
+		hint = strings.TrimSpace("The listed builds are a sample; additional matches may exist. " + hint)
 	}
 	return shared.AmbiguousUsageError(&shared.AmbiguousSelectionError{
-		Kind:        "build",
-		Description: fmt.Sprintf("build number %q%s for app %s", buildNumber, describeBuildNumberSelectionFilters(version, platform), appID),
-		Flag:        "--build-id",
-		Candidates:  candidates,
-		Hint:        hint,
+		Kind:                "build",
+		Description:         fmt.Sprintf("build number %q%s for app %s", buildNumber, describeBuildNumberSelectionFilters(version, platform), appID),
+		Flag:                "--build-id",
+		Candidates:          candidates,
+		CandidatesAreSample: candidatesAreSample,
+		Hint:                hint,
 	})
 }
 

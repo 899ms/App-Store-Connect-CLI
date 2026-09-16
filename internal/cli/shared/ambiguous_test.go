@@ -100,13 +100,26 @@ func TestAmbiguousErrorSanitizesCandidateText(t *testing.T) {
 }
 
 func TestAmbiguousUsageErrorPrintsEveryLineAndKeepsUsageExit(t *testing.T) {
-	stderr := captureStderr(t, func() {
-		err := AmbiguousUsageError(AmbiguousError("app store version", "--platform", "1.2.3", []AmbiguousCandidate{
+	original := &AmbiguousSelectionError{
+		Kind:        "app store version",
+		Description: `"1.2.3"`,
+		Flag:        "--platform",
+		Candidates: []AmbiguousCandidate{
 			{ID: "v-ios", Label: "IOS"},
 			{ID: "v-mac", Label: "MAC_OS"},
-		}))
+		},
+	}
+	stderr := captureStderr(t, func() {
+		err := AmbiguousUsageError(original)
 		if !errors.Is(err, flag.ErrHelp) {
 			t.Fatalf("expected usage-class error, got %T %v", err, err)
+		}
+		var recovered *AmbiguousSelectionError
+		if !errors.As(err, &recovered) || recovered != original {
+			t.Fatalf("expected original ambiguity cause, got %#v", recovered)
+		}
+		if !IsAmbiguousSelection(err) {
+			t.Fatal("usage wrapper must preserve ambiguity classification")
 		}
 		if !strings.Contains(err.Error(), "v-ios") || !strings.Contains(err.Error(), "v-mac") {
 			t.Fatalf("usage-class error must keep every candidate, got %q", err.Error())
@@ -167,6 +180,35 @@ func TestAmbiguousAppStoreVersionErrorOffersPlatformOnlyWhenItSelectsOne(t *test
 		}
 	}
 
+	samePlatform := AmbiguousAppStoreVersionError("1.2.3", "", []asc.Resource[asc.AppStoreVersionAttributes]{
+		version("version-ios-1", "IOS"),
+		version("version-ios-2", "IOS"),
+	}, "--platform", "").Error()
+	for _, want := range []string{"version-ios-1", "version-ios-2", "cannot select between duplicate App Store version records"} {
+		if !strings.Contains(samePlatform, want) {
+			t.Fatalf("expected %q in same-platform ambiguity %q", want, samePlatform)
+		}
+	}
+	if strings.Contains(samePlatform, "pass --platform") {
+		t.Fatalf("platform must not be offered for same-platform duplicates: %q", samePlatform)
+	}
+
+	platformAlreadySelected := AmbiguousAppStoreVersionError("1.2.3", "IOS", []asc.Resource[asc.AppStoreVersionAttributes]{
+		version("version-ios-1", "IOS"),
+		version("version-ios-2", "IOS"),
+	}, "--platform", "").Error()
+	if !strings.Contains(platformAlreadySelected, "cannot select between duplicate App Store version records") {
+		t.Fatalf("expected honest same-platform recovery hint, got %q", platformAlreadySelected)
+	}
+
+	noSelectorFlags := AmbiguousAppStoreVersionError("1.2.3", "", []asc.Resource[asc.AppStoreVersionAttributes]{
+		version("version-ios-1", "IOS"),
+		version("version-ios-2", "IOS"),
+	}, "", "").Error()
+	if !strings.Contains(noSelectorFlags, "cannot select between duplicate App Store version records") || strings.Contains(noSelectorFlags, "pass --") {
+		t.Fatalf("expected honest no-selector recovery hint, got %q", noSelectorFlags)
+	}
+
 	withVersionFlag := AmbiguousAppStoreVersionError("1.2.3", "", []asc.Resource[asc.AppStoreVersionAttributes]{
 		version("version-ios-1", "IOS"),
 		version("version-ios-2", "IOS"),
@@ -174,6 +216,27 @@ func TestAmbiguousAppStoreVersionErrorOffersPlatformOnlyWhenItSelectsOne(t *test
 	}, "--platform", "--version-id").Error()
 	if !strings.Contains(withVersionFlag, "pass --version-id with one of:") {
 		t.Fatalf("expected --version-id fallback, got %q", withVersionFlag)
+	}
+}
+
+func TestBetaTesterCandidatesExposeOnlyDisambiguatingIDs(t *testing.T) {
+	testers := []asc.Resource[asc.BetaTesterAttributes]{
+		{
+			ID: "tester-1",
+			Attributes: asc.BetaTesterAttributes{
+				Email:     "private@example.com",
+				FirstName: "Private",
+				LastName:  "Person",
+			},
+		},
+	}
+
+	candidates := BetaTesterCandidates(testers)
+	if len(candidates) != 1 || candidates[0].ID != "tester-1" {
+		t.Fatalf("unexpected candidates: %#v", candidates)
+	}
+	if candidates[0].Label != "" || candidates[0].Extra != "" {
+		t.Fatalf("tester candidates must not repeat personal data: %#v", candidates[0])
 	}
 }
 

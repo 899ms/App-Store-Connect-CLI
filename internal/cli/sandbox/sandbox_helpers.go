@@ -95,9 +95,7 @@ func findSandboxTesterByEmail(ctx context.Context, client *asc.Client, email str
 			candidates := make([]shared.AmbiguousCandidate, 0, len(resp.Data))
 			for _, tester := range resp.Data {
 				candidates = append(candidates, shared.AmbiguousCandidate{
-					ID:    strings.TrimSpace(tester.ID),
-					Label: strings.TrimSpace(tester.Attributes.Email),
-					Extra: strings.TrimSpace(strings.TrimSpace(tester.Attributes.FirstName) + " " + strings.TrimSpace(tester.Attributes.LastName)),
+					ID: strings.TrimSpace(tester.ID),
 				})
 			}
 			return nil, &shared.AmbiguousSelectionError{

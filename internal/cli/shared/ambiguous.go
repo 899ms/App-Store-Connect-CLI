@@ -35,6 +35,10 @@ type AmbiguousSelectionError struct {
 	Flag string
 	// Candidates lists the matches in the order they should be shown.
 	Candidates []AmbiguousCandidate
+	// CandidatesAreSample reports that the candidates prove ambiguity but do
+	// not establish the total match count. This keeps early-stopping resolvers
+	// from presenting the retained sample as a complete result set.
+	CandidatesAreSample bool
 	// Hint is an optional final line with additional guidance.
 	Hint string
 }
@@ -53,9 +57,17 @@ func AmbiguousError(kind, flag, selector string, candidates []AmbiguousCandidate
 // Error renders the header, the bounded candidate table, and the hint.
 func (e *AmbiguousSelectionError) Error() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d %s match %s", len(e.Candidates), pluralizeKind(e.Kind), sanitizeAmbiguousText(e.Description))
+	if e.CandidatesAreSample {
+		fmt.Fprintf(&b, "multiple %s match %s", pluralizeKind(e.Kind), sanitizeAmbiguousText(e.Description))
+	} else {
+		fmt.Fprintf(&b, "%d %s match %s", len(e.Candidates), pluralizeKind(e.Kind), sanitizeAmbiguousText(e.Description))
+	}
 	if flag := strings.TrimSpace(e.Flag); flag != "" {
-		fmt.Fprintf(&b, "; pass %s with one of:", flag)
+		if e.CandidatesAreSample {
+			fmt.Fprintf(&b, "; pass %s with one of these sample matches:", flag)
+		} else {
+			fmt.Fprintf(&b, "; pass %s with one of:", flag)
+		}
 	} else {
 		b.WriteString(":")
 	}
@@ -123,7 +135,10 @@ func AmbiguousUsageError(err error) error {
 	// The full table stays on the error so wrapped callers and tests can read
 	// the candidates; cmd does not reprint usage-class errors, so this cannot
 	// duplicate the stderr output above.
-	return classifiedUsageError{kind: UsageErrorOther, message: message}
+	return NewErrorWithCause(
+		classifiedUsageError{kind: UsageErrorOther, message: message},
+		err,
+	)
 }
 
 func sanitizeAmbiguousText(value string) string {

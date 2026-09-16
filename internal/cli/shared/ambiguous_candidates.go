@@ -80,15 +80,14 @@ func BuildCandidate(build asc.Resource[asc.BuildAttributes]) AmbiguousCandidate 
 	}
 }
 
-// BetaTesterCandidates converts beta testers into ambiguity candidates
-// (ID, email, name).
+// BetaTesterCandidates converts beta testers into ambiguity candidates. The
+// selector already identifies the duplicated email, so only expose the IDs
+// accepted by the disambiguating command instead of repeating personal data.
 func BetaTesterCandidates(testers []asc.Resource[asc.BetaTesterAttributes]) []AmbiguousCandidate {
 	candidates := make([]AmbiguousCandidate, 0, len(testers))
 	for _, tester := range testers {
 		candidates = append(candidates, AmbiguousCandidate{
-			ID:    strings.TrimSpace(tester.ID),
-			Label: strings.TrimSpace(tester.Attributes.Email),
-			Extra: strings.TrimSpace(strings.TrimSpace(tester.Attributes.FirstName) + " " + strings.TrimSpace(tester.Attributes.LastName)),
+			ID: strings.TrimSpace(tester.ID),
 		})
 	}
 	return candidates
@@ -168,8 +167,11 @@ func AmbiguousAppStoreVersionError(version, platform string, versions []asc.Reso
 		}
 	}
 	hint := ""
-	if versionIDFlag == "" && platformFlag != "" && len(platforms) > 1 {
-		hint = fmt.Sprintf("More than one version matches on a single platform, so %s cannot select one on its own.", platformFlag)
+	if versionIDFlag == "" {
+		hint = "This command cannot select between duplicate App Store version records; inspect the listed IDs with a command that supports an explicit version ID."
+		if platformFlag != "" && len(platforms) > 1 {
+			hint = fmt.Sprintf("More than one version matches on a single platform, so %s cannot select one on its own. %s", platformFlag, hint)
+		}
 	}
 	return &AmbiguousSelectionError{
 		Kind:        "app store version",

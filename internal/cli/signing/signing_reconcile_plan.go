@@ -281,7 +281,12 @@ func selectReconcileCertificateWithFingerprint(certificates []asc.Resource[asc.C
 			return nil, []string{"no eligible iOS distribution certificate matches the requested SHA-256"}
 		}
 		if len(matches) > 1 {
-			return nil, []string{shared.AmbiguousError("eligible iOS distribution certificate", "--certificate", explicitSHA256, signingCertificateRefCandidates(matches)).Error()}
+			return nil, []string{(&shared.AmbiguousSelectionError{
+				Kind:        "eligible iOS distribution certificate",
+				Description: fmt.Sprintf("SHA-256 %q", explicitSHA256),
+				Candidates:  signingCertificateRefCandidates(matches),
+				Hint:        "Multiple certificate records have the selected SHA-256; this command cannot choose between duplicate records.",
+			}).Error()}
 		}
 		if explicitID != "" && matches[0].ID != explicitID {
 			return nil, []string{fmt.Sprintf("certificate %s does not match the requested SHA-256", explicitID)}
