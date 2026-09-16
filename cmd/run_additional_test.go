@@ -1320,7 +1320,7 @@ func TestRun_UnknownCommandsReturnConciseRecovery(t *testing.T) {
 			args: []string{"builts"},
 			wantStderr: "Error: unknown command `asc builts`\n" +
 				"Try:\n" +
-				"  asc builds\n" +
+				"  asc builds --help\n" +
 				"For help:\n" +
 				"  asc --help\n",
 		},
@@ -1329,7 +1329,7 @@ func TestRun_UnknownCommandsReturnConciseRecovery(t *testing.T) {
 			args: []string{"builds", "lsit"},
 			wantStderr: "Error: unknown command `asc builds lsit`\n" +
 				"Try:\n" +
-				"  asc builds list\n" +
+				"  asc builds list --help\n" +
 				"For help:\n" +
 				"  asc builds --help\n",
 		},
@@ -1338,7 +1338,7 @@ func TestRun_UnknownCommandsReturnConciseRecovery(t *testing.T) {
 			args: []string{"xcode-cloud", "workflows", "lsit", "--app", "APP_ID"},
 			wantStderr: "Error: unknown command `asc xcode-cloud workflows lsit`\n" +
 				"Try:\n" +
-				"  asc xcode-cloud workflows list\n" +
+				"  asc xcode-cloud workflows list --help\n" +
 				"For help:\n" +
 				"  asc xcode-cloud workflows --help\n",
 		},
@@ -1422,8 +1422,8 @@ func TestRun_UnknownCommandSuggestionsAreBoundedAndTerminalSafe(t *testing.T) {
 		t.Fatalf("stdout = %q, want empty", stdout)
 	}
 	tryBlock, _, found := strings.Cut(strings.TrimPrefix(stderr, "Error: unknown command `asc app`\nTry:\n"), "For help:\n")
-	if !found || strings.Count(strings.TrimSpace(tryBlock), "\n") != 1 {
-		t.Fatalf("suggestion count is not 2; stderr=%q", stderr)
+	if !found || strings.Count(strings.TrimSpace(tryBlock), "\n") != 2 {
+		t.Fatalf("suggestion count is not 3; stderr=%q", stderr)
 	}
 
 	_, hostileStderr := captureCommandOutput(t, func() {
@@ -1452,7 +1452,7 @@ func TestRun_UnknownCommandRanksClosestPrefixBeforeSuggestionLimit(t *testing.T)
 	if stdout != "" {
 		t.Fatalf("stdout = %q, want empty", stdout)
 	}
-	if !strings.Contains(stderr, "Try:\n  asc builds\n") {
+	if !strings.Contains(stderr, "Try:\n  asc builds --help\n") {
 		t.Fatalf("closest prefix was truncated from suggestions: %q", stderr)
 	}
 }
@@ -1784,8 +1784,8 @@ func TestRun_CommonWrongCommandPathDoesNotCopyInvalidTypedValues(t *testing.T) {
 	}
 	want := "Error: unknown command `asc reviewsubmissions`\n" +
 		"Try:\n" +
-		"  asc reviews\n" +
-		"  asc review\n" +
+		"  asc reviews --help\n" +
+		"  asc review --help\n" +
 		"For help:\n" +
 		"  asc --help\n"
 
@@ -2285,7 +2285,7 @@ func TestRun_DeprecationMentionsRemainSuggestionCandidates(t *testing.T) {
 			t.Fatalf("Run() exit code = %d, want %d", code, ExitUsage)
 		}
 	})
-	if !strings.Contains(commandStderr, "Try:\n  asc iap versions submit\n") {
+	if !strings.Contains(commandStderr, "Try:\n  asc iap versions submit --help\n") {
 		t.Fatalf("stable command with deprecation context must remain suggestible, got %q", commandStderr)
 	}
 
