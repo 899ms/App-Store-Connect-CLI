@@ -9,7 +9,8 @@ func TestValidateHelpExplainsDefaultVersionSelection(t *testing.T) {
 	help := ValidateCommand().LongHelp
 	for _, want := range []string{
 		"When --version and --version-id are omitted",
-		"newest editable App Store version",
+		"newest active editable App Store version",
+		"DEVELOPER_REMOVED_FROM_SALE version",
 		"falls back to the newest live version",
 		"does not mean the live version is ready for submission",
 		"Pass --platform",

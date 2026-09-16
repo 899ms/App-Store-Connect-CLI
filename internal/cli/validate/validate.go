@@ -92,7 +92,8 @@ Deep validation:
 
 Default version selection:
   When --version and --version-id are omitted, validate selects the app's
-  newest editable App Store version; if none exists, it falls back to the newest live version.
+  newest active editable App Store version. If none exists, it checks for a
+  DEVELOPER_REMOVED_FROM_SALE version; if that is absent, it falls back to the newest live version.
   Pass --platform when that tier has candidates on more than one platform. The
   selected version is always reported on stderr. A live fallback does not mean the live version is ready for submission;
   its state is evaluated by the same readiness checks and can still block.

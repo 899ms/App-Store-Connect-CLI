@@ -17,6 +17,7 @@ import (
 
 const (
 	editableVersionStateQuery = "filter[appVersionState]=DEVELOPER_REJECTED,INVALID_BINARY,METADATA_REJECTED,PREPARE_FOR_SUBMISSION,READY_FOR_REVIEW,REJECTED,WAITING_FOR_REVIEW"
+	removedEditableStateQuery = "filter[appStoreState]=DEVELOPER_REMOVED_FROM_SALE"
 	liveVersionStateQuery     = "filter[appStoreState]=READY_FOR_SALE"
 	// The live tier queries both state spellings; see defaultLiveAppVersionStates.
 	liveVersionModernStateQuery = "filter[appVersionState]=READY_FOR_DISTRIBUTION"
@@ -76,6 +77,7 @@ func TestValidateDefaultsToLiveVersionWhenNoEditableVersion(t *testing.T) {
 	fixture.versions = ""
 	fixture.versionsByQuery = map[string]string{
 		editableVersionStateQuery:   `{"data":[],"links":{"next":""}}`,
+		removedEditableStateQuery:   `{"data":[],"links":{"next":""}}`,
 		liveVersionStateQuery:       `{"data":[{"type":"appStoreVersions","id":"ver-1","attributes":{"platform":"IOS","versionString":"1.0","appStoreState":"READY_FOR_SALE","appVersionState":"READY_FOR_DISTRIBUTION","createdDate":"2026-01-01T00:00:00Z"}}],"links":{"next":""}}`,
 		liveVersionModernStateQuery: `{"data":[],"links":{"next":""}}`,
 	}
@@ -199,6 +201,7 @@ func TestValidateDeepDefaultVersionDoesNotFallbackForSelectionErrors(t *testing.
 			name: "not found",
 			versions: map[string]string{
 				editableVersionStateQuery:   `{"data":[],"links":{"next":""}}`,
+				removedEditableStateQuery:   `{"data":[],"links":{"next":""}}`,
 				liveVersionStateQuery:       `{"data":[],"links":{"next":""}}`,
 				liveVersionModernStateQuery: `{"data":[],"links":{"next":""}}`,
 			},
@@ -271,6 +274,7 @@ func TestValidateDefaultVersionErrorsWhenNoVersionExists(t *testing.T) {
 	fixture.versions = ""
 	fixture.versionsByQuery = map[string]string{
 		editableVersionStateQuery:   `{"data":[],"links":{"next":""}}`,
+		removedEditableStateQuery:   `{"data":[],"links":{"next":""}}`,
 		liveVersionStateQuery:       `{"data":[],"links":{"next":""}}`,
 		liveVersionModernStateQuery: `{"data":[],"links":{"next":""}}`,
 	}

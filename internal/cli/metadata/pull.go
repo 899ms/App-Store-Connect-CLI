@@ -36,7 +36,7 @@ func MetadataPullCommand() *ffcli.Command {
 
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env)")
 	appInfoID := fs.String("app-info", "", "App Info ID (optional override for apps with multiple app-infos)")
-	version := fs.String("version", "", "App version string (for example 1.2.3); defaults to the app's editable version, else the live version")
+	version := fs.String("version", "", "App version string (for example 1.2.3); defaults to the app's active editable version, then a developer-removed version, else the live version")
 	platform := fs.String("platform", "", "Optional platform: IOS, MAC_OS, TV_OS, or VISION_OS")
 	dir := fs.String("dir", "", "Output root directory (required)")
 	force := fs.Bool("force", false, "Overwrite existing metadata files in --dir")
@@ -51,10 +51,10 @@ func MetadataPullCommand() *ffcli.Command {
 
 Phase 1 supports localization metadata for app-info and app-store versions.
 
-When --version is omitted, the app's newest editable App Store version is used
+When --version is omitted, the app's newest active editable App Store version is used
 (PREPARE_FOR_SUBMISSION, DEVELOPER_REJECTED, REJECTED, METADATA_REJECTED,
-READY_FOR_REVIEW, WAITING_FOR_REVIEW, or INVALID_BINARY), falling back to the
-live version. The selected version is reported on stderr. Pass --platform when
+READY_FOR_REVIEW, WAITING_FOR_REVIEW, or INVALID_BINARY), then a
+DEVELOPER_REMOVED_FROM_SALE version, and finally the live version. The selected version is reported on stderr. Pass --platform when
 the app has candidate versions on more than one platform.
 
 Examples:

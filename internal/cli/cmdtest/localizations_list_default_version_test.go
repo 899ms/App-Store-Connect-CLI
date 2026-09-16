@@ -81,6 +81,7 @@ func TestLocalizationsListDefaultsToLiveVersionWithPlatform(t *testing.T) {
 	var log []string
 	installLocalizationsDefaultVersionTransport(t, map[string]string{
 		editableVersionStateQuery + "&filter[platform]=MAC_OS":   `{"data":[],"links":{"next":""}}`,
+		removedEditableStateQuery + "&filter[platform]=MAC_OS":   `{"data":[],"links":{"next":""}}`,
 		liveVersionStateQuery + "&filter[platform]=MAC_OS":       `{"data":[{"type":"appStoreVersions","id":"ver-1","attributes":{"platform":"MAC_OS","versionString":"2.0.0","appStoreState":"READY_FOR_SALE","createdDate":"2026-01-01T00:00:00Z"}}],"links":{"next":""}}`,
 		liveVersionModernStateQuery + "&filter[platform]=MAC_OS": `{"data":[],"links":{"next":""}}`,
 	}, &log)

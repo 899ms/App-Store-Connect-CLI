@@ -20,13 +20,13 @@ const (
 	DefaultAppStoreVersionSourceLive     = "live"
 )
 
-// DefaultEditableAppStoreVersionStates lists the appVersionState values whose
-// metadata can still be edited in App Store Connect. The order is stable so
-// requests and help text are deterministic. READY_FOR_REVIEW belongs here: it
-// is the state a finished draft sits in before submission, so omitting it would
-// make an app holding a ready draft alongside an older release resolve to the
-// release instead of the draft being worked on.
-var DefaultEditableAppStoreVersionStates = []string{
+// defaultActiveEditableAppVersionStates lists the modern appVersionState values
+// for drafts whose metadata can still be edited in App Store Connect. The order
+// is stable so requests and help text are deterministic. READY_FOR_REVIEW
+// belongs here: it is the state a finished draft sits in before submission, so
+// omitting it would make an app holding a ready draft alongside an older
+// release resolve to the release instead of the draft being worked on.
+var defaultActiveEditableAppVersionStates = []string{
 	"DEVELOPER_REJECTED",
 	"INVALID_BINARY",
 	"METADATA_REJECTED",
@@ -35,6 +35,13 @@ var DefaultEditableAppStoreVersionStates = []string{
 	"REJECTED",
 	"WAITING_FOR_REVIEW",
 }
+
+// defaultRemovedEditableAppStoreVersionStates is a lower-priority editable
+// fallback for apps without an active draft. Apple exposes this legacy state
+// only through filter[appStoreState], so it cannot be mixed into the modern
+// query above. Keeping it below active drafts prevents a removed listing from
+// overriding the version currently being prepared.
+var defaultRemovedEditableAppStoreVersionStates = []string{"DEVELOPER_REMOVED_FROM_SALE"}
 
 // defaultLiveAppStoreVersionStates lists the legacy appStoreState values that
 // mark the version currently on the App Store.
@@ -129,11 +136,18 @@ func ResolveDefaultAppStoreVersion(ctx context.Context, client *asc.Client, appI
 	}
 	trimmedPlatform := strings.ToUpper(strings.TrimSpace(platform))
 
-	editable, err := listDefaultVersionCandidates(ctx, client, trimmedAppID, trimmedPlatform, asc.WithAppStoreVersionsVersionStates(DefaultEditableAppStoreVersionStates))
+	editable, err := listDefaultVersionCandidates(ctx, client, trimmedAppID, trimmedPlatform, asc.WithAppStoreVersionsVersionStates(defaultActiveEditableAppVersionStates))
 	if err != nil {
 		return DefaultAppStoreVersion{}, err
 	}
 	if selected, ok, err := selectDefaultAppStoreVersion(trimmedAppID, DefaultAppStoreVersionSourceEditable, editable); ok || err != nil {
+		return selected, err
+	}
+	removedEditable, err := listDefaultVersionCandidates(ctx, client, trimmedAppID, trimmedPlatform, asc.WithAppStoreVersionsStates(defaultRemovedEditableAppStoreVersionStates))
+	if err != nil {
+		return DefaultAppStoreVersion{}, err
+	}
+	if selected, ok, err := selectDefaultAppStoreVersion(trimmedAppID, DefaultAppStoreVersionSourceEditable, removedEditable); ok || err != nil {
 		return selected, err
 	}
 

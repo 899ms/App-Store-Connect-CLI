@@ -57,7 +57,7 @@ Examples:
 func LocalizationsListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 
-	versionID := fs.String("version", "", "App Store version ID; defaults to the --app's editable version, else its live version")
+	versionID := fs.String("version", "", "App Store version ID; defaults to the --app's active editable version, then a developer-removed version, else its live version")
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env)")
 	appInfoID := fs.String("app-info", "", "App Info ID (optional override)")
 	platform := fs.String("platform", "", "Platform used to pick the default version when --version is omitted: IOS, MAC_OS, TV_OS, or VISION_OS")
@@ -76,10 +76,10 @@ func LocalizationsListCommand() *ffcli.Command {
 		ShortHelp:  "List localization metadata for an app or version.",
 		LongHelp: `List localization metadata for an app or version.
 
-For version localizations, omit --version to use the --app's newest editable
+For version localizations, omit --version to use the --app's newest active editable
 App Store version (PREPARE_FOR_SUBMISSION, DEVELOPER_REJECTED, REJECTED,
 METADATA_REJECTED, READY_FOR_REVIEW, WAITING_FOR_REVIEW, or INVALID_BINARY),
-falling back to the live version. The selected version is reported on stderr.
+then a DEVELOPER_REMOVED_FROM_SALE version, and finally the live version. The selected version is reported on stderr.
 Pass --platform when the app has candidate versions on more than one platform.
 For this command, --version accepts an App Store version ID, not a display
 version string.

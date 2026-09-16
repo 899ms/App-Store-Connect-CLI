@@ -9,8 +9,9 @@ unsupported flags produce a targeted recovery message that points to `--dir`
 and shows `asc metadata pull` when local metadata must be fetched first.
 
 `asc metadata pull --version` is optional. When it is omitted, the CLI first
-selects the app's newest editable App Store version and falls back to its newest
-live version. The selected version and platform are reported on stderr. If the
+selects the app's newest active editable App Store version, then a
+developer-removed-from-sale version, and finally its newest live version. The
+selected version and platform are reported on stderr. If the
 chosen tier has candidates on several platforms, the command stops before any
 file write and lists the `--platform` values that can disambiguate the request.
 If no editable or live version exists, it also stops before writing files.

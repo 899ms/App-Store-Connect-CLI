@@ -85,6 +85,7 @@ func TestMetadataPullDefaultVersionSelectionErrorsDoNotWriteFiles(t *testing.T) 
 			name: "missing",
 			versions: map[string]string{
 				editableVersionStateQuery:   `{"data":[],"links":{"next":""}}`,
+				removedEditableStateQuery:   `{"data":[],"links":{"next":""}}`,
 				liveVersionStateQuery:       `{"data":[],"links":{"next":""}}`,
 				liveVersionModernStateQuery: `{"data":[],"links":{"next":""}}`,
 			},
