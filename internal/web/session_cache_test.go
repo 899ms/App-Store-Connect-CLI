@@ -1817,6 +1817,70 @@ func TestDeleteSessionIfMatchesRemovesTheEntryItLoaded(t *testing.T) {
 	}
 }
 
+// A source-specific read failure must not make cleanup fall back to the
+// configured primary backend. That backend can contain an unrelated session
+// for the same account while the default identity came from the keychain.
+func TestDeleteSessionIfMatchesReadFailureDoesNotDeleteOtherBackend(t *testing.T) {
+	kr := withArraySessionKeyring(t)
+	t.Setenv(webSessionCacheEnabledEnv, "1")
+	t.Setenv(webSessionBackendEnv, "")
+	t.Setenv(webSessionCacheDirEnv, filepath.Join(t.TempDir(), "web-cache"))
+
+	key := webSessionCacheKey(webTestSessionEmail)
+	fileSession := webTestPersistedSession(t, "file-token", time.Now().UTC())
+	if err := writeSessionToFile(key, fileSession); err != nil {
+		t.Fatalf("writeSessionToFile error: %v", err)
+	}
+	if err := kr.Set(keyring.Item{Key: webSessionStoreItem, Data: []byte("{")}); err != nil {
+		t.Fatalf("seed malformed keychain store: %v", err)
+	}
+
+	loaded := &AuthSession{
+		UserEmail:        webTestSessionEmail,
+		cachedUpdatedAt:  time.Now().UTC(),
+		cachedGeneration: "keychain-generation",
+		cachedSource:     CachedSessionSourceKeychain,
+	}
+	deleted, err := DeleteSessionIfMatches(webTestSessionEmail, loaded)
+	if !errors.Is(err, errMalformedSessionStore) {
+		t.Fatalf("DeleteSessionIfMatches error = %v, want malformed keychain store", err)
+	}
+	if !deleted {
+		t.Fatal("expected cleanup to be attempted for the unreadable source entry")
+	}
+
+	stored, ok, err := readSessionFromFile(key)
+	if err != nil || !ok {
+		t.Fatalf("expected unrelated file session to survive, ok=%v error=%v", ok, err)
+	}
+	if got := persistedMyacinfoCookieValue(stored, "https://appstoreconnect.apple.com/"); got != "file-token" {
+		t.Fatalf("expected unrelated file cookie to survive, got %q", got)
+	}
+}
+
+func TestSourceSpecificSessionReadsHonorDisabledCache(t *testing.T) {
+	kr := withArraySessionKeyring(t)
+	t.Setenv(webSessionCacheEnabledEnv, "1")
+	t.Setenv(webSessionCacheDirEnv, filepath.Join(t.TempDir(), "web-cache"))
+
+	key := webSessionCacheKey(webTestSessionEmail)
+	if err := writeSessionToKeychain(key, webTestPersistedSession(t, "keychain-token", time.Now().UTC())); err != nil {
+		t.Fatalf("writeSessionToKeychain error: %v", err)
+	}
+	kr.ResetCounts()
+	t.Setenv(webSessionCacheEnabledEnv, "0")
+
+	if loaded, ok, err := LoadCachedSessionFromSource(webTestSessionEmail, CachedSessionSourceKeychain); err != nil || ok || loaded != nil {
+		t.Fatalf("LoadCachedSessionFromSource = (%v, %v, %v), want disabled cache miss", loaded, ok, err)
+	}
+	if resumed, ok, err := TryResumeSessionFromSource(context.Background(), webTestSessionEmail, CachedSessionSourceKeychain); err != nil || ok || resumed != nil {
+		t.Fatalf("TryResumeSessionFromSource = (%v, %v, %v), want disabled cache miss", resumed, ok, err)
+	}
+	if got := kr.GetCount(webSessionStoreItem); got != 0 {
+		t.Fatalf("disabled source-specific reads touched the keychain %d times", got)
+	}
+}
+
 // A caller with no stamp to compare (a freshly logged-in session) keeps the
 // unconditional delete rather than silently skipping it.
 func TestDeleteSessionIfMatchesFallsBackWhenNoStampIsAvailable(t *testing.T) {
