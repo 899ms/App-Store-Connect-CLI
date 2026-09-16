@@ -119,6 +119,7 @@ type AuthSession struct {
 	// replacement another process persisted in the meantime intact.
 	cachedUpdatedAt  time.Time
 	cachedGeneration string
+	cachedSource     CachedSessionSource
 
 	// Prepared 2FA delivery state so callers can request code delivery before prompting.
 	twoFactorMethod        string
