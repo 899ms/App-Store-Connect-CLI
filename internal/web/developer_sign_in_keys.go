@@ -32,6 +32,23 @@ type DeveloperSignInKeysResult struct {
 
 func (r *DeveloperSignInKeysResult) MarshalJSON() ([]byte, error) { return r.Raw, nil }
 
+// developerSignInKeyDownloadRecoveryError retains a successful response that
+// failed P8 validation. Apple may consume a one-time download even when it
+// returns a malformed body, so callers need a private recovery path without
+// exposing the response through the error text.
+type developerSignInKeyDownloadRecoveryError struct {
+	cause error
+	body  []byte
+}
+
+func (e *developerSignInKeyDownloadRecoveryError) Error() string { return e.cause.Error() }
+
+func (e *developerSignInKeyDownloadRecoveryError) Unwrap() error { return e.cause }
+
+func (e *developerSignInKeyDownloadRecoveryError) RecoveryBody() []byte {
+	return append([]byte(nil), e.body...)
+}
+
 func parseDeveloperSignInKeys(body []byte) (*DeveloperSignInKeysResult, error) {
 	var envelope struct {
 		ResultCode *int                 `json:"resultCode"`
@@ -181,7 +198,7 @@ func (c *Client) DownloadDeveloperSignInKey(ctx context.Context, keyID string) (
 		return nil, err
 	}
 	if err := validateAPIKeyP8(body); err != nil {
-		return nil, err
+		return nil, &developerSignInKeyDownloadRecoveryError{cause: err, body: append([]byte(nil), body...)}
 	}
 	return body, nil
 }
