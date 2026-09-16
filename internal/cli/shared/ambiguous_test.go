@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 )
@@ -96,6 +97,59 @@ func TestAmbiguousErrorSanitizesCandidateText(t *testing.T) {
 	msg := err.Error()
 	if strings.Contains(msg, "\x1b") || strings.Count(msg, "\n") != 2 {
 		t.Fatalf("candidate text must be sanitized:\n%q", msg)
+	}
+}
+
+func TestAmbiguousErrorBoundsProviderTextAndPreservesRecoveryID(t *testing.T) {
+	recoveryID := "iap-recovery-id-" + strings.Repeat("9", AmbiguousDiagnosticTextLimit+32)
+	providerText := strings.Repeat("界", AmbiguousDiagnosticTextLimit)
+	err := &AmbiguousSelectionError{
+		Kind:             "in-app purchase",
+		Description:      providerText + "\nselector-tail",
+		Flag:             "--iap-id",
+		DisplayTextLimit: AmbiguousDiagnosticTextLimit,
+		Candidates: []AmbiguousCandidate{{
+			ID:    recoveryID,
+			Label: providerText + "\x1b[31m-label-tail",
+			Extra: providerText + "\u202e-extra-tail",
+		}},
+		Hint: providerText + "\x00-hint-tail",
+	}
+
+	message := err.Error()
+	if !utf8.ValidString(message) {
+		t.Fatalf("ambiguity message must remain valid UTF-8: %q", message)
+	}
+	if strings.Contains(message, "selector-tail") || strings.Contains(message, "-label-tail") || strings.Contains(message, "-extra-tail") || strings.Contains(message, "-hint-tail") {
+		t.Fatalf("provider text beyond the field bound must not be rendered: %q", message)
+	}
+	if strings.Contains(message, recoveryID) {
+		t.Fatalf("displayed recovery ID should be bounded: %q", message)
+	}
+	if !strings.Contains(message, recoveryID[:len("iap-recovery-id-")]) {
+		t.Fatalf("bounded recovery ID should retain useful context: %q", message)
+	}
+	if strings.ContainsAny(message, "\x00\x1b\u202e") {
+		t.Fatalf("provider terminal controls must not be rendered: %q", message)
+	}
+
+	for _, field := range []string{sanitizeAmbiguousText(err.Description, err.DisplayTextLimit), sanitizeAmbiguousText(err.Candidates[0].Label, err.DisplayTextLimit), sanitizeAmbiguousText(err.Candidates[0].Extra, err.DisplayTextLimit), sanitizeAmbiguousText(err.Hint, err.DisplayTextLimit)} {
+		if len(field) > AmbiguousDiagnosticTextLimit {
+			t.Fatalf("sanitized provider field is %d bytes, want <= %d: %q", len(field), AmbiguousDiagnosticTextLimit, field)
+		}
+		if !utf8.ValidString(field) {
+			t.Fatalf("sanitized provider field must remain valid UTF-8: %q", field)
+		}
+	}
+}
+
+func TestSanitizeAmbiguousTextReplacesInvalidUTF8(t *testing.T) {
+	got := sanitizeAmbiguousText(string([]byte{'o', 'k', 0xff, 0xfe, ' ', 't', 'a', 'i', 'l'}))
+	if !utf8.ValidString(got) {
+		t.Fatalf("sanitized text must remain valid UTF-8: %q", got)
+	}
+	if got != "ok�� tail" {
+		t.Fatalf("invalid UTF-8 must be replaced without dropping surrounding context: %q", got)
 	}
 }
 
