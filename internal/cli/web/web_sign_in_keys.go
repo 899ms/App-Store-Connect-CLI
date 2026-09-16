@@ -107,6 +107,11 @@ var downloadDeveloperSignInKeyFn = func(ctx context.Context, client *webcore.Cli
 	return client.DownloadDeveloperSignInKey(ctx, keyID)
 }
 
+type signInKeyDownloadRecovery interface {
+	error
+	RecoveryBody() []byte
+}
+
 func WebSignInKeysCreateCommand() *ffcli.Command   { return webSignInKeySaveCommand(true) }
 func WebSignInKeysDownloadCommand() *ffcli.Command { return webSignInKeySaveCommand(false) }
 
@@ -253,32 +258,45 @@ func webSignInKeySaveCommand(create bool) *ffcli.Command {
 		defer func() { _ = root.RemoveFileIfSameIdentity(fileName, reservation) }()
 		p8, err := downloadDeveloperSignInKeyFn(requestCtx, client, keyID)
 		if err != nil {
+			var recovery signInKeyDownloadRecovery
+			if errors.As(err, &recovery) {
+				raw := recovery.RecoveryBody()
+				if len(raw) > 0 {
+					// The one-time response may already be consumed. Preserve the
+					// raw bytes privately before returning the validation error.
+					keepStage = true
+					writeErr := writeSignInKeyStage(stagedFile, raw)
+					if writeErr != nil {
+						cleanupErr := root.RemoveFileIfSameIdentity(fileName, reservation)
+						return errors.Join(
+							fmt.Errorf("key %s returned an invalid one-time response; private recovery file at %s may be partial; inspect before retrying; do not retry automatically: %w", keyID, stagedPath, writeErr),
+							err,
+							cleanupErr,
+						)
+					}
+					if verifyErr := verifySignInKeyStage(root, stagedName, stagedFile); verifyErr != nil {
+						cleanupErr := root.RemoveFileIfSameIdentity(fileName, reservation)
+						return errors.Join(
+							fmt.Errorf("key %s returned an invalid one-time response; inspect recovery path %s before retrying; do not retry automatically: %w", keyID, stagedPath, verifyErr),
+							err,
+							cleanupErr,
+						)
+					}
+					cleanupErr := root.RemoveFileIfSameIdentity(fileName, reservation)
+					return errors.Join(fmt.Errorf("key %s returned an invalid one-time response; raw response retained at %s; inspect before retrying; do not retry automatically: %w", keyID, stagedPath, err), cleanupErr)
+				}
+			}
 			cleanupErr := root.RemoveFileIfSameIdentity(fileName, reservation)
 			return errors.Join(fmt.Errorf("key %s exists, but download failed; inspect before retrying: %w", keyID, err), cleanupErr)
 		}
 		keepStage = true
-		written, writeErr := stagedFile.Write(p8)
-		if writeErr == nil && written != len(p8) {
-			writeErr = io.ErrShortWrite
-		}
-		writeErr = errors.Join(writeErr, stagedFile.Sync())
+		writeErr := writeSignInKeyStage(stagedFile, p8)
 		if writeErr != nil {
 			cleanupErr := root.RemoveFileIfSameIdentity(fileName, reservation)
 			return errors.Join(fmt.Errorf("key %s downloaded but writing failed; private recovery file at %s may be partial; inspect before retrying because the one-time download may be consumed: %w", keyID, stagedPath, writeErr), cleanupErr)
 		}
-		// Verify the named recovery file still refers to our open private inode.
-		saved, err := root.OpenFile(stagedName)
-		if err != nil {
-			return fmt.Errorf("key %s downloaded; inspect recovery path %s: %w", keyID, stagedPath, err)
-		}
-		savedInfo, statErr := saved.Stat()
-		openInfo, openErr := stagedFile.Stat()
-		closeErr := saved.Close()
-		if err = errors.Join(statErr, openErr, closeErr); err != nil {
+		if err = verifySignInKeyStage(root, stagedName, stagedFile); err != nil {
 			return fmt.Errorf("key %s downloaded; inspect private recovery file %s before retrying: %w", keyID, stagedPath, err)
-		}
-		if !os.SameFile(savedInfo, openInfo) {
-			return fmt.Errorf("key %s downloaded but recovery path %s was replaced; inspect before retrying", keyID, stagedPath)
 		}
 		if err = stagedFile.Close(); err != nil {
 			return fmt.Errorf("key %s downloaded; inspect private recovery file %s: %w", keyID, stagedPath, err)
@@ -296,6 +314,32 @@ func webSignInKeySaveCommand(create bool) *ffcli.Command {
 		persistDeveloperPortalSession(session)
 		return shared.PrintOutput(&asc.WebSignInKeyReceipt{KeyID: keyID, Name: name, BundleID: bundleID, P8Path: filepath.Join(root.Path(), fileName)}, *output.Output, *output.Pretty)
 	}}
+}
+
+func writeSignInKeyStage(stagedFile *os.File, p8 []byte) error {
+	written, err := stagedFile.Write(p8)
+	if err == nil && written != len(p8) {
+		err = io.ErrShortWrite
+	}
+	return errors.Join(err, stagedFile.Sync())
+}
+
+func verifySignInKeyStage(root rootfs.Root, stagedName string, stagedFile *os.File) error {
+	// Verify the named recovery file still refers to our open private inode.
+	saved, err := root.OpenFile(stagedName)
+	if err != nil {
+		return err
+	}
+	savedInfo, statErr := saved.Stat()
+	openInfo, openErr := stagedFile.Stat()
+	closeErr := saved.Close()
+	if err := errors.Join(statErr, openErr, closeErr); err != nil {
+		return err
+	}
+	if !os.SameFile(savedInfo, openInfo) {
+		return fmt.Errorf("recovery path was replaced")
+	}
+	return nil
 }
 
 func syncSignInKeyDirectory(root *os.Root) error {
