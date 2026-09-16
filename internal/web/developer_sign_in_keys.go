@@ -41,17 +41,17 @@ func parseDeveloperSignInKeys(body []byte) (*DeveloperSignInKeysResult, error) {
 		return nil, fmt.Errorf("invalid Developer Portal key response")
 	}
 	if envelope.ResultCode == nil {
-		return nil, fmt.Errorf("Developer Portal key response missing result code")
+		return nil, fmt.Errorf("developer portal key response missing result code")
 	}
 	if *envelope.ResultCode != 0 {
-		return nil, fmt.Errorf("Developer Portal key request failed (result code %d)", *envelope.ResultCode)
+		return nil, fmt.Errorf("developer portal key request failed (result code %d)", *envelope.ResultCode)
 	}
 	if envelope.Keys == nil {
-		return nil, fmt.Errorf("Developer Portal key response missing keys")
+		return nil, fmt.Errorf("developer portal key response missing keys")
 	}
 	for _, key := range envelope.Keys {
 		if !developerKeyIDPattern.MatchString(key.KeyID) {
-			return nil, fmt.Errorf("Developer Portal returned invalid key ID")
+			return nil, fmt.Errorf("developer portal returned invalid key ID")
 		}
 	}
 	return &DeveloperSignInKeysResult{Keys: envelope.Keys, Raw: body}, nil
@@ -88,7 +88,7 @@ func (c *Client) GetDeveloperSignInKey(ctx context.Context, keyID string) (*Deve
 		return nil, err
 	}
 	if len(result.Keys) != 1 || result.Keys[0].KeyID != keyID {
-		return nil, fmt.Errorf("Developer Portal returned mismatched key")
+		return nil, fmt.Errorf("developer portal returned mismatched key")
 	}
 	result.Keys[0].Raw = result.Raw
 	return &result.Keys[0], nil
