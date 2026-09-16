@@ -318,6 +318,11 @@ the App Store Connect web-client source captured for issue #2299:
 - `--api-debug` and `ASC_DEBUG=api` log each response's raw `X-Rate-Limit` value to stderr without changing stdout.
 - Some endpoints return 403 when the API key role lacks permission (e.g., finance reports, reviews).
 
+## Profiles and certificates list filters
+
+- `GET /v1/profiles` and `GET /v1/certificates` do not accept `filter[platform]`. `UNIVERSAL` is a bundle-ID platform, and sending it on these list endpoints is rejected by Apple. `asc profiles list` and `asc certificates list` must not add that parameter. Bundle ID list is the endpoint that accepts `filter[platform]`, including `UNIVERSAL`.
+- Generated provisioning-profile names have no documented maximum length in the OpenAPI snapshot. Do not truncate them until a live response proves the limit.
+
 ## Builds
 
 - `GET /v1/apps/{id}/builds` has no documented default order and rejects `sort` with 400 `PARAMETER_ERROR.ILLEGAL`; with `limit=1` it can return a weeks-stale build that reads as "latest". Use the top-level collection instead: `GET /v1/builds?filter[app]={id}&sort=-uploadedDate&limit=1`.
