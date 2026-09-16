@@ -216,3 +216,68 @@ func TestDefaultCachedAppleIDAutoBackendFallsBackToKeychainWhenFileCacheEmpty(t 
 		t.Fatalf("keychain store read %d times, want 0", kr.GetCount(webSessionStoreItem))
 	}
 }
+
+func TestDefaultCachedAppleIDAutoBackendFallsBackToKeychainWhenFileCacheHasNoUsableIdentity(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(webSessionBackendEnv, "auto")
+	t.Setenv(webSessionCacheDirEnv, dir)
+	writeDefaultTestSessionFile(t, dir, "", webSessionCacheVersion)
+	kr := withArraySessionKeyring(t)
+
+	store := newPersistedSessionStore()
+	store.Sessions[webSessionCacheKey("kc@example.com")] = persistedSession{
+		Version:   webSessionCacheVersion,
+		UpdatedAt: time.Now(),
+		UserEmail: "kc@example.com",
+	}
+	raw, err := json.Marshal(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := kr.Set(keyring.Item{Key: webSessionStoreItem, Data: raw}); err != nil {
+		t.Fatal(err)
+	}
+	kr.ResetCounts()
+
+	appleID, err := DefaultCachedAppleID()
+	if err != nil {
+		t.Fatalf("DefaultCachedAppleID() error = %v", err)
+	}
+	if appleID != "kc@example.com" {
+		t.Fatalf("appleID = %q, want kc@example.com", appleID)
+	}
+	if got := kr.GetCount(webSessionStoreItem); got != 1 {
+		t.Fatalf("keychain store read %d times, want 1", got)
+	}
+}
+
+func TestDefaultCachedAppleIDExplicitFileBackendDoesNotFallbackForAnonymousCache(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(webSessionBackendEnv, "file")
+	t.Setenv(webSessionCacheDirEnv, dir)
+	writeDefaultTestSessionFile(t, dir, "", webSessionCacheVersion)
+	kr := withArraySessionKeyring(t)
+
+	store := newPersistedSessionStore()
+	store.Sessions[webSessionCacheKey("kc@example.com")] = persistedSession{
+		Version:   webSessionCacheVersion,
+		UpdatedAt: time.Now(),
+		UserEmail: "kc@example.com",
+	}
+	raw, err := json.Marshal(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := kr.Set(keyring.Item{Key: webSessionStoreItem, Data: raw}); err != nil {
+		t.Fatal(err)
+	}
+	kr.ResetCounts()
+
+	appleID, err := DefaultCachedAppleID()
+	if !errors.Is(err, ErrNoCachedSession) {
+		t.Fatalf("DefaultCachedAppleID() = %q, %v; want ErrNoCachedSession", appleID, err)
+	}
+	if got := kr.GetCount(webSessionStoreItem); got != 0 {
+		t.Fatalf("keychain store read %d times, want 0", got)
+	}
+}

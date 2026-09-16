@@ -47,13 +47,18 @@ func DefaultCachedAppleID() (string, error) {
 
 // CachedSessionAppleIDs lists the Apple IDs of every cached web session in the
 // selected backend, sorted case-insensitively. Like the last-session lookup, an
-// automatic backend consults the keychain only when the file cache is empty.
+// automatic backend consults the keychain when the file cache has no usable
+// account identity.
 func CachedSessionAppleIDs() ([]string, error) {
 	selection := resolveBackendSelection()
 	sessions, err := listSessionsBySelection(selection)
 	if err != nil {
 		return nil, err
 	}
+	return cachedSessionAppleIDs(sessions), nil
+}
+
+func cachedSessionAppleIDs(sessions []persistedSession) []string {
 	seen := map[string]struct{}{}
 	appleIDs := make([]string, 0, len(sessions))
 	for _, sess := range sessions {
@@ -71,7 +76,7 @@ func CachedSessionAppleIDs() ([]string, error) {
 	sort.Slice(appleIDs, func(i, j int) bool {
 		return strings.ToLower(appleIDs[i]) < strings.ToLower(appleIDs[j])
 	})
-	return appleIDs, nil
+	return appleIDs
 }
 
 func listSessionsBySelection(selection backendSelection) ([]persistedSession, error) {
@@ -95,7 +100,7 @@ func listSessionsBySelection(selection backendSelection) ([]persistedSession, er
 		if err != nil {
 			return nil, err
 		}
-		if len(sessions) > 0 || !selection.fallbackKeychain {
+		if len(cachedSessionAppleIDs(sessions)) > 0 || !selection.fallbackKeychain {
 			return sessions, nil
 		}
 		fallback, err := listSessionsFromKeychain()

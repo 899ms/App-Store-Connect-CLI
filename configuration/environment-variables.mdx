@@ -189,10 +189,11 @@ They do not replace `ASC_KEY_ID`, `ASC_ISSUER_ID`, or the other API credentials.
   Session cache backend: `file`, `keychain`, `auto`, or `off`
 
   Unset, `auto`, and unrecognized values select the file cache with a keychain
-  fallback when the file cache is empty. `file` restricts caching to the cache
-  directory, `keychain` uses the keychain but still reads the file cache as a
-  fallback, and `off`, `none`, or `disabled` disables caching. A cache disabled
-  through `ASC_WEB_SESSION_CACHE` wins over this value.
+  fallback when the file cache has no usable account identity. `file` restricts
+  caching to the cache directory, `keychain` uses the keychain but still reads
+  the file cache as a fallback, and `off`, `none`, or `disabled` disables
+  caching. A cache disabled through `ASC_WEB_SESSION_CACHE` wins over this
+  value.
 </ParamField>
 
 <ParamField path="ASC_WEB_SESSION_CACHE_DIR" type="string">
