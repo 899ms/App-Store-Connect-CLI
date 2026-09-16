@@ -89,6 +89,13 @@ func TestAmbiguousErrorWithoutFlagAndWithHint(t *testing.T) {
 	}
 }
 
+func TestAmbiguousErrorSampleWithoutFlagLabelsCandidatesAsSample(t *testing.T) {
+	err := MarkAmbiguousSelectionSample(AmbiguousError("source app store version", "", `version "1.2.3"`, []AmbiguousCandidate{{ID: "version-1"}}))
+	if !strings.Contains(err.Error(), "; these are sample matches:") {
+		t.Fatalf("expected sample wording without a disambiguating flag, got %q", err)
+	}
+}
+
 func TestAmbiguousErrorSanitizesCandidateText(t *testing.T) {
 	err := AmbiguousError("app", "--app", "x", []AmbiguousCandidate{
 		{ID: "1", Label: "bad\nname\x1b[31m"},
@@ -185,6 +192,35 @@ func TestAmbiguousUsageErrorPrintsEveryLineAndKeepsUsageExit(t *testing.T) {
 	want := "Error: 2 app store versions match \"1.2.3\"; pass --platform with one of:\n  v-ios  IOS\n  v-mac  MAC_OS\n"
 	if stderr != want {
 		t.Fatalf("unexpected stderr:\n got: %q\nwant: %q", stderr, want)
+	}
+}
+
+func TestAmbiguousUsageErrorWithKindPreservesRequestedClassification(t *testing.T) {
+	original := AmbiguousError("app store version", "--platform", "1.2.3", []AmbiguousCandidate{{ID: "version-ios"}})
+	stderr := captureStderr(t, func() {
+		err := AmbiguousUsageErrorWithKind(original, UsageErrorMissingRequired)
+		if !errors.Is(err, flag.ErrHelp) {
+			t.Fatalf("expected usage-class error, got %T %v", err, err)
+		}
+		if !IsAmbiguousSelection(err) {
+			t.Fatal("usage wrapper must preserve ambiguity classification")
+		}
+		if ClassifyUsageError(err) != UsageErrorMissingRequired {
+			t.Fatalf("unexpected usage kind %q", ClassifyUsageError(err))
+		}
+	})
+	if !strings.HasPrefix(stderr, "Error: 1 app store versions match") {
+		t.Fatalf("unexpected stderr: %q", stderr)
+	}
+}
+
+func TestMarkAmbiguousSelectionSample(t *testing.T) {
+	err := AmbiguousError("app", "--app", "Example", []AmbiguousCandidate{{ID: "app-1"}})
+	if got := MarkAmbiguousSelectionSample(err); !errors.Is(got, err) {
+		t.Fatalf("expected marker to preserve error identity")
+	}
+	if !strings.HasPrefix(err.Error(), `multiple apps match "Example"; pass --app with one of these sample matches:`) {
+		t.Fatalf("expected sample ambiguity wording, got %q", err)
 	}
 }
 

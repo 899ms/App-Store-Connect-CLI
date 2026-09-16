@@ -81,7 +81,11 @@ func (e *AmbiguousSelectionError) Error() string {
 			fmt.Fprintf(&b, "; pass %s with one of:", flag)
 		}
 	} else {
-		b.WriteString(":")
+		if e.CandidatesAreSample {
+			b.WriteString("; these are sample matches:")
+		} else {
+			b.WriteString(":")
+		}
 	}
 
 	shown := e.Candidates
@@ -137,6 +141,15 @@ func IsAmbiguousSelection(err error) bool {
 // this because its terminal sanitizer flattens the candidate table onto one
 // line.
 func AmbiguousUsageError(err error) error {
+	return AmbiguousUsageErrorWithKind(err, UsageErrorOther)
+}
+
+// AmbiguousUsageErrorWithKind prints an ambiguity error to stderr line by
+// line and returns a usage-class error (exit code 2) with the requested
+// telemetry classification. The default AmbiguousUsageError intentionally
+// remains UsageErrorOther for callers whose ambiguity is not a missing or
+// invalid flag.
+func AmbiguousUsageErrorWithKind(err error, kind UsageErrorKind) error {
 	if err == nil {
 		return nil
 	}
@@ -148,9 +161,24 @@ func AmbiguousUsageError(err error) error {
 	// the candidates; cmd does not reprint usage-class errors, so this cannot
 	// duplicate the stderr output above.
 	return NewErrorWithCause(
-		classifiedUsageError{kind: UsageErrorOther, message: message},
+		classifiedUsageError{kind: kind, message: message},
 		err,
 	)
+}
+
+// MarkAmbiguousSelectionSample marks an ambiguity whose candidates came from
+// a response that advertises another page. The returned error keeps its
+// concrete type and wrapping chain so callers can still inspect the
+// candidates and classify the failure.
+func MarkAmbiguousSelectionSample(err error) error {
+	if err == nil {
+		return nil
+	}
+	var ambiguous *AmbiguousSelectionError
+	if errors.As(err, &ambiguous) {
+		ambiguous.CandidatesAreSample = true
+	}
+	return err
 }
 
 func sanitizeAmbiguousText(value string, limit ...int) string {
