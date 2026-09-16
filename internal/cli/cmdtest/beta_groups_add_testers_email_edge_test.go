@@ -99,8 +99,8 @@ func TestBetaGroupsAddTestersMergesTesterAndEmailWithoutDuplicates(t *testing.T)
 		}
 	})
 
-	if stdout != "" {
-		t.Fatalf("expected empty stdout, got %q", stdout)
+	if !strings.Contains(stdout, `"action":"added"`) || !strings.Contains(stdout, `"testerIds":["tester-1"]`) {
+		t.Fatalf("expected an added receipt for the deduped tester, got %q", stdout)
 	}
 	if !strings.Contains(stderr, "Successfully added 1 tester(s) to group group-1") {
 		t.Fatalf("expected deduped success message, got %q", stderr)
