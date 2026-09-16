@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"net/http"
 	"strings"
 	"testing"
 
 	rootcmd "github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/validate"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/validation"
 )
 
 const (
@@ -77,14 +79,149 @@ func TestValidateDefaultsToLiveVersionWhenNoEditableVersion(t *testing.T) {
 		liveVersionStateQuery:       `{"data":[{"type":"appStoreVersions","id":"ver-1","attributes":{"platform":"IOS","versionString":"1.0","appStoreState":"READY_FOR_SALE","appVersionState":"READY_FOR_DISTRIBUTION","createdDate":"2026-01-01T00:00:00Z"}}],"links":{"next":""}}`,
 		liveVersionModernStateQuery: `{"data":[],"links":{"next":""}}`,
 	}
+	fixture.version = `{"data":{"type":"appStoreVersions","id":"ver-1","attributes":{"platform":"IOS","versionString":"1.0","appVersionState":"READY_FOR_DISTRIBUTION","copyright":"2026 Test Company"},"relationships":{"app":{"data":{"type":"apps","id":"app-1"}}}}}`
 
-	_, stderr, runErr := runValidateWithFixture(t, fixture, "validate", "--app", "app-1")
-	if runErr != nil {
-		t.Fatalf("Run() error = %v", runErr)
+	stdout, stderr, runErr := runValidateWithFixture(t, fixture, "validate", "--app", "app-1", "--output", "json")
+	if runErr == nil {
+		t.Fatal("expected live version readiness to remain blocked")
+	}
+	if got := rootcmd.ExitCodeFromError(runErr); got != rootcmd.ExitError {
+		t.Fatalf("exit code = %d, want %d; err=%v", got, rootcmd.ExitError, runErr)
 	}
 	wantNote := "Using version 1.0 (READY_FOR_DISTRIBUTION) for platform IOS; pass --version to override\n"
 	if stderr != wantNote {
 		t.Fatalf("stderr = %q, want %q", stderr, wantNote)
+	}
+	var report validation.Report
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("unmarshal report: %v\nstdout=%q", err, stdout)
+	}
+	if !hasCheckWithID(report.Checks, "version.state.editable") {
+		t.Fatalf("expected live version state blocker, got %#v", report.Checks)
+	}
+}
+
+func TestValidateDefaultsToReadyForReviewWithoutStateBlocker(t *testing.T) {
+	t.Setenv("ASC_APP_ID", "")
+	fixture := validValidateFixture()
+	fixture.versions = ""
+	fixture.versionsByQuery = map[string]string{
+		editableVersionStateQuery: `{"data":[{"type":"appStoreVersions","id":"ver-1","attributes":{"platform":"IOS","versionString":"1.0","appVersionState":"READY_FOR_REVIEW","createdDate":"2026-02-01T00:00:00Z","copyright":"2026 Test Company"}}],"links":{"next":""}}`,
+	}
+	fixture.version = `{"data":{"type":"appStoreVersions","id":"ver-1","attributes":{"platform":"IOS","versionString":"1.0","appVersionState":"READY_FOR_REVIEW","copyright":"2026 Test Company"},"relationships":{"app":{"data":{"type":"apps","id":"app-1"}}}}}`
+
+	stdout, _, runErr := runValidateWithFixture(t, fixture, "validate", "--app", "app-1", "--output", "json")
+	if runErr != nil {
+		t.Fatalf("Run() error = %v", runErr)
+	}
+	var report validation.Report
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("unmarshal report: %v\nstdout=%q", err, stdout)
+	}
+	if hasCheckWithID(report.Checks, "version.state.editable") {
+		t.Fatalf("did not expect READY_FOR_REVIEW state blocker, got %#v", report.Checks)
+	}
+}
+
+func TestValidateDeepDefaultVersionReturnsAgreementFallbackDuringDiscovery(t *testing.T) {
+	t.Setenv("ASC_APP_ID", "")
+	t.Setenv("ASC_WEB_SESSION_CACHE_BACKEND", "off")
+	fixture := validValidateFixture()
+	fixture.versions = ""
+	fixture.versionsByQuery = map[string]string{
+		editableVersionStateQuery: `{"errors":[{"status":"403","code":"FORBIDDEN.REQUIRED_AGREEMENTS_MISSING_OR_EXPIRED","title":"A required agreement is missing or has expired","detail":"This request requires an in-effect agreement."}]}`,
+	}
+	fixture.versionsStatusByQuery = map[string]int{editableVersionStateQuery: 403}
+	var paths []string
+	fixture.requestObserver = func(req *http.Request) { paths = append(paths, req.URL.Path) }
+
+	stdout, stderr, runErr := runValidateWithFixture(t, fixture, "validate", "--app", "app-1", "--deep", "--output", "json")
+	if got := rootcmd.ExitCodeFromError(runErr); got != rootcmd.ExitError {
+		t.Fatalf("exit code = %d, want %d; err=%v", got, rootcmd.ExitError, runErr)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want no selection note", stderr)
+	}
+	var report validation.Report
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("unmarshal report: %v\nstdout=%q", err, stdout)
+	}
+	if report.VersionID != "" || report.VersionString != "" || report.Platform != "" {
+		t.Fatalf("discovery fallback invented version fields: %#v", report)
+	}
+	if !hasCheckWithID(report.Checks, "agreements.public_api.blocked") {
+		t.Fatalf("agreement fallback missing from %#v", report.Checks)
+	}
+	if len(paths) != 1 || paths[0] != "/v1/apps/app-1/appStoreVersions" {
+		t.Fatalf("requests = %#v, want only default-version discovery", paths)
+	}
+}
+
+func TestValidateDefaultVersionDiscoveryAgreementErrorWithoutDeepStaysAPIError(t *testing.T) {
+	t.Setenv("ASC_APP_ID", "")
+	fixture := validValidateFixture()
+	fixture.versions = ""
+	fixture.versionsByQuery = map[string]string{
+		editableVersionStateQuery: `{"errors":[{"status":"403","code":"FORBIDDEN.REQUIRED_AGREEMENTS_MISSING_OR_EXPIRED","title":"A required agreement is missing or has expired","detail":"This request requires an in-effect agreement."}]}`,
+	}
+	fixture.versionsStatusByQuery = map[string]int{editableVersionStateQuery: 403}
+
+	stdout, stderr, runErr := runValidateWithFixture(t, fixture, "validate", "--app", "app-1", "--output", "json")
+	if runErr == nil || !asc.IsRequiredAgreementError(runErr) {
+		t.Fatalf("expected required-agreement API error, got %v", runErr)
+	}
+	if stdout != "" || stderr != "" {
+		t.Fatalf("unexpected output: stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
+func TestValidateDeepDefaultVersionDoesNotFallbackForSelectionErrors(t *testing.T) {
+	t.Setenv("ASC_APP_ID", "")
+	t.Setenv("ASC_WEB_SESSION_CACHE_BACKEND", "off")
+	tests := []struct {
+		name       string
+		versions   map[string]string
+		wantExit   int
+		wantStderr string
+	}{
+		{
+			name: "ambiguous",
+			versions: map[string]string{
+				editableVersionStateQuery: `{"data":[
+					{"type":"appStoreVersions","id":"ver-ios","attributes":{"platform":"IOS","versionString":"1.0","appVersionState":"PREPARE_FOR_SUBMISSION","createdDate":"2026-02-01T00:00:00Z"}},
+					{"type":"appStoreVersions","id":"ver-mac","attributes":{"platform":"MAC_OS","versionString":"1.0","appVersionState":"PREPARE_FOR_SUBMISSION","createdDate":"2026-02-01T00:00:00Z"}}
+				],"links":{"next":""}}`,
+			},
+			wantExit:   rootcmd.ExitUsage,
+			wantStderr: "--platform",
+		},
+		{
+			name: "not found",
+			versions: map[string]string{
+				editableVersionStateQuery:   `{"data":[],"links":{"next":""}}`,
+				liveVersionStateQuery:       `{"data":[],"links":{"next":""}}`,
+				liveVersionModernStateQuery: `{"data":[],"links":{"next":""}}`,
+			},
+			wantExit: rootcmd.ExitNotFound,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := validValidateFixture()
+			fixture.versions = ""
+			fixture.versionsByQuery = test.versions
+			stdout, stderr, runErr := runValidateWithFixture(t, fixture, "validate", "--app", "app-1", "--deep", "--output", "json")
+			if got := rootcmd.ExitCodeFromError(runErr); got != test.wantExit {
+				t.Fatalf("exit code = %d, want %d; err=%v", got, test.wantExit, runErr)
+			}
+			if stdout != "" {
+				t.Fatalf("unexpected fallback report: %q", stdout)
+			}
+			if test.wantStderr != "" && !strings.Contains(stderr, test.wantStderr) {
+				t.Fatalf("stderr = %q, want %q", stderr, test.wantStderr)
+			}
+		})
 	}
 }
 
@@ -110,10 +247,13 @@ func TestValidateDefaultVersionRequiresPlatformWhenAmbiguous(t *testing.T) {
 	if stdout != "" {
 		t.Fatalf("expected no report, got %q", stdout)
 	}
-	for _, want := range []string{"IOS 1.0 (PREPARE_FOR_SUBMISSION)", "MAC_OS 2.0 (DEVELOPER_REJECTED)", "--platform"} {
+	for _, want := range []string{"IOS", "version 1.0 (ver-1)", "MAC_OS", "version 2.0 (ver-mac)", "--platform"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("expected %q in stderr %q", want, stderr)
 		}
+	}
+	if strings.Contains(stderr, "pass --version") || strings.Contains(stderr, "Usage:") {
+		t.Fatalf("stderr advertises an ineffective selector or dumps full help: %q", stderr)
 	}
 
 	_, stderr, runErr = runValidateWithFixture(t, fixture, "validate", "--app", "app-1", "--platform", "IOS")

@@ -49,6 +49,8 @@ When `--version` is omitted, the app's newest editable App Store version
 falling back to the live version. The selected version is reported on stderr
 and its version string names the `version/<version>/` directory. Pass
 `--platform` when the app has candidate versions on more than one platform.
+Resolution completes before any metadata file is written, so an ambiguous or
+missing default leaves the output directory unchanged.
 
 **Flags:**
 

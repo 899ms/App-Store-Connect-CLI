@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	rootcmd "github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
 )
 
 func TestMetadataPullDefaultsToEditableVersionWhenVersionOmitted(t *testing.T) {
@@ -60,5 +62,74 @@ func TestMetadataPullDefaultsToEditableVersionWhenVersionOmitted(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(outputDir, "version", "1.2.3", "en-US.json")); err != nil {
 		t.Fatalf("expected version file under resolved version directory: %v", err)
+	}
+}
+
+func TestMetadataPullDefaultVersionSelectionErrorsDoNotWriteFiles(t *testing.T) {
+	tests := []struct {
+		name     string
+		versions map[string]string
+		wantExit int
+	}{
+		{
+			name: "ambiguous",
+			versions: map[string]string{
+				editableVersionStateQuery: `{"data":[
+					{"type":"appStoreVersions","id":"version-ios","attributes":{"versionString":"1.2.3","platform":"IOS","appVersionState":"PREPARE_FOR_SUBMISSION","createdDate":"2026-02-01T00:00:00Z"}},
+					{"type":"appStoreVersions","id":"version-mac","attributes":{"versionString":"1.2.3","platform":"MAC_OS","appVersionState":"PREPARE_FOR_SUBMISSION","createdDate":"2026-02-01T00:00:00Z"}}
+				],"links":{"next":""}}`,
+			},
+			wantExit: rootcmd.ExitUsage,
+		},
+		{
+			name: "missing",
+			versions: map[string]string{
+				editableVersionStateQuery:   `{"data":[],"links":{"next":""}}`,
+				liveVersionStateQuery:       `{"data":[],"links":{"next":""}}`,
+				liveVersionModernStateQuery: `{"data":[],"links":{"next":""}}`,
+			},
+			wantExit: rootcmd.ExitNotFound,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			setupAuth(t)
+			t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+			t.Setenv("ASC_APP_ID", "")
+			outputDir := filepath.Join(t.TempDir(), "metadata")
+
+			originalTransport := http.DefaultTransport
+			t.Cleanup(func() { http.DefaultTransport = originalTransport })
+			http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if req.URL.Path != "/v1/apps/app-1/appStoreVersions" {
+					t.Fatalf("unexpected path: %s", req.URL.Path)
+				}
+				body, ok := test.versions[appStoreVersionsQueryKey(req.URL.Query())]
+				if !ok {
+					t.Fatalf("unexpected versions query %q", req.URL.RawQuery)
+				}
+				return jsonResponse(http.StatusOK, body)
+			})
+
+			root := RootCommand("1.2.3")
+			root.FlagSet.SetOutput(io.Discard)
+			var runErr error
+			stdout, _ := captureOutput(t, func() {
+				if err := root.Parse([]string{"metadata", "pull", "--app", "app-1", "--dir", outputDir}); err != nil {
+					t.Fatalf("parse error: %v", err)
+				}
+				runErr = root.Run(context.Background())
+			})
+			if got := rootcmd.ExitCodeFromError(runErr); got != test.wantExit {
+				t.Fatalf("exit code = %d, want %d; err=%v", got, test.wantExit, runErr)
+			}
+			if stdout != "" {
+				t.Fatalf("stdout = %q, want empty", stdout)
+			}
+			if _, err := os.Stat(outputDir); !os.IsNotExist(err) {
+				t.Fatalf("selection failure created output path %q: %v", outputDir, err)
+			}
+		})
 	}
 }

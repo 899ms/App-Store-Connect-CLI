@@ -68,7 +68,9 @@ func (v DefaultAppStoreVersion) Note(overrideFlag string) string {
 }
 
 // AmbiguousDefaultAppStoreVersionError reports that more than one platform has
-// a candidate default version, so the caller must pass --platform.
+// a candidate default version, so the caller must pass --platform. It unwraps
+// to AmbiguousSelectionError so callers share the standard typed, sanitized
+// candidate-table contract.
 type AmbiguousDefaultAppStoreVersionError struct {
 	AppID      string
 	Source     string
@@ -76,11 +78,32 @@ type AmbiguousDefaultAppStoreVersionError struct {
 }
 
 func (e *AmbiguousDefaultAppStoreVersionError) Error() string {
-	parts := make([]string, 0, len(e.Candidates))
+	return e.selectionError().Error()
+}
+
+func (e *AmbiguousDefaultAppStoreVersionError) Unwrap() error {
+	return e.selectionError()
+}
+
+func (e *AmbiguousDefaultAppStoreVersionError) selectionError() *AmbiguousSelectionError {
+	candidates := make([]AmbiguousCandidate, 0, len(e.Candidates))
 	for _, candidate := range e.Candidates {
-		parts = append(parts, fmt.Sprintf("%s %s (%s)", candidate.Platform, candidate.VersionString, candidate.State))
+		label := "version " + strings.TrimSpace(candidate.VersionString)
+		if id := strings.TrimSpace(candidate.ID); id != "" {
+			label += fmt.Sprintf(" (%s)", id)
+		}
+		candidates = append(candidates, AmbiguousCandidate{
+			ID:    strings.TrimSpace(candidate.Platform),
+			Label: label,
+			Extra: strings.TrimSpace(candidate.State),
+		})
 	}
-	return fmt.Sprintf("app %q has %s App Store versions on more than one platform (%s); pass --platform or --version", e.AppID, e.Source, strings.Join(parts, ", "))
+	return &AmbiguousSelectionError{
+		Kind:        "app store version",
+		Description: fmt.Sprintf("the default %s version for app %q", strings.TrimSpace(e.Source), strings.TrimSpace(e.AppID)),
+		Flag:        "--platform",
+		Candidates:  candidates,
+	}
 }
 
 // ResolveDefaultAppStoreVersion selects the app's newest editable App Store
@@ -239,11 +262,11 @@ func selectDefaultAppStoreVersion(appID, source string, data []asc.Resource[asc.
 func ResolveAndAnnounceDefaultAppStoreVersion(ctx context.Context, client *asc.Client, appID, platform, overrideFlag string) (DefaultAppStoreVersion, error) {
 	resolved, err := ResolveDefaultAppStoreVersion(ctx, client, appID, platform)
 	if err != nil {
-		var ambiguous *AmbiguousDefaultAppStoreVersionError
-		if errors.As(err, &ambiguous) {
+		if IsAmbiguousSelection(err) {
 			message := err.Error()
 			fmt.Fprintf(os.Stderr, "Error: %s\n", message)
-			return DefaultAppStoreVersion{}, WithDiagnostic(NewReportedUsageError(UsageErrorInvalidValue, message), DiagnosticInvalidInput, "--platform")
+			reported := WithDiagnostic(NewReportedUsageError(UsageErrorInvalidValue, message), DiagnosticInvalidInput, "--platform")
+			return DefaultAppStoreVersion{}, NewErrorWithCause(reported, err)
 		}
 		if errors.Is(err, asc.ErrNotFound) {
 			return DefaultAppStoreVersion{}, WithDiagnostic(err, DiagnosticResourceNotFound, overrideFlag)

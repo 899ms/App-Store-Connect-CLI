@@ -164,11 +164,42 @@ func TestResolveDefaultAppStoreVersionRequiresPlatformWhenAmbiguous(t *testing.T
 	if !errors.As(err, &ambiguous) {
 		t.Fatalf("expected AmbiguousDefaultAppStoreVersionError, got %v", err)
 	}
+	var selection *AmbiguousSelectionError
+	if !errors.As(err, &selection) {
+		t.Fatalf("expected typed AmbiguousSelectionError cause, got %v", err)
+	}
+	if selection.Flag != "--platform" || len(selection.Candidates) != 2 || selection.Candidates[0].ID != "IOS" || selection.Candidates[1].ID != "MAC_OS" {
+		t.Fatalf("selection = %#v, want platform-valued candidates", selection)
+	}
 	message := err.Error()
-	for _, want := range []string{"--platform", "IOS 1.2.3 (PREPARE_FOR_SUBMISSION)", "MAC_OS 2.0.0 (DEVELOPER_REJECTED)"} {
+	for _, want := range []string{"--platform", "IOS", "version 1.2.3 (ver-ios)", "MAC_OS", "version 2.0.0 (ver-mac)"} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("expected %q in error %q", want, message)
 		}
+	}
+	if strings.Contains(message, "pass --version") {
+		t.Fatalf("error advertises a selector that cannot reliably resolve platform ambiguity: %q", message)
+	}
+}
+
+func TestResolveDefaultAppStoreVersionSanitizesAndOrdersAmbiguousCandidates(t *testing.T) {
+	client := defaultVersionTestClient(t, map[string]string{
+		"|" + defaultVersionEditableFilter + "|": `{"data":[
+			{"type":"appStoreVersions","id":"ver-mac","attributes":{"versionString":"2.0.0\u001b[31m","platform":"MAC_OS","appVersionState":"DEVELOPER_REJECTED","createdDate":"2026-01-15T00:00:00Z"}},
+			{"type":"appStoreVersions","id":"ver-ios","attributes":{"versionString":"1.2.3\r\nspoof","platform":"IOS","appVersionState":"PREPARE_FOR_SUBMISSION","createdDate":"2026-02-01T00:00:00Z"}}
+		],"links":{"next":""}}`,
+	}, nil)
+
+	_, err := ResolveDefaultAppStoreVersion(context.Background(), client, "app-1", "")
+	if err == nil {
+		t.Fatal("expected ambiguity")
+	}
+	message := err.Error()
+	if strings.Contains(message, "\x1b") || strings.Contains(message, "\r") {
+		t.Fatalf("ambiguity diagnostic contains terminal control characters: %q", message)
+	}
+	if strings.Index(message, "IOS") > strings.Index(message, "MAC_OS") {
+		t.Fatalf("candidates are not deterministically sorted by platform: %q", message)
 	}
 }
 

@@ -137,7 +137,7 @@ func TestLocalizationsListDefaultVersionUsageErrors(t *testing.T) {
 		{
 			name:       "ambiguous platforms",
 			args:       []string{"localizations", "list", "--app", "app-1"},
-			wantStderr: "IOS 1.2.3 (PREPARE_FOR_SUBMISSION), TV_OS 1.2.3 (PREPARE_FOR_SUBMISSION)",
+			wantStderr: "pass --platform with one of:",
 			wantExit:   rootcmd.ExitUsage,
 		},
 	}

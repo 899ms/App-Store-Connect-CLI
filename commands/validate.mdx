@@ -22,6 +22,10 @@ to the live version when no editable version exists. The selection is reported
 on stderr, for example
 `Using version 1.2.0 (PREPARE_FOR_SUBMISSION) for platform IOS; pass --version to override`.
 When candidate versions exist on more than one platform, pass `--platform`.
+Default selection only chooses the version to inspect. The selected state still
+goes through readiness validation: `READY_FOR_REVIEW` can be submitted, while a
+waiting, in-review, or live version produces the normal state blocker. A live
+fallback is not a claim that the version is ready for another submission.
 
 ## Validate a version
 

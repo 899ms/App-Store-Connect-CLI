@@ -43,6 +43,7 @@ type validateFixture struct {
 	appStatus                  int
 	versions                   string
 	versionsByQuery            map[string]string
+	versionsStatusByQuery      map[string]int
 	version                    string
 	appInfos                   string
 	appInfoLocs                string
@@ -77,6 +78,7 @@ type validateFixture struct {
 	subscriptionGroupsStatus   int
 	iaps                       string
 	iapsStatus                 int
+	requestObserver            func(*http.Request)
 }
 
 func newValidateTestClient(t *testing.T, fixture validateFixture) *asc.Client {
@@ -87,6 +89,9 @@ func newValidateTestClient(t *testing.T, fixture validateFixture) *asc.Client {
 	writeECDSAPEM(t, keyPath)
 
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if fixture.requestObserver != nil {
+			fixture.requestObserver(req)
+		}
 		if req.Method != http.MethodGet {
 			return jsonResponse(http.StatusMethodNotAllowed, `{"errors":[{"status":405}]}`)
 		}
@@ -99,7 +104,15 @@ func newValidateTestClient(t *testing.T, fixture validateFixture) *asc.Client {
 			}
 			return jsonResponse(http.StatusOK, fixture.app)
 		case path == "/v1/apps/app-1/appStoreVersions":
-			if body, ok := fixture.versionsByQuery[appStoreVersionsQueryKey(req.URL.Query())]; ok {
+			queryKey := appStoreVersionsQueryKey(req.URL.Query())
+			if status, ok := fixture.versionsStatusByQuery[queryKey]; ok {
+				body := fixture.versionsByQuery[queryKey]
+				if body == "" {
+					body = apiErrorJSONForStatus(status)
+				}
+				return jsonResponse(status, body)
+			}
+			if body, ok := fixture.versionsByQuery[queryKey]; ok {
 				return jsonResponse(http.StatusOK, body)
 			}
 			if fixture.versions != "" {

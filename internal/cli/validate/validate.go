@@ -2,7 +2,6 @@ package validate
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -91,6 +90,13 @@ Deep validation:
   web-fixable, or manual and returns exact available commands and App Store
   Connect links. Deep validation never starts an interactive login.
 
+Default version selection:
+  When --version and --version-id are omitted, validate selects the app's
+  newest editable App Store version; if none exists, it falls back to the newest live version.
+  Pass --platform when that tier has candidates on more than one platform. The
+  selected version is always reported on stderr. A live fallback does not mean the live version is ready for submission;
+  its state is evaluated by the same readiness checks and can still block.
+
 Examples:
   asc validate --app "APP_ID"
   asc validate --app "APP_ID" --version-id "VERSION_ID"
@@ -143,25 +149,6 @@ Subscriptions:
 					return shared.WithDiagnostic(fmt.Errorf("validate: %w", err), shared.DiagnosticInvalidInput, "--platform")
 				}
 				normalizedPlatform = value
-			}
-
-			if trimmedVersion == "" && trimmedVersionID == "" {
-				client, err := clientFactory()
-				if err != nil {
-					return fmt.Errorf("validate: %w", err)
-				}
-				resolveCtx, cancel := shared.ContextWithTimeout(ctx)
-				resolved, err := shared.ResolveAndAnnounceDefaultAppStoreVersion(resolveCtx, client, resolvedAppID, normalizedPlatform, "--version")
-				cancel()
-				if err != nil {
-					if errors.Is(err, flag.ErrHelp) {
-						return err
-					}
-					return fmt.Errorf("validate: %w", err)
-				}
-				trimmedVersion = resolved.VersionString
-				trimmedVersionID = resolved.ID
-				normalizedPlatform = resolved.Platform
 			}
 
 			return runValidate(ctx, validateOptions{
@@ -247,15 +234,36 @@ func validateFlagVerb(flags []string) string {
 }
 
 func runValidate(ctx context.Context, opts validateOptions) error {
-	report, err := buildReadinessReportFn(ctx, ReadinessOptions{
-		AppID:     opts.AppID,
-		Version:   opts.Version,
-		VersionID: opts.VersionID,
-		Platform:  opts.Platform,
-		Strict:    opts.Strict,
-		Deep:      opts.Deep,
-		CheckURLs: opts.CheckURLs,
-	})
+	var report validation.Report
+	var err error
+	if strings.TrimSpace(opts.Version) == "" && strings.TrimSpace(opts.VersionID) == "" {
+		client, clientErr := clientFactory()
+		if clientErr != nil {
+			err = clientErr
+		} else {
+			resolveCtx, cancel := shared.ContextWithTimeout(ctx)
+			resolved, resolveErr := shared.ResolveAndAnnounceDefaultAppStoreVersion(resolveCtx, client, opts.AppID, opts.Platform, "--version")
+			cancel()
+			if resolveErr != nil {
+				err = resolveErr
+			} else {
+				opts.Version = resolved.VersionString
+				opts.VersionID = resolved.ID
+				opts.Platform = resolved.Platform
+			}
+		}
+	}
+	if err == nil {
+		report, err = buildReadinessReportFn(ctx, ReadinessOptions{
+			AppID:     opts.AppID,
+			Version:   opts.Version,
+			VersionID: opts.VersionID,
+			Platform:  opts.Platform,
+			Strict:    opts.Strict,
+			Deep:      opts.Deep,
+			CheckURLs: opts.CheckURLs,
+		})
+	}
 	if err != nil {
 		if !opts.Deep || !asc.IsRequiredAgreementError(err) {
 			return fmt.Errorf("validate: %w", err)

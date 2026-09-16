@@ -81,6 +81,8 @@ App Store version (PREPARE_FOR_SUBMISSION, DEVELOPER_REJECTED, REJECTED,
 METADATA_REJECTED, READY_FOR_REVIEW, WAITING_FOR_REVIEW, or INVALID_BINARY),
 falling back to the live version. The selected version is reported on stderr.
 Pass --platform when the app has candidate versions on more than one platform.
+For this command, --version accepts an App Store version ID, not a display
+version string.
 
 Examples:
   asc localizations list --version "VERSION_ID"
