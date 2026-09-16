@@ -178,6 +178,32 @@ func TestXCConfigRecursiveIncludesHandleCyclesOptionalFilesAndOrder(t *testing.T
 	}
 }
 
+func TestXCConfigResolverRestoresStackAfterCyclicIncludeBeforeSibling(t *testing.T) {
+	dir := t.TempDir()
+	rootPath := filepath.Join(dir, "Root.xcconfig")
+	cyclePath := filepath.Join(dir, "Cycle.xcconfig")
+	siblingPath := filepath.Join(dir, "Sibling.xcconfig")
+
+	files := map[string][]byte{
+		rootPath:    []byte("#include \"Cycle.xcconfig\"\n#include \"Sibling.xcconfig\"\n#include \"Cycle.xcconfig\"\n"),
+		cyclePath:   []byte("#include \"Root.xcconfig\"\nMARKETING_VERSION = 1.0.0\n"),
+		siblingPath: []byte("MARKETING_VERSION = 2.0.0\n"),
+	}
+	for path, data := range files {
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	resolved, err := resolveXCConfigSetting(rootPath, marketingVersionSetting)
+	if err != nil {
+		t.Fatalf("resolveXCConfigSetting() error = %v", err)
+	}
+	if !resolved.found || resolved.value != "1.0.0" || resolved.path != cyclePath {
+		t.Fatalf("resolved = %#v, want the repeated cycle include to resolve from %s", resolved, cyclePath)
+	}
+}
+
 func TestXCConfigCollectorBoundsSigningSourceGraph(t *testing.T) {
 	paths := make([]string, signingPlanMaxFiles+1)
 	for i := range paths {
