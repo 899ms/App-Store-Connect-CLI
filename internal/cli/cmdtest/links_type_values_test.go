@@ -2,6 +2,7 @@ package cmdtest
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -149,6 +150,62 @@ func TestLinksTypeHelpListsValidValues(t *testing.T) {
 			want := "Relationship type (required); must be one of: " + strings.Join(test.values, ", ")
 			if usage := usageForCommand(t, test.path...); !strings.Contains(usage, want) {
 				t.Fatalf("usage = %q, want it to contain %q", usage, want)
+			}
+		})
+	}
+}
+
+func TestLinksValidTypesReachTheirEndpoints(t *testing.T) {
+	tests := []struct {
+		name         string
+		args         []string
+		path         string
+		resourceType string
+		many         bool
+	}{
+		{name: "build app", args: []string{"builds", "links", "view", "--build-id", "build-1", "--type", "app", "--output", "json"}, path: "/v1/builds/build-1/relationships/app", resourceType: "apps"},
+		{name: "build app store version", args: []string{"builds", "links", "view", "--build-id", "build-1", "--type", "appStoreVersion", "--output", "json"}, path: "/v1/builds/build-1/relationships/appStoreVersion", resourceType: "appStoreVersions"},
+		{name: "build beta localizations", args: []string{"builds", "links", "view", "--build-id", "build-1", "--type", "betaBuildLocalizations", "--output", "json"}, path: "/v1/builds/build-1/relationships/betaBuildLocalizations", resourceType: "betaBuildLocalizations", many: true},
+		{name: "build beta detail", args: []string{"builds", "links", "view", "--build-id", "build-1", "--type", "buildBetaDetail", "--output", "json"}, path: "/v1/builds/build-1/relationships/buildBetaDetail", resourceType: "buildBetaDetails"},
+		{name: "build diagnostic signatures", args: []string{"builds", "links", "view", "--build-id", "build-1", "--type", "diagnosticSignatures", "--output", "json"}, path: "/v1/builds/build-1/relationships/diagnosticSignatures", resourceType: "diagnosticSignatures", many: true},
+		{name: "build icons", args: []string{"builds", "links", "view", "--build-id", "build-1", "--type", "icons", "--output", "json"}, path: "/v1/builds/build-1/relationships/icons", resourceType: "buildIcons", many: true},
+		{name: "build individual testers", args: []string{"builds", "links", "view", "--build-id", "build-1", "--type", "individualTesters", "--output", "json"}, path: "/v1/builds/build-1/relationships/individualTesters", resourceType: "betaTesters", many: true},
+		{name: "build pre-release version", args: []string{"builds", "links", "view", "--build-id", "build-1", "--type", "preReleaseVersion", "--output", "json"}, path: "/v1/builds/build-1/relationships/preReleaseVersion", resourceType: "preReleaseVersions"},
+		{name: "group beta testers", args: []string{"testflight", "groups", "links", "view", "--group-id", "group-1", "--type", "betaTesters", "--output", "json"}, path: "/v1/betaGroups/group-1/relationships/betaTesters", resourceType: "betaTesters", many: true},
+		{name: "group builds", args: []string{"testflight", "groups", "links", "view", "--group-id", "group-1", "--type", "builds", "--output", "json"}, path: "/v1/betaGroups/group-1/relationships/builds", resourceType: "builds", many: true},
+		{name: "tester apps", args: []string{"testflight", "testers", "links", "view", "--tester-id", "tester-1", "--type", "apps", "--output", "json"}, path: "/v1/betaTesters/tester-1/relationships/apps", resourceType: "apps", many: true},
+		{name: "tester beta groups", args: []string{"testflight", "testers", "links", "view", "--tester-id", "tester-1", "--type", "betaGroups", "--output", "json"}, path: "/v1/betaTesters/tester-1/relationships/betaGroups", resourceType: "betaGroups", many: true},
+		{name: "tester builds", args: []string{"testflight", "testers", "links", "view", "--tester-id", "tester-1", "--type", "builds", "--output", "json"}, path: "/v1/betaTesters/tester-1/relationships/builds", resourceType: "builds", many: true},
+		{name: "pre-release app", args: []string{"testflight", "pre-release", "links", "view", "--id", "pr-1", "--type", "app", "--output", "json"}, path: "/v1/preReleaseVersions/pr-1/relationships/app", resourceType: "apps"},
+		{name: "pre-release builds", args: []string{"testflight", "pre-release", "links", "view", "--id", "pr-1", "--type", "builds", "--output", "json"}, path: "/v1/preReleaseVersions/pr-1/relationships/builds", resourceType: "builds", many: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			setupAuth(t)
+			t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+			server := newValidLinksServer(t, test.path, test.resourceType, test.many)
+			useLinksServerClient(t, server)
+
+			root := RootCommand("1.2.3")
+			root.FlagSet.SetOutput(io.Discard)
+
+			var runErr error
+			stdout, stderr := captureOutput(t, func() {
+				if err := root.Parse(test.args); err != nil {
+					t.Fatalf("parse error: %v", err)
+				}
+				runErr = root.Run(context.Background())
+			})
+
+			if runErr != nil {
+				t.Fatalf("run error: %v", runErr)
+			}
+			if stderr != "" {
+				t.Fatalf("stderr = %q, want empty", stderr)
+			}
+			if !strings.Contains(stdout, `"id":"linkage-1"`) {
+				t.Fatalf("stdout = %q, want linkage ID", stdout)
 			}
 		})
 	}
@@ -365,6 +422,26 @@ func newPaginatedNotFoundServer(t *testing.T, path, notFoundBody string) *httpte
 		}
 		nextURL := "https://api.appstoreconnect.apple.com" + path + "?cursor=NEXT"
 		_, _ = w.Write([]byte(`{"data":[{"type":"betaTesters","id":"linkage-1"}],"links":{"self":"` + server.URL + path + `","next":"` + nextURL + `"}}`))
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func newValidLinksServer(t *testing.T, path, resourceType string, many bool) *httptest.Server {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodGet || req.URL.Path != path {
+			t.Errorf("unexpected request: %s %s", req.Method, req.URL.String())
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if many {
+			_, _ = fmt.Fprintf(w, `{"data":[{"type":%q,"id":"linkage-1"}],"links":{"next":null}}`, resourceType)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"data":{"type":%q,"id":"linkage-1"}}`, resourceType)
 	}))
 	t.Cleanup(server.Close)
 	return server
