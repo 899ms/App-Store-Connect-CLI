@@ -1272,7 +1272,27 @@ func (c *Client) DownloadAttachment(ctx context.Context, signedURL string) ([]by
 	request.Header.Set("Accept", "*/*")
 	setModifiedCookieHeader(c.httpClient, request)
 
-	response, err := c.httpClient.Do(request)
+	httpClient := *c.httpClient
+	previousCheckRedirect := httpClient.CheckRedirect
+	httpClient.CheckRedirect = func(redirect *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return fmt.Errorf("download stopped after 10 redirects")
+		}
+		if err := validateReviewAttachmentDownloadTarget(redirect.URL, "redirect"); err != nil {
+			return err
+		}
+		if previousCheckRedirect != nil {
+			if err := previousCheckRedirect(redirect, via); err != nil {
+				return err
+			}
+			// The wrapped policy receives the mutable upcoming request and may
+			// have rewritten its URL; never send the request to an unchecked host.
+			return validateReviewAttachmentDownloadTarget(redirect.URL, "redirect")
+		}
+		return nil
+	}
+
+	response, err := httpClient.Do(request)
 	if err != nil {
 		var urlErr *url.Error
 		if errors.As(err, &urlErr) {
@@ -1296,4 +1316,19 @@ func (c *Client) DownloadAttachment(ctx context.Context, signedURL string) ([]by
 		return nil, response.StatusCode, fmt.Errorf("attachment download failed with status %d", response.StatusCode)
 	}
 	return body, response.StatusCode, nil
+}
+
+// validateReviewAttachmentDownloadTarget validates a redirect target without
+// echoing its potentially signed URL in diagnostics.
+func validateReviewAttachmentDownloadTarget(target *url.URL, kind string) error {
+	if target == nil || strings.TrimSpace(target.Hostname()) == "" {
+		return fmt.Errorf("download %s host is required", kind)
+	}
+	if !strings.EqualFold(target.Scheme, "https") {
+		return fmt.Errorf("download %s must use https", kind)
+	}
+	if !isAllowedAttachmentHost(target.Hostname()) {
+		return fmt.Errorf("download %s host is not allowed", kind)
+	}
+	return nil
 }
