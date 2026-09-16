@@ -3751,6 +3751,52 @@ func TestChmodFileIfSameRejectsReplacementBeforeRootedValidation(t *testing.T) {
 	}
 }
 
+func TestCheckContainedPathRejectsSymlinks(t *testing.T) {
+	t.Run("final component", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "target")
+		if err := os.WriteFile(target, []byte("data"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(dir, "link")
+		if err := os.Symlink(target, link); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		if err := CheckContainedPath(link); !errors.Is(err, ErrSymlink) {
+			t.Fatalf("CheckContainedPath() error = %v, want ErrSymlink", err)
+		}
+	})
+
+	t.Run("parent component", func(t *testing.T) {
+		dir := t.TempDir()
+		targetDir := filepath.Join(dir, "target")
+		if err := os.Mkdir(targetDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(targetDir, "file")
+		if err := os.WriteFile(target, []byte("data"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		linkDir := filepath.Join(dir, "link")
+		if err := os.Symlink(targetDir, linkDir); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		if err := CheckContainedPath(filepath.Join(linkDir, "file")); !errors.Is(err, ErrSymlink) {
+			t.Fatalf("CheckContainedPath() error = %v, want ErrSymlink", err)
+		}
+	})
+
+	t.Run("regular file", func(t *testing.T) {
+		target := filepath.Join(t.TempDir(), "file")
+		if err := os.WriteFile(target, []byte("data"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := CheckContainedPath(target); err != nil {
+			t.Fatalf("CheckContainedPath() error = %v", err)
+		}
+	})
+}
+
 func TestChmodFileIfSameAcceptsDarwinTmpAlias(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("/tmp is a system symlink on Darwin")
