@@ -81,6 +81,7 @@ func sandboxRenewalRateValues() []string {
 
 func findSandboxTesterByEmail(ctx context.Context, client *asc.Client, email string) (*asc.SandboxTesterResponse, error) {
 	next := ""
+	matches := make([]asc.Resource[asc.SandboxTesterAttributes], 0, 1)
 	for {
 		resp, err := client.GetSandboxTesters(
 			ctx,
@@ -91,30 +92,39 @@ func findSandboxTesterByEmail(ctx context.Context, client *asc.Client, email str
 		if err != nil {
 			return nil, err
 		}
-		if len(resp.Data) > 1 {
+		if resp == nil {
+			return nil, fmt.Errorf("empty sandbox testers response")
+		}
+		nextURL := strings.TrimSpace(resp.Links.Next)
+		matches = append(matches, resp.Data...)
+		if len(matches) > 1 {
 			candidates := make([]shared.AmbiguousCandidate, 0, len(resp.Data))
-			for _, tester := range resp.Data {
+			for _, tester := range matches {
 				candidates = append(candidates, shared.AmbiguousCandidate{
 					ID: strings.TrimSpace(tester.ID),
 				})
 			}
-			return nil, &shared.AmbiguousSelectionError{
+			ambiguous := &shared.AmbiguousSelectionError{
 				Kind:        "sandbox tester",
 				Description: fmt.Sprintf("email %q", strings.TrimSpace(email)),
 				Flag:        "--id",
 				Candidates:  candidates,
 			}
+			if nextURL != "" {
+				return nil, shared.MarkAmbiguousSelectionSample(ambiguous)
+			}
+			return nil, ambiguous
 		}
-		if len(resp.Data) == 1 {
-			return &asc.SandboxTesterResponse{Data: resp.Data[0], Links: resp.Links}, nil
-		}
-		if strings.TrimSpace(resp.Links.Next) == "" {
+		if nextURL == "" {
+			if len(matches) == 1 {
+				return &asc.SandboxTesterResponse{Data: matches[0], Links: resp.Links}, nil
+			}
 			break
 		}
-		if err := shared.ValidateNextURL(resp.Links.Next); err != nil {
+		if err := shared.ValidateNextURL(nextURL); err != nil {
 			return nil, err
 		}
-		next = resp.Links.Next
+		next = nextURL
 	}
 	return nil, fmt.Errorf("no sandbox tester found for %q", strings.TrimSpace(email))
 }
