@@ -43,8 +43,8 @@ monthly subscriptions with a 12-month commitment. The subscription must use
 subscriptionPeriod ONE_YEAR. USA and Singapore are excluded by Apple.
 
 Examples:
-  asc subscriptions pricing monthly-commitment enable --subscription-id "SUB_ID" --price "9.99" --price-territory "Norway" --territories "Norway,Germany,France"
-  asc subscriptions pricing monthly-commitment disable --subscription-id "SUB_ID" --territories "Norway"
+  asc subscriptions pricing monthly-commitment enable --subscription-id "SUB_ID" --price "9.99" --price-territory "Norway" --territories "Norway,Germany,France" --confirm
+  asc subscriptions pricing monthly-commitment disable --subscription-id "SUB_ID" --territories "Norway" --confirm
   asc subscriptions pricing monthly-commitment list --subscription-id "SUB_ID"`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
