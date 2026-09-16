@@ -65,9 +65,18 @@ asc builds wait --app APP_ID --latest
 
 ```bash  theme={null}
 asc builds add-groups --app APP_ID --latest --group "External Testers"
+asc builds add-groups --app APP_ID --latest --group "External Testers" --dry-run
 asc builds add-groups --app APP_ID --latest --group "GROUP_ID" --submit --confirm
 asc builds remove-groups --app APP_ID --latest --group "GROUP_ID" --confirm
 ```
+
+Use `--dry-run` to resolve the build and groups and preview the assignment
+without adding groups or submitting a review. It may show current build and
+external beta state from best-effort reads, but those observations are
+advisory and do not predict whether a later assignment will be accepted.
+JSON output marks the receipt with `dryRun: true` and uses `action: "would-add"`
+or `action: "no-op"` when filtering leaves no groups. `--submit` cannot be
+combined with `--dry-run`.
 
 ### Expire builds
 
