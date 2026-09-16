@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,6 +101,35 @@ func TestDefaultCachedAppleIDFileBackend(t *testing.T) {
 		}
 		if got, want := err.Error(), "multiple cached web sessions are available: amy@example.com, zed@example.com"; got != want {
 			t.Fatalf("Error() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("unreadable session prevents an unsafe default", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Setenv(webSessionBackendEnv, "file")
+		t.Setenv(webSessionCacheDirEnv, dir)
+		writeDefaultTestSessionFile(t, dir, "only@example.com", webSessionCacheVersion)
+		if err := os.WriteFile(filepath.Join(dir, "session-unreadable.json"), []byte("unreadable"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		originalRead := readDefaultSessionFromFileFn
+		readDefaultSessionFromFileFn = func(key string) (persistedSession, bool, error) {
+			if key == "unreadable" {
+				return persistedSession{}, false, errors.New("permission denied")
+			}
+			return originalRead(key)
+		}
+		t.Cleanup(func() { readDefaultSessionFromFileFn = originalRead })
+
+		appleID, err := DefaultCachedAppleID()
+		if err == nil {
+			t.Fatalf("DefaultCachedAppleID() = %q, nil; want unreadable-cache error", appleID)
+		}
+		if appleID != "" {
+			t.Fatalf("appleID = %q, want empty", appleID)
+		}
+		if !strings.Contains(err.Error(), "session-unreadable.json") {
+			t.Fatalf("error = %q, want unreadable entry name", err)
 		}
 	})
 

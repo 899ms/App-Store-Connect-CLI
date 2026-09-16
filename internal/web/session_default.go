@@ -2,6 +2,7 @@ package web
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -10,6 +11,8 @@ import (
 // ErrNoCachedSession reports that default Apple ID resolution found no cached
 // web session to fall back to.
 var ErrNoCachedSession = errors.New("no cached web session is available")
+
+var readDefaultSessionFromFileFn = readSessionFromFile
 
 // AmbiguousCachedSessionError reports that more than one cached web session
 // could serve as the default, so the caller has to name one.
@@ -129,8 +132,14 @@ func listSessionsFromFile() ([]persistedSession, error) {
 			continue
 		}
 		key := strings.TrimSuffix(strings.TrimPrefix(name, "session-"), ".json")
-		sess, ok, err := readSessionFromFile(key)
-		if err != nil || !ok {
+		sess, ok, err := readDefaultSessionFromFileFn(key)
+		if err != nil {
+			if errors.Is(err, errMalformedSessionFile) {
+				continue
+			}
+			return nil, fmt.Errorf("read cached web session %q: %w", name, err)
+		}
+		if !ok {
 			continue
 		}
 		sessions = append(sessions, sess)

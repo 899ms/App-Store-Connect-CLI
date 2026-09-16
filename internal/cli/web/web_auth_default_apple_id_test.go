@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,6 +94,65 @@ func TestResolveSessionDefaultsToSoleCachedAppleID(t *testing.T) {
 	}
 	if want := []string{"only@example.com"}; strings.Join(lookups, ",") != strings.Join(want, ",") {
 		t.Fatalf("lookups = %v, want %v", lookups, want)
+	}
+	if got, want := stderr.String(), "Using cached web session for only@example.com; pass --apple-id to override\n"; got != want {
+		t.Fatalf("stderr = %q, want %q", got, want)
+	}
+}
+
+func TestResolveSessionSoleCachedAppleIDCanAutoReauthenticate(t *testing.T) {
+	dir := t.TempDir()
+	stderr := stubDefaultAppleIDResolverInputs(t, dir)
+	writeTestCachedWebSession(t, dir, "only@example.com")
+	t.Setenv(webPasswordEnv, "env-secret")
+
+	originalLoadCached := loadCachedSessionFn
+	originalLoginWithClient := webLoginWithClientFn
+	originalPersist := persistWebSessionFn
+	t.Cleanup(func() {
+		loadCachedSessionFn = originalLoadCached
+		webLoginWithClientFn = originalLoginWithClient
+		persistWebSessionFn = originalPersist
+	})
+
+	cachedClient := &http.Client{}
+	expected := &webcore.AuthSession{Client: cachedClient, UserEmail: "only@example.com"}
+	tryResumeSessionFn = func(ctx context.Context, username string) (*webcore.AuthSession, bool, error) {
+		if username != "only@example.com" {
+			t.Fatalf("username = %q, want only@example.com", username)
+		}
+		return nil, false, webcore.ErrCachedSessionExpired
+	}
+	loadCachedSessionFn = func(username string) (*webcore.AuthSession, bool, error) {
+		if username != "only@example.com" {
+			t.Fatalf("loaded username = %q, want only@example.com", username)
+		}
+		return &webcore.AuthSession{Client: cachedClient, UserEmail: username}, true, nil
+	}
+	webLoginWithClientFn = func(ctx context.Context, client *http.Client, credentials webcore.LoginCredentials) (*webcore.AuthSession, error) {
+		if client != cachedClient {
+			t.Fatal("expected cached client to be reused")
+		}
+		if credentials.Username != "only@example.com" || credentials.Password != "env-secret" {
+			t.Fatalf("credentials = %+v, want only@example.com and environment password", credentials)
+		}
+		return expected, nil
+	}
+	persisted := false
+	persistWebSessionFn = func(session *webcore.AuthSession) error {
+		persisted = session == expected
+		return nil
+	}
+
+	session, source, err := resolveSession(context.Background(), "", "", "")
+	if err != nil {
+		t.Fatalf("resolveSession() error = %v", err)
+	}
+	if session != expected || source != "auto-reauth" {
+		t.Fatalf("resolveSession() = (%+v, %q), want selected account auto-reauth", session, source)
+	}
+	if !persisted {
+		t.Fatal("expected refreshed session to be persisted")
 	}
 	if got, want := stderr.String(), "Using cached web session for only@example.com; pass --apple-id to override\n"; got != want {
 		t.Fatalf("stderr = %q, want %q", got, want)
@@ -212,6 +272,69 @@ func TestResolveSessionDefaultLookupFailureFallsBackToUsageError(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "Warning: listing cached web sessions failed: boom") {
 		t.Fatalf("stderr = %q, want cache listing warning", stderr.String())
+	}
+}
+
+func TestResolveWebSessionEmptyCachePromptsWithoutPrintingUsageError(t *testing.T) {
+	dir := t.TempDir()
+	stubDefaultAppleIDResolverInputs(t, dir)
+
+	var prompted bool
+	tryResumeSessionFn = func(ctx context.Context, username string) (*webcore.AuthSession, bool, error) {
+		if username != "prompted@example.com" {
+			t.Fatalf("username = %q, want prompted@example.com", username)
+		}
+		return &webcore.AuthSession{UserEmail: username}, true, nil
+	}
+
+	var (
+		session *webcore.AuthSession
+		source  string
+		err     error
+	)
+	_, stderr := captureOutput(t, func() {
+		session, source, err = resolveWebSession(context.Background(), "", "", "", webSessionResolveOptions{
+			promptAppleID: func(appleID *string) error {
+				prompted = true
+				*appleID = "prompted@example.com"
+				return nil
+			},
+			resolvePassword: resolveSessionPassword,
+		})
+	})
+	if err != nil {
+		t.Fatalf("resolveWebSession() error = %v", err)
+	}
+	if !prompted {
+		t.Fatal("expected empty cache to prompt for an Apple ID")
+	}
+	if session == nil || session.UserEmail != "prompted@example.com" || source != "cache" {
+		t.Fatalf("resolveWebSession() = (%+v, %q), want prompted cached session", session, source)
+	}
+	if strings.Contains(stderr, "Error:") {
+		t.Fatalf("stderr = %q, want no usage error before successful prompt", stderr)
+	}
+}
+
+func TestResolveWebSessionEmptyCacheNonInteractivePrintsOneUsageError(t *testing.T) {
+	dir := t.TempDir()
+	stubDefaultAppleIDResolverInputs(t, dir)
+	originalCanPrompt := appCreateCanPromptInteractivelyFn
+	appCreateCanPromptInteractivelyFn = func() bool { return false }
+	t.Cleanup(func() { appCreateCanPromptInteractivelyFn = originalCanPrompt })
+
+	var err error
+	_, stderr := captureOutput(t, func() {
+		_, _, err = resolveWebSession(context.Background(), "", "", "", webSessionResolveOptions{
+			promptAppleID:   promptAppsCreateSessionAppleID,
+			resolvePassword: resolveSessionPassword,
+		})
+	})
+	if !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("expected usage error, got %v", err)
+	}
+	if got := strings.Count(stderr, "Error:"); got != 1 {
+		t.Fatalf("stderr = %q, want exactly one usage error, got %d", stderr, got)
 	}
 }
 
