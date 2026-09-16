@@ -100,6 +100,36 @@ func TestDoStreamingRequestBoundsCustomTransportBeforeHeaders(t *testing.T) {
 	}
 }
 
+func TestHeaderTimeoutSettledBeforeExpiryLeavesBodyReadable(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	watchdog := &headerTimeout{cancel: cancel, timer: time.NewTimer(time.Hour)}
+
+	if expired := watchdog.settle(); expired {
+		t.Fatal("settle() reported an expiry that never happened")
+	}
+	watchdog.fire()
+
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("a settled watchdog must not cancel the body copy: %v", err)
+	}
+}
+
+func TestHeaderTimeoutExpiryAtSettleBoundaryIsReported(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	watchdog := &headerTimeout{cancel: cancel, timer: time.NewTimer(time.Hour)}
+
+	watchdog.fire()
+
+	if expired := watchdog.settle(); !expired {
+		t.Fatal("settle() must report an expiry that already cancelled the request")
+	}
+	if ctx.Err() == nil {
+		t.Fatal("expected the watchdog to cancel the request")
+	}
+}
+
 func TestDoStreamingRequestClosingBodyReleasesContext(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("artifact"))

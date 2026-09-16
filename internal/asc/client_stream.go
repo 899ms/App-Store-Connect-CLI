@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sync/atomic"
+	"sync"
 	"time"
 )
 
@@ -26,26 +26,60 @@ func doStreamingRequest(client *http.Client, req *http.Request) (*http.Response,
 	}
 
 	ctx, cancel := context.WithCancel(req.Context())
-	var expired atomic.Bool
-	timer := time.AfterFunc(timeout, func() {
-		expired.Store(true)
-		cancel()
-	})
+	watchdog := &headerTimeout{cancel: cancel}
+	watchdog.timer = time.AfterFunc(timeout, watchdog.fire)
 
 	resp, err := streaming.Do(req.WithContext(ctx))
-	timer.Stop()
-	if err != nil {
+	expired := watchdog.settle()
+	switch {
+	case err != nil:
 		cancel()
-		if expired.Load() && req.Context().Err() == nil {
+		if expired && req.Context().Err() == nil {
 			return nil, fmt.Errorf("timed out after %s awaiting response headers: %w", timeout, err)
 		}
 		return nil, err
+	case expired:
+		// The watchdog cancelled the request as the headers arrived, so this
+		// body is no longer readable.
+		_ = resp.Body.Close()
+		cancel()
+		return nil, fmt.Errorf("timed out after %s awaiting response headers", timeout)
 	}
 
 	// The derived context has to outlive this call so the body stays readable;
 	// closing the body releases it.
 	resp.Body = &streamingResponseBody{ReadCloser: resp.Body, cancel: cancel}
 	return resp, nil
+}
+
+// headerTimeout cancels a streaming request that has not produced response
+// headers in time. settle reports whether that already happened and keeps the
+// timer from cancelling a body copy that has since started.
+type headerTimeout struct {
+	cancel context.CancelFunc
+	timer  *time.Timer
+
+	mu      sync.Mutex
+	settled bool
+	expired bool
+}
+
+func (h *headerTimeout) fire() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.settled {
+		return
+	}
+	h.expired = true
+	h.cancel()
+}
+
+func (h *headerTimeout) settle() bool {
+	h.timer.Stop()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.settled = true
+	return h.expired
 }
 
 type streamingResponseBody struct {
