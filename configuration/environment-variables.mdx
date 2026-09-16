@@ -50,6 +50,18 @@ These variables configure API authentication credentials.
   Use a named authentication profile from config or keychain
 </ParamField>
 
+<ParamField path="ASC_WEB_APPLE_ID" type="string">
+  Apple Account email used by the `asc web` commands that resolve or create a
+  session, when `--apple-id` is omitted
+
+  Read only when the flag is empty. The value is trimmed and an empty value is
+  ignored, so an unset CI secret behaves like no variable at all. It wins over
+  the cached-session default and applies to `asc web auth login`. It is ignored
+  by `--session-from-env` and by the cache-management commands
+  (`asc web auth status`, `export`, `import`, `logout`). See
+  [Choosing the Apple Account](/commands/web#choosing-the-apple-account).
+</ParamField>
+
 ## Apple Ads authentication variables
 
 These variables apply only to `asc ads`. They do not replace `ASC_KEY_ID`,

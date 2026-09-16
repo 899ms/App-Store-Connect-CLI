@@ -179,6 +179,12 @@ asc web auth import --file ./web-session.json --apple-id "user@example.com"
 asc web auth status
 ```
 
+Set `ASC_WEB_APPLE_ID` to choose the Apple Account for the `asc web` commands
+that resolve or create a session, including `asc web auth login`, without
+repeating `--apple-id`; an explicit flag still wins. The cache-management
+commands above (`status`, `export`, `import`, `logout`) ignore it. See
+[Choosing the Apple Account](/commands/web#choosing-the-apple-account).
+
 Pass `--overwrite` to replace an existing destination file on export, or an
 existing cached session for that Apple Account on import. Isolate tests and
 automation with `ASC_WEB_SESSION_CACHE_DIR` and
@@ -515,7 +521,7 @@ Ensure your `.p8` file:
 
 * Starts with `-----BEGIN PRIVATE KEY-----`
 * Is ECDSA format (App Store Connect uses P-256/ES256)
-* Has correct permissions: `chmod 600 AuthKey_*.p8`
+* Has correct permissions: `chmod 600 AuthKey_*.p8`, or re-run `asc auth login --fix-permissions` to let asc change an ordinary over-permissive file to `0600` (owner-unreadable files on macOS require a manual `chmod`)
 
 ### JWT generation failed
 
