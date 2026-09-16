@@ -118,8 +118,6 @@ These variables apply only to `asc ads`. They do not replace `ASC_KEY_ID`,
 These variables apply only to the `asc web` command family, which authenticates
 with a cached Apple Account web session instead of an App Store Connect API key.
 They do not replace `ASC_KEY_ID`, `ASC_ISSUER_ID`, or the other API credentials.
-`ASC_WEB_APPLE_ID`, which selects an account before session resolution, is
-documented with the authentication variables above.
 
 <ParamField path="ASC_WEB_PASSWORD" type="string">
   Apple Account password used for a non-interactive `asc web` login
@@ -150,8 +148,9 @@ documented with the authentication variables above.
   command runs through `/bin/sh -c` (`cmd /d /s /c` on Windows), and empty
   output fails the login. It is bounded by its own timeout rather than the
   caller's deadline: 60 seconds by default, or the value of `ASC_TIMEOUT` or
-  `ASC_TIMEOUT_SECONDS` when either is set. Without either input, a login that
-  needs verification requires an interactive terminal.
+  `ASC_TIMEOUT_SECONDS` when either is set. When neither the flag nor
+  `ASC_WEB_2FA_CODE_COMMAND` supplies a command, a login that needs verification
+  requires an interactive terminal.
 </ParamField>
 
 <ParamField path="ASC_WEB_SESSION" type="string">
