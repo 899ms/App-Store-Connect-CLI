@@ -497,6 +497,34 @@ func TestInstallSigningRunProfileReusesAndProtectsExistingFiles(t *testing.T) {
 	}
 }
 
+func TestInstallSigningRunProfileRetainsOwnershipAfterJournalFailure(t *testing.T) {
+	installDir := t.TempDir()
+	previous := signingRunProfileInstallDirFn
+	signingRunProfileInstallDirFn = func(context.Context) (string, error) { return installDir, nil }
+	t.Cleanup(func() { signingRunProfileInstallDirFn = previous })
+	const uuid = "A7EFEF21-3432-404F-A488-083800B570FF"
+	data := []byte("signed-profile")
+	digestBytes := sha256.Sum256(data)
+	digest := hex.EncodeToString(digestBytes[:])
+	journalErr := errors.New("journal unavailable")
+
+	installed, err := installSigningRunProfile(context.Background(), uuid, data, digest, func(signingRunProfileInstall) error {
+		return journalErr
+	})
+	if !errors.Is(err, journalErr) {
+		t.Fatalf("installSigningRunProfile() error = %v, want journal failure", err)
+	}
+	if !installed.Created || installed.StagedPath == "" || installed.Device == 0 || installed.Inode == 0 {
+		t.Fatalf("missing retained ownership proof: %+v", installed)
+	}
+	if _, statErr := os.Stat(installed.Path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("published profile stat error = %v, want not exist", statErr)
+	}
+	if _, statErr := os.Stat(installed.StagedPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("staged profile stat error = %v, want defer cleanup", statErr)
+	}
+}
+
 func TestInstallSigningRunProfileRejectsOversizedExistingFile(t *testing.T) {
 	installDir := t.TempDir()
 	previous := signingRunProfileInstallDirFn

@@ -719,7 +719,7 @@ func runSigningEnvironment(
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		var cleanupErr error
-		if profileInstall.Created {
+		if profileInstall.Created || profileInstall.StagedPath != "" {
 			if err := deps.RemoveProfile(profileInstall); err != nil {
 				receipt.ProfileCleanupState = "failed"
 				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove installed provisioning profile: %w", err))
@@ -783,18 +783,32 @@ func runSigningEnvironment(
 	if err := deps.ImportIdentity(ctx, keychainPath, keychainPassword, normalizedIdentity, importPasswordText, inspection.CertificateSHA1); err != nil {
 		return finish(fmt.Errorf("import identity into temporary keychain: %w", err))
 	}
-	profileInstall, err = deps.InstallProfile(ctx, inspection.ProfileUUID, profileData, inspection.ProfileSHA256, func(planned signingRunProfileInstall) error {
+	installedProfile, err := deps.InstallProfile(ctx, inspection.ProfileUUID, profileData, inspection.ProfileSHA256, func(planned signingRunProfileInstall) error {
+		// Keep the ownership proof in memory even if the installer reports a
+		// later error and returns a zero value. Cleanup must not depend on the
+		// installer preserving its result on failure.
+		profileInstall = planned
 		journal.ProfilePath = planned.Path
 		journal.StagedProfilePath = planned.StagedPath
 		journal.ProfileDigest = planned.Digest
 		journal.ProfileDevice = planned.Device
 		journal.ProfileInode = planned.Inode
 		journal.ProfileCreated = true
-		return deps.WriteJournal(journal, true)
+		if err := deps.WriteJournal(journal, true); err != nil {
+			// The initial journal is already durable, but retry this overwrite
+			// once so a cleanup failure retains the staged profile coordinates.
+			retryErr := deps.WriteJournal(journal, true)
+			return errors.Join(err, retryErr)
+		}
+		return nil
 	})
 	if err != nil {
+		if installedProfile.Created || installedProfile.StagedPath != "" {
+			profileInstall = installedProfile
+		}
 		return finish(fmt.Errorf("install provisioning profile: %w", err))
 	}
+	profileInstall = installedProfile
 	if profileInstall.Created {
 		receipt.ProfileCleanupState = "pending"
 	} else {
