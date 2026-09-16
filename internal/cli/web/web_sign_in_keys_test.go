@@ -244,3 +244,161 @@ func TestWebSignInKeysDownloadRequiresKeyID(t *testing.T) {
 		t.Fatalf("missing error: %q", stderr)
 	}
 }
+
+type fakeSignInKeyDownloadRecoveryError struct {
+	body []byte
+}
+
+func (e *fakeSignInKeyDownloadRecoveryError) Error() string {
+	return "invalid api key download response"
+}
+
+func (e *fakeSignInKeyDownloadRecoveryError) Unwrap() error {
+	return webcore.ErrAPIKeyResponseInvalid
+}
+
+func (e *fakeSignInKeyDownloadRecoveryError) RecoveryBody() []byte {
+	return append([]byte(nil), e.body...)
+}
+
+func TestWebSignInKeysDownloadRetainsMalformed2xxResponse(t *testing.T) {
+	testWebSignInKeysRetainsMalformed2xxResponse(t, false)
+}
+
+func TestWebSignInKeysCreateRetainsMalformed2xxResponse(t *testing.T) {
+	testWebSignInKeysRetainsMalformed2xxResponse(t, true)
+}
+
+func testWebSignInKeysRetainsMalformed2xxResponse(t *testing.T, create bool) {
+	const raw = "provider-error-secret"
+	originalResolve, originalClient, originalPersist := resolveSessionFn, newWebClientFn, persistWebSessionFn
+	originalCreate, originalDownload := createDeveloperSignInKeyFn, downloadDeveloperSignInKeyFn
+	t.Cleanup(func() {
+		resolveSessionFn = originalResolve
+		newWebClientFn = originalClient
+		persistWebSessionFn = originalPersist
+		createDeveloperSignInKeyFn = originalCreate
+		downloadDeveloperSignInKeyFn = originalDownload
+	})
+	resolveSessionFn = func(context.Context, string, string, string) (*webcore.AuthSession, string, error) {
+		return &webcore.AuthSession{}, "cache", nil
+	}
+	newWebClientFn = func(*webcore.AuthSession) *webcore.Client { return &webcore.Client{} }
+	persistWebSessionFn = func(*webcore.AuthSession) error { return nil }
+	createCalls := 0
+	createDeveloperSignInKeyFn = func(_ context.Context, _ *webcore.Client, name, bundleID string) (*webcore.DeveloperSignInKey, error) {
+		createCalls++
+		if name != "Sway" || bundleID != "BUNDLE123" {
+			t.Fatalf("wrong create request: %q %q", name, bundleID)
+		}
+		return &webcore.DeveloperSignInKey{KeyID: "KEY123"}, nil
+	}
+	downloadCalls := 0
+	downloadDeveloperSignInKeyFn = func(context.Context, *webcore.Client, string) ([]byte, error) {
+		downloadCalls++
+		return nil, &fakeSignInKeyDownloadRecoveryError{body: []byte(raw)}
+	}
+
+	outputDir := t.TempDir()
+	command := WebSignInKeysDownloadCommand()
+	args := []string{"--key-id", "KEY123", "--output-dir", outputDir, "--confirm", "--output", "json"}
+	if create {
+		command = WebSignInKeysCreateCommand()
+		args = []string{"--name", "Sway", "--bundle-id", "BUNDLE123", "--output-dir", outputDir, "--confirm", "--output", "json"}
+	}
+	if err := command.FlagSet.Parse(args); err != nil {
+		t.Fatal(err)
+	}
+	var runErr error
+	stdout, stderr := captureWebCommandOutput(t, func() {
+		runErr = command.Exec(context.Background(), nil)
+	})
+	if runtime.GOOS == "windows" {
+		if !errors.Is(runErr, rootfs.ErrFileIdentityMutationUnsupported) {
+			t.Fatalf("expected unsupported private publication: %v", runErr)
+		}
+		if createCalls != 0 || downloadCalls != 0 {
+			t.Fatal("created or consumed a key on unsupported platform")
+		}
+		return
+	}
+	if runErr == nil {
+		t.Fatal("expected malformed successful response to fail")
+	}
+	if !errors.Is(runErr, webcore.ErrAPIKeyResponseInvalid) {
+		t.Fatalf("expected invalid response error, got %v", runErr)
+	}
+	if strings.Contains(stdout+stderr+runErr.Error(), raw) {
+		t.Fatalf("raw response leaked to command output: stdout=%q stderr=%q err=%v", stdout, stderr, runErr)
+	}
+	if !strings.Contains(runErr.Error(), "inspect") || !strings.Contains(runErr.Error(), "do not retry") {
+		t.Fatalf("missing safe recovery guidance: %v", runErr)
+	}
+	copies, err := filepath.Glob(filepath.Join(outputDir, ".asc-api-key-*.p8"))
+	if err != nil || len(copies) != 1 {
+		t.Fatalf("expected one retained recovery file: %v %v", copies, err)
+	}
+	info, err := os.Stat(copies[0])
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("recovery file permissions = %v, err = %v", info.Mode().Perm(), err)
+	}
+	material, err := os.ReadFile(copies[0])
+	if err != nil || string(material) != raw {
+		t.Fatalf("recovery body = %q, err = %v", material, err)
+	}
+	if _, err := os.Stat(filepath.Join(outputDir, "AuthKey_KEY123.p8")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("canonical P8 unexpectedly exists, stat error = %v", err)
+	}
+	if createCalls != btoi(create) || downloadCalls != 1 {
+		t.Fatalf("create calls = %d, download calls = %d", createCalls, downloadCalls)
+	}
+}
+
+func TestWebSignInKeysDownloadFailureCleansEmptyStage(t *testing.T) {
+	originalResolve, originalClient, originalPersist := resolveSessionFn, newWebClientFn, persistWebSessionFn
+	originalDownload := downloadDeveloperSignInKeyFn
+	t.Cleanup(func() {
+		resolveSessionFn = originalResolve
+		newWebClientFn = originalClient
+		persistWebSessionFn = originalPersist
+		downloadDeveloperSignInKeyFn = originalDownload
+	})
+	resolveSessionFn = func(context.Context, string, string, string) (*webcore.AuthSession, string, error) {
+		return &webcore.AuthSession{}, "cache", nil
+	}
+	newWebClientFn = func(*webcore.AuthSession) *webcore.Client { return &webcore.Client{} }
+	persistWebSessionFn = func(*webcore.AuthSession) error { return nil }
+	downloadDeveloperSignInKeyFn = func(context.Context, *webcore.Client, string) ([]byte, error) {
+		return nil, errors.New("transport failed")
+	}
+	outputDir := t.TempDir()
+	command := WebSignInKeysDownloadCommand()
+	if err := command.FlagSet.Parse([]string{"--key-id", "KEY123", "--output-dir", outputDir, "--confirm"}); err != nil {
+		t.Fatal(err)
+	}
+	var runErr error
+	captureWebCommandOutput(t, func() { runErr = command.Exec(context.Background(), nil) })
+	if runtime.GOOS == "windows" {
+		if !errors.Is(runErr, rootfs.ErrFileIdentityMutationUnsupported) {
+			t.Fatalf("expected unsupported private publication: %v", runErr)
+		}
+		return
+	}
+	if runErr == nil {
+		t.Fatal("expected download failure")
+	}
+	copies, err := filepath.Glob(filepath.Join(outputDir, ".asc-api-key-*.p8"))
+	if err != nil || len(copies) != 0 {
+		t.Fatalf("unexpected retained recovery files: %v %v", copies, err)
+	}
+	if _, err := os.Stat(filepath.Join(outputDir, "AuthKey_KEY123.p8")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("canonical P8 unexpectedly exists, stat error = %v", err)
+	}
+}
+
+func btoi(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
