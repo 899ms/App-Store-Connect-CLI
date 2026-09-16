@@ -31,6 +31,36 @@ func TestWebSignInKeysCreateRequiresBundleID(t *testing.T) {
 	}
 }
 
+func TestWebSignInKeysCreateRequiresConfirmBeforeSessionResolution(t *testing.T) {
+	originalResolve := resolveSessionFn
+	t.Cleanup(func() { resolveSessionFn = originalResolve })
+	resolveCalls := 0
+	resolveSessionFn = func(context.Context, string, string, string) (*webcore.AuthSession, string, error) {
+		resolveCalls++
+		return nil, "", errors.New("session resolution must not run without confirmation")
+	}
+
+	command := WebSignInKeysCreateCommand()
+	if err := command.FlagSet.Parse([]string{
+		"--name", "Sway",
+		"--bundle-id", "BUNDLE123",
+		"--output-dir", t.TempDir(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr := captureWebCommandOutput(t, func() {
+		if err := command.Exec(context.Background(), nil); !errors.Is(err, flag.ErrHelp) {
+			t.Fatalf("expected usage error, got %v", err)
+		}
+	})
+	if resolveCalls != 0 {
+		t.Fatalf("resolved a web session %d time(s) without --confirm", resolveCalls)
+	}
+	if stdout != "" || !strings.Contains(stderr, "--confirm is required") {
+		t.Fatalf("unexpected output: %q %q", stdout, stderr)
+	}
+}
+
 func TestWebSignInKeysCreateSavesPrivateFileAndReceipt(t *testing.T) {
 	testWebSignInKeysCreateSavesPrivateFileAndReceipt(t, t.TempDir())
 }
@@ -64,7 +94,7 @@ func testWebSignInKeysCreateSavesPrivateFileAndReceipt(t *testing.T, directory s
 		return []byte("PRIVATE-TEST-MATERIAL"), nil
 	}
 	command := WebSignInKeysCreateCommand()
-	if err := command.FlagSet.Parse([]string{"--name", "Sway", "--bundle-id", "BUNDLE123", "--output-dir", directory, "--output", "json"}); err != nil {
+	if err := command.FlagSet.Parse([]string{"--name", "Sway", "--bundle-id", "BUNDLE123", "--output-dir", directory, "--confirm", "--output", "json"}); err != nil {
 		t.Fatal(err)
 	}
 	stdout, stderr := captureWebCommandOutput(t, func() {
@@ -117,7 +147,7 @@ func testWebSignInKeysCreateSavesPrivateFileAndReceipt(t *testing.T, directory s
 		t.Fatal("consumed download despite existing destination")
 	}
 	createCollision := WebSignInKeysCreateCommand()
-	if err := createCollision.FlagSet.Parse([]string{"--name", "Sway", "--bundle-id", "BUNDLE123", "--output-dir", directory}); err != nil {
+	if err := createCollision.FlagSet.Parse([]string{"--name", "Sway", "--bundle-id", "BUNDLE123", "--output-dir", directory, "--confirm"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := createCollision.Exec(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "P8 was not downloaded") || !strings.Contains(err.Error(), "--key-id KEY123 --output-dir OTHER_DIR") {

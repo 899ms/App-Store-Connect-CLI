@@ -115,19 +115,25 @@ func webSignInKeySaveCommand(create bool) *ffcli.Command {
 	if create {
 		operation = "create"
 	}
+	shortUsage := "asc web sign-in-keys download --key-id ID --output-dir DIR [flags]"
+	longHelp := "Requires an authenticated Developer Portal session and macOS or Linux for private file publication. Uses the existing --developer-team selection. Saves AuthKey_<KEY_ID>.p8 with mode 0600; private bytes are never printed. An uncertain create or download is never automatically retried. Inspect list before retrying a failed create."
 	fs := flag.NewFlagSet("web sign-in-keys "+operation, flag.ExitOnError)
 	authFlags := bindWebSessionFlags(fs)
 	portalFlags := bindDeveloperPortalFlags(fs)
 	output := shared.BindOutputFlags(fs)
 	outputDir := fs.String("output-dir", "", "Directory for the private P8 file (mode 0600; never overwrite)")
 	var name, bundleID, keyID string
+	var confirm bool
 	if create {
 		fs.StringVar(&name, "name", "", "Key display name")
 		fs.StringVar(&bundleID, "bundle-id", "", "Primary Sign in with Apple Bundle ID resource ID, not reverse-DNS identifier")
+		fs.BoolVar(&confirm, "confirm", false, "Confirm creating this Sign in with Apple private key")
+		shortUsage = "asc web sign-in-keys create --name NAME --bundle-id BUNDLE_RESOURCE_ID --output-dir DIR --confirm [flags]"
+		longHelp += " Creating a new Developer Portal key requires --confirm."
 	} else {
 		fs.StringVar(&keyID, "key-id", "", "Developer Portal authentication key ID")
 	}
-	return &ffcli.Command{Name: operation, ShortUsage: "asc web sign-in-keys " + operation + " [flags]", ShortHelp: strings.ToUpper(operation[:1]) + operation[1:] + " a Sign in with Apple key and save its one-time P8 privately.", LongHelp: "Requires an authenticated Developer Portal session and macOS or Linux for private file publication. Uses the existing --developer-team selection. Saves AuthKey_<KEY_ID>.p8 with mode 0600; private bytes are never printed. An uncertain create or download is never automatically retried. Inspect list before retrying a failed create.", FlagSet: fs, UsageFunc: shared.DefaultUsageFunc, Exec: func(ctx context.Context, args []string) error {
+	return &ffcli.Command{Name: operation, ShortUsage: shortUsage, ShortHelp: strings.ToUpper(operation[:1]) + operation[1:] + " a Sign in with Apple key and save its one-time P8 privately.", LongHelp: longHelp, FlagSet: fs, UsageFunc: shared.DefaultUsageFunc, Exec: func(ctx context.Context, args []string) error {
 		if len(args) > 0 {
 			return shared.UsageError("web sign-in-keys " + operation + " does not accept positional arguments")
 		}
@@ -152,6 +158,9 @@ func webSignInKeySaveCommand(create bool) *ffcli.Command {
 		}
 		if strings.TrimSpace(*outputDir) == "" {
 			return shared.UsageError("--output-dir is required")
+		}
+		if create && !confirm {
+			return shared.UsageError("--confirm is required")
 		}
 		if err := validateDeveloperPortalFlags(portalFlags); err != nil {
 			return err

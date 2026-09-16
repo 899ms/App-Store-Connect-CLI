@@ -1035,11 +1035,11 @@ Use this family to create a key scoped to a primary Sign in with Apple App ID an
 ```bash
 asc web sign-in-keys list --developer-team TEAM_ID --output json
 asc web sign-in-keys view --key-id KEY_ID --developer-team TEAM_ID --output json
-asc web sign-in-keys create --name "My App Sign in with Apple" --bundle-id BUNDLE_RESOURCE_ID --developer-team TEAM_ID --output-dir ./private-keys
+asc web sign-in-keys create --name "My App Sign in with Apple" --bundle-id BUNDLE_RESOURCE_ID --developer-team TEAM_ID --output-dir ./private-keys --confirm
 asc web sign-in-keys download --key-id KEY_ID --developer-team TEAM_ID --output-dir ./private-keys
 ```
 
-`--bundle-id` is the opaque Bundle ID resource ID returned by `asc bundle-ids list`, not the reverse-DNS identifier. Enable Sign in with Apple on that App ID first. Creation verifies the returned key's bundle association before downloading it. Existing keys with the same name are not duplicated.
+`--bundle-id` is the opaque Bundle ID resource ID returned by `asc bundle-ids list`, not the reverse-DNS identifier. Enable Sign in with Apple on that App ID first. Creation requires `--confirm`, verifies the returned key's bundle association before downloading it, and does not duplicate an existing key with the same name.
 
 `list` includes other Developer Portal authentication-key services and requests up to 1000 keys. `view` exposes service configurations. JSON reads preserve Apple's response envelope. Creation and download print a non-secret receipt containing the key ID and saved path; private bytes are never printed. P8 files are saved with mode 0600 and existing destinations are never overwritten.
 
