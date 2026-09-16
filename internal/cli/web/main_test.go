@@ -17,6 +17,9 @@ func TestMain(m *testing.M) {
 	_ = os.Setenv("ASC_BYPASS_KEYCHAIN", "1")
 	_ = os.Setenv("ASC_WEB_SESSION_CACHE_DIR", tempDir)
 	_ = os.Setenv("ASC_WEB_SESSION_CACHE_BACKEND", "file")
+	// The Apple ID environment fallback must not leak in from the developer's
+	// own shell: a test that does not set it expects no Apple ID at all.
+	_ = os.Unsetenv(webAppleIDEnv)
 
 	code := m.Run()
 

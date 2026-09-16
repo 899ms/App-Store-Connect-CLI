@@ -179,6 +179,12 @@ asc web auth import --file ./web-session.json --apple-id "user@example.com"
 asc web auth status
 ```
 
+Set `ASC_WEB_APPLE_ID` to choose the Apple Account for the `asc web` commands
+that resolve or create a session, including `asc web auth login`, without
+repeating `--apple-id`; an explicit flag still wins. The cache-management
+commands above (`status`, `export`, `import`, `logout`) ignore it. See
+[Choosing the Apple Account](/commands/web#choosing-the-apple-account).
+
 Pass `--overwrite` to replace an existing destination file on export, or an
 existing cached session for that Apple Account on import. Isolate tests and
 automation with `ASC_WEB_SESSION_CACHE_DIR` and
