@@ -623,7 +623,7 @@ func deleteSigningRunKeychain(ctx context.Context, keychainPath string) error {
 	return nil
 }
 
-func installSigningRunProfile(ctx context.Context, uuid string, data []byte, digest string, beforeCreate func(signingRunProfileInstall) error) (signingRunProfileInstall, error) {
+func installSigningRunProfile(ctx context.Context, uuid string, data []byte, digest string, beforeCreate func(signingRunProfileInstall) error) (result signingRunProfileInstall, resultErr error) {
 	if ctx == nil {
 		return signingRunProfileInstall{}, fmt.Errorf("install provisioning profile: context is required")
 	}
@@ -698,7 +698,9 @@ func installSigningRunProfile(ctx context.Context, uuid string, data []byte, dig
 	stagedExists := true
 	defer func() {
 		if stagedExists {
-			_ = rooted.Remove(stagedName)
+			if err := rooted.Remove(stagedName); err != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("remove staged provisioning profile: %w", err))
+			}
 		}
 	}()
 	info, err := file.Stat()
@@ -716,29 +718,29 @@ func installSigningRunProfile(ctx context.Context, uuid string, data []byte, dig
 		Device: uint64(stat.Dev), Inode: stat.Ino,
 	}
 	if err := beforeCreate(planned); err != nil {
-		_ = file.Close()
-		return signingRunProfileInstall{}, fmt.Errorf("journal profile installation: %w", err)
+		closeErr := file.Close()
+		return planned, errors.Join(fmt.Errorf("journal profile installation: %w", err), closeErr)
 	}
 	if err := ctx.Err(); err != nil {
 		_ = file.Close()
-		return signingRunProfileInstall{}, err
+		return planned, err
 	}
 	if _, err := file.Write(data); err != nil {
 		_ = file.Close()
-		return signingRunProfileInstall{}, err
+		return planned, err
 	}
 	if err := file.Sync(); err != nil {
 		_ = file.Close()
-		return signingRunProfileInstall{}, err
+		return planned, err
 	}
 	if err := file.Close(); err != nil {
-		return signingRunProfileInstall{}, err
+		return planned, err
 	}
 	if err := ctx.Err(); err != nil {
-		return signingRunProfileInstall{}, err
+		return planned, err
 	}
 	if err := secureopen.RenameNoReplaceInRoot(rooted, stagedName, name); err != nil {
-		return signingRunProfileInstall{}, err
+		return planned, err
 	}
 	stagedExists = false
 	planned.StagedPath = ""
@@ -746,7 +748,16 @@ func installSigningRunProfile(ctx context.Context, uuid string, data []byte, dig
 }
 
 func removeSigningRunProfile(install signingRunProfileInstall) error {
-	return removeSigningRunProfileWithHook(install, nil)
+	var cleanupErr error
+	if install.StagedPath != "" {
+		if err := removeSigningRunStagedProfile(install.StagedPath, install.Device, install.Inode); err != nil {
+			cleanupErr = fmt.Errorf("remove staged provisioning profile: %w", err)
+		}
+	}
+	if !install.Created {
+		return cleanupErr
+	}
+	return errors.Join(cleanupErr, removeSigningRunProfileWithHook(install, nil))
 }
 
 func removeSigningRunProfileWithHook(install signingRunProfileInstall, afterVerify func() error) error {
