@@ -552,8 +552,10 @@ func printEnvAppleIDNotice(appleID string) {
 // resolveDefaultCachedAppleID picks the Apple ID of the only cached web session
 // when --apple-id names none. The chosen account is announced on stderr so a
 // caller who later caches several accounts can tell which one served the
-// request. An ambiguous cache is a usage error; a cache that cannot be listed
-// degrades to the plain missing-flag error with a warning.
+// request. This discovery helper deliberately does not construct usage errors:
+// UsageError writes to stderr, while an empty cache may still be recovered by
+// an interactive prompt. A cache that cannot be listed degrades to the empty
+// result with a warning.
 // The boolean reports the empty-cache case, the only one a command may still
 // answer with an interactive Apple ID prompt.
 func resolveDefaultCachedAppleID() (appleID string, cacheEmpty bool, err error) {
@@ -561,7 +563,7 @@ func resolveDefaultCachedAppleID() (appleID string, cacheEmpty bool, err error) 
 	if err == nil {
 		appleID = strings.TrimSpace(appleID)
 		if appleID == "" {
-			return "", true, missingAppleIDUsageError()
+			return "", true, webcore.ErrNoCachedSession
 		}
 		if sessionDefaultNoticeWriter != nil {
 			_, _ = fmt.Fprintf(sessionDefaultNoticeWriter, "Using cached web session for %s; pass --apple-id to override\n", appleID)
@@ -571,14 +573,14 @@ func resolveDefaultCachedAppleID() (appleID string, cacheEmpty bool, err error) 
 	var ambiguous *webcore.AmbiguousCachedSessionError
 	switch {
 	case errors.As(err, &ambiguous):
-		return "", false, ambiguousAppleIDUsageError(ambiguous.AppleIDs)
+		return "", false, ambiguous
 	case errors.Is(err, webcore.ErrNoCachedSession):
-		return "", true, missingAppleIDUsageError()
+		return "", true, webcore.ErrNoCachedSession
 	default:
 		if sessionCacheWarningWriter != nil {
 			_, _ = fmt.Fprintf(sessionCacheWarningWriter, "Warning: listing cached web sessions failed: %v\n", err)
 		}
-		return "", true, missingAppleIDUsageError()
+		return "", true, webcore.ErrNoCachedSession
 	}
 }
 
@@ -1055,7 +1057,11 @@ func resolveWebSession(ctx context.Context, appleID, password, twoFactorCode str
 		case defaultErr == nil:
 			resolvedAppleID = defaultAppleID
 		case opts.promptAppleID == nil || !cacheEmpty:
-			return nil, "", defaultErr
+			var ambiguous *webcore.AmbiguousCachedSessionError
+			if errors.As(defaultErr, &ambiguous) {
+				return nil, "", ambiguousAppleIDUsageError(ambiguous.AppleIDs)
+			}
+			return nil, "", missingAppleIDUsageError()
 		default:
 			if err := opts.promptAppleID(&resolvedAppleID); err != nil {
 				return nil, "", err

@@ -104,17 +104,21 @@ When the flag is omitted, the account is resolved in this order:
    all. The CLI prints `Using web session for user@example.com from
    ASC_WEB_APPLE_ID; pass --apple-id to override` on stderr.
 3. The last cached session, as recorded by `asc web auth login` or
-   `asc web auth import`.
+   `asc web auth import`. Keychain-backed caches retain their existing
+   compatibility behavior of reconstructing this remembered account from the
+   most recently updated entry when the stored pointer is missing.
 4. The only cached session, when exactly one account is cached and the
    last-session pointer no longer resolves (for example after logging out of
    the most recently used account while another account stays cached). The
    CLI prints `Using cached web session for user@example.com; pass --apple-id
    to override` on stderr so the chosen account is visible.
 
-With no cached session the command exits with code `2` and points to
-`asc web auth login --apple-id EMAIL`. With several cached sessions and no
-resolvable last-session pointer, the command exits with code `2` and lists the
-cached Apple IDs so you can pick one with `--apple-id`.
+With no cached session, non-interactive commands exit with code `2` and point
+to `asc web auth login --apple-id EMAIL`; `web apps create` can instead prompt
+for the account in an interactive terminal. With several cached sessions, the
+command lists the cached Apple IDs and exits with code `2` only when the
+existing remembered-account lookup cannot select one, so you can pick an
+account with `--apple-id`.
 
 ```bash
 # One cached account: no flag needed
