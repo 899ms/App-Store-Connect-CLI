@@ -61,6 +61,35 @@ func TestWebSignInKeysCreateRequiresConfirmBeforeSessionResolution(t *testing.T)
 	}
 }
 
+func TestWebSignInKeysDownloadRequiresConfirmBeforeSessionResolution(t *testing.T) {
+	originalResolve := resolveSessionFn
+	t.Cleanup(func() { resolveSessionFn = originalResolve })
+	resolveCalls := 0
+	resolveSessionFn = func(context.Context, string, string, string) (*webcore.AuthSession, string, error) {
+		resolveCalls++
+		return nil, "", errors.New("session resolution must not run without confirmation")
+	}
+
+	command := WebSignInKeysDownloadCommand()
+	if err := command.FlagSet.Parse([]string{
+		"--key-id", "KEY123",
+		"--output-dir", t.TempDir(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr := captureWebCommandOutput(t, func() {
+		if err := command.Exec(context.Background(), nil); !errors.Is(err, flag.ErrHelp) {
+			t.Fatalf("expected usage error, got %v", err)
+		}
+	})
+	if resolveCalls != 0 {
+		t.Fatalf("resolved a web session %d time(s) without --confirm", resolveCalls)
+	}
+	if stdout != "" || !strings.Contains(stderr, "--confirm is required") {
+		t.Fatalf("unexpected output: %q %q", stdout, stderr)
+	}
+}
+
 func TestWebSignInKeysCreateSavesPrivateFileAndReceipt(t *testing.T) {
 	testWebSignInKeysCreateSavesPrivateFileAndReceipt(t, t.TempDir())
 }
@@ -137,7 +166,7 @@ func testWebSignInKeysCreateSavesPrivateFileAndReceipt(t *testing.T, directory s
 		t.Fatal("key not saved")
 	}
 	download := WebSignInKeysDownloadCommand()
-	if err := download.FlagSet.Parse([]string{"--key-id", "KEY123", "--output-dir", directory}); err != nil {
+	if err := download.FlagSet.Parse([]string{"--key-id", "KEY123", "--output-dir", directory, "--confirm"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := download.Exec(context.Background(), nil); err == nil {
@@ -177,7 +206,7 @@ func testWebSignInKeysCreateSavesPrivateFileAndReceipt(t *testing.T, directory s
 				return []byte("PRIVATE-TEST-MATERIAL"), nil
 			}
 			command := WebSignInKeysDownloadCommand()
-			if err := command.FlagSet.Parse([]string{"--key-id", "KEY123", "--output-dir", racedDir}); err != nil {
+			if err := command.FlagSet.Parse([]string{"--key-id", "KEY123", "--output-dir", racedDir, "--confirm"}); err != nil {
 				t.Fatal(err)
 			}
 			if err := command.Exec(context.Background(), nil); err == nil {
