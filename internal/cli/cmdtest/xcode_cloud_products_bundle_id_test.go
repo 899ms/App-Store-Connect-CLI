@@ -227,3 +227,72 @@ func TestXcodeCloudProductsPaginatedTableHydratesBundleIDsFromIncludedApps(t *te
 		}
 	}
 }
+
+func TestXcodeCloudProductsPaginatedTableFallsBackWhenContinuationOmitsInclude(t *testing.T) {
+	setupAuth(t)
+	t.Setenv("ASC_APP_ID", "")
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() {
+		http.DefaultTransport = originalTransport
+	})
+
+	const nextURL = "https://api.appstoreconnect.apple.com/v1/ciProducts?cursor=PAGE2"
+	var requested []string
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requested = append(requested, req.URL.Path+"?"+req.URL.RawQuery)
+
+		var body string
+		switch req.URL.Path {
+		case "/v1/ciProducts":
+			if req.URL.Query().Get("cursor") == "" {
+				body = `{"data":[{"type":"ciProducts","id":"prod-1","attributes":{"name":"First","productType":"APP"},"relationships":{"app":{"data":{"type":"apps","id":"app-1"}}}}],` +
+					`"included":[{"type":"apps","id":"app-1","attributes":{"bundleId":"com.example.first"}}],` +
+					`"links":{"next":"` + nextURL + `"}}`
+			} else {
+				body = `{"data":[{"type":"ciProducts","id":"prod-2","attributes":{"name":"Second","productType":"APP"},"relationships":{"app":{"data":{"type":"apps","id":"app-2"}}}}],"links":{"next":""}}`
+			}
+		case "/v1/ciProducts/prod-2/app":
+			body = `{"data":{"type":"apps","id":"app-2","attributes":{"bundleId":"com.example.second"}}}`
+		default:
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
+		}
+
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+		}, nil
+	})
+
+	root := RootCommand("1.2.3")
+	root.FlagSet.SetOutput(io.Discard)
+
+	stdout, stderr := captureOutput(t, func() {
+		if err := root.Parse([]string{"xcode-cloud", "products", "list", "--paginate", "--output", "table"}); err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+		if err := root.Run(context.Background()); err != nil {
+			t.Fatalf("run error: %v", err)
+		}
+	})
+
+	if len(requested) != 3 {
+		t.Fatalf("requests = %v, want the list, the continuation page, and a fallback for prod-2 (stderr=%q)", requested, stderr)
+	}
+	if !strings.HasPrefix(requested[0], "/v1/ciProducts?") || strings.Contains(requested[0], "cursor=") {
+		t.Fatalf("first request = %q, want the list query", requested[0])
+	}
+	if !strings.Contains(requested[1], "/v1/ciProducts?cursor=PAGE2") {
+		t.Fatalf("continuation request = %q, want cursor=PAGE2", requested[1])
+	}
+	if !strings.HasPrefix(requested[2], "/v1/ciProducts/prod-2/app?") {
+		t.Fatalf("fallback request = %q, want prod-2 related app", requested[2])
+	}
+	for _, bundleID := range []string{"com.example.first", "com.example.second"} {
+		if !strings.Contains(stdout, bundleID) {
+			t.Fatalf("expected %q in output, got %q", bundleID, stdout)
+		}
+	}
+}

@@ -471,16 +471,21 @@ func shouldHydrateCiProductBundleIDs(output string) bool {
 	}
 }
 
-// hydrateCiProductBundleIDs fills missing product bundle IDs from the apps the
-// list request included. Continuation pages replay a server-supplied query that
-// may omit that include, so those still fall back to per-product lookups.
+// hydrateCiProductBundleIDs fills missing product bundle IDs from included apps
+// when the list query asked for them. A paginated next URL is server-supplied
+// and may omit that include, so any product still missing a bundle ID falls
+// back to a per-product lookup.
 func hydrateCiProductBundleIDs(ctx context.Context, client *asc.Client, resp *asc.CiProductsResponse, include []string) error {
 	if resp == nil {
 		return nil
 	}
 	if shared.HasInclude(include, "app") {
-		return hydrateCiProductBundleIDsFromIncluded(resp)
+		if err := hydrateCiProductBundleIDsFromIncluded(resp); err != nil {
+			return err
+		}
 	}
+	// A later page can replay a server next URL that dropped include=app.
+	// Products already filled from included are skipped; the rest still look up.
 	return hydrateCiProductBundleIDsFromRelatedApps(ctx, client, resp)
 }
 
