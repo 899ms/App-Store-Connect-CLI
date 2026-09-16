@@ -19,27 +19,47 @@ func recordSessionLookups(lookups *[]string) {
 	}
 }
 
-func TestResolveSessionPrefersEnvAppleIDOverCachedSessions(t *testing.T) {
+func TestResolveSessionUsesEnvAppleIDForFreshLogin(t *testing.T) {
 	dir := t.TempDir()
 	stderr := stubDefaultAppleIDResolverInputs(t, dir)
-	// Two cached accounts make the cached-session default ambiguous, so only the
-	// environment fallback can select an account here.
-	writeTestCachedWebSession(t, dir, "zed@example.com")
-	writeTestCachedWebSession(t, dir, "amy@example.com")
 	t.Setenv(webAppleIDEnv, "  env@example.com  ")
+	t.Setenv(webPasswordEnv, "env-secret")
 
 	var lookups []string
-	recordSessionLookups(&lookups)
+	tryResumeSessionFn = func(ctx context.Context, username string) (*webcore.AuthSession, bool, error) {
+		lookups = append(lookups, username)
+		return nil, false, nil
+	}
+	originalLogin := webLoginFn
+	originalPersist := persistWebSessionFn
+	t.Cleanup(func() {
+		webLoginFn = originalLogin
+		persistWebSessionFn = originalPersist
+	})
+	webLoginFn = func(ctx context.Context, creds webcore.LoginCredentials) (*webcore.AuthSession, error) {
+		if creds.Username != "env@example.com" || creds.Password != "env-secret" {
+			t.Fatalf("credentials = %+v, want environment Apple ID and password", creds)
+		}
+		return &webcore.AuthSession{UserEmail: creds.Username}, nil
+	}
+	var persisted *webcore.AuthSession
+	persistWebSessionFn = func(session *webcore.AuthSession) error {
+		persisted = session
+		return nil
+	}
 
 	session, source, err := resolveSession(context.Background(), "", "", "")
 	if err != nil {
 		t.Fatalf("resolveSession() error = %v", err)
 	}
-	if source != "cache" {
-		t.Fatalf("source = %q, want cache", source)
+	if source != "fresh" {
+		t.Fatalf("source = %q, want fresh", source)
 	}
 	if session == nil || session.UserEmail != "env@example.com" {
 		t.Fatalf("session = %+v, want env@example.com", session)
+	}
+	if persisted != session {
+		t.Fatalf("persisted session = %p, want %p", persisted, session)
 	}
 	if strings.Join(lookups, ",") != "env@example.com" {
 		t.Fatalf("lookups = %v, want [env@example.com]", lookups)

@@ -1269,7 +1269,7 @@ func WebAuthLoginCommand() *ffcli.Command {
 
 	return &ffcli.Command{
 		Name:       "login",
-		ShortUsage: "asc web auth login --apple-id EMAIL [--public-provider-id TEAM_ID]",
+		ShortUsage: "asc web auth login [--apple-id EMAIL] [--public-provider-id TEAM_ID]",
 		ShortHelp:  "Authenticate Apple web session.",
 		LongHelp: fmt.Sprintf(
 			`WEB SESSION WORKFLOWS
