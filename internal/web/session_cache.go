@@ -1121,6 +1121,28 @@ func readSessionBySelection(selection backendSelection, key string) (persistedSe
 	return sess, ok, err
 }
 
+func cachedSessionSourceForOrigin(origin sessionEntryOrigin) CachedSessionSource {
+	switch origin {
+	case sessionEntryOriginFile:
+		return CachedSessionSourceFile
+	case sessionEntryOriginKeychain:
+		return CachedSessionSourceKeychain
+	default:
+		return CachedSessionSourceUnknown
+	}
+}
+
+func selectionForCachedSessionSource(source CachedSessionSource) (backendSelection, bool) {
+	switch source {
+	case CachedSessionSourceFile:
+		return backendSelection{backend: sessionBackendFile}, true
+	case CachedSessionSourceKeychain:
+		return backendSelection{backend: sessionBackendKeychain}, true
+	default:
+		return backendSelection{}, false
+	}
+}
+
 func readSessionBySelectionWithOrigin(selection backendSelection, key string) (persistedSession, sessionEntryOrigin, bool, error) {
 	switch selection.backend {
 	case sessionBackendOff:
@@ -1468,6 +1490,17 @@ func PersistSession(session *AuthSession) error {
 // against the live App Store Connect session endpoint. This is used for
 // best-effort relogin attempts that want to preserve Apple trust cookies.
 func LoadCachedSession(username string) (*AuthSession, bool, error) {
+	return loadCachedSessionWithSource(username, CachedSessionSourceUnknown)
+}
+
+// LoadCachedSessionFromSource loads an account from the backend that supplied
+// a default identity. Explicit account lookups should use LoadCachedSession so
+// configured backend precedence remains unchanged.
+func LoadCachedSessionFromSource(username string, source CachedSessionSource) (*AuthSession, bool, error) {
+	return loadCachedSessionWithSource(username, source)
+}
+
+func loadCachedSessionWithSource(username string, source CachedSessionSource) (*AuthSession, bool, error) {
 	username = strings.TrimSpace(username)
 	if username == "" {
 		return nil, false, nil
@@ -1477,13 +1510,20 @@ func LoadCachedSession(username string) (*AuthSession, bool, error) {
 	if selection.backend == sessionBackendOff {
 		return nil, false, nil
 	}
+	if selected, ok := selectionForCachedSessionSource(source); ok {
+		selection = selected
+	}
 
 	key := webSessionCacheKey(username)
-	sess, ok, err := readSessionBySelection(selection, key)
+	sess, origin, ok, err := readSessionBySelectionWithOrigin(selection, key)
 	if err != nil || !ok {
 		return nil, false, err
 	}
-	return loadSessionFromPersistedSession(sess)
+	loaded, ok, err := loadSessionFromPersistedSession(sess)
+	if loaded != nil {
+		loaded.cachedSource = cachedSessionSourceForOrigin(origin)
+	}
+	return loaded, ok, err
 }
 
 // ResumeCachedSessionWithoutPersist validates a cached session for one Apple
@@ -1515,6 +1555,17 @@ func ResumeCachedSessionWithoutPersist(ctx context.Context, username string) (*A
 
 // TryResumeSession attempts to resume a session for a specific Apple ID.
 func TryResumeSession(ctx context.Context, username string) (*AuthSession, bool, error) {
+	return tryResumeSessionWithSource(ctx, username, CachedSessionSourceUnknown)
+}
+
+// TryResumeSessionFromSource resumes an account from the backend that supplied
+// a default identity. Explicit account lookups should use TryResumeSession so
+// configured backend precedence remains unchanged.
+func TryResumeSessionFromSource(ctx context.Context, username string, source CachedSessionSource) (*AuthSession, bool, error) {
+	return tryResumeSessionWithSource(ctx, username, source)
+}
+
+func tryResumeSessionWithSource(ctx context.Context, username string, source CachedSessionSource) (*AuthSession, bool, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1527,13 +1578,19 @@ func TryResumeSession(ctx context.Context, username string) (*AuthSession, bool,
 	if selection.backend == sessionBackendOff {
 		return nil, false, nil
 	}
+	if selected, ok := selectionForCachedSessionSource(source); ok {
+		selection = selected
+	}
 
 	key := webSessionCacheKey(username)
-	sess, ok, err := readSessionBySelection(selection, key)
+	sess, origin, ok, err := readSessionBySelectionWithOrigin(selection, key)
 	if err != nil || !ok {
 		return nil, false, err
 	}
 	resumed, ok, err := resumeFromPersistedSession(ctx, sess)
+	if resumed != nil {
+		resumed.cachedSource = cachedSessionSourceForOrigin(origin)
+	}
 	if err != nil || !ok || resumed == nil {
 		return resumed, ok, err
 	}
@@ -1683,10 +1740,14 @@ func DeleteSessionIfMatches(username string, loaded *AuthSession) (bool, error) 
 	key := webSessionCacheKey(username)
 	deleted := false
 	err := withSessionEntryLock(key, func() error {
-		current, origin, ok, err := readSessionBySelectionWithOrigin(selection, key)
+		readSelection := selection
+		if selected, selectedOK := selectionForCachedSessionSource(loaded.cachedSource); selectedOK {
+			readSelection = selected
+		}
+		current, origin, ok, err := readSessionBySelectionWithOrigin(readSelection, key)
 		if err != nil {
 			deleted = true
-			return deleteSessionEntryLocked(selection, key)
+			return deleteSessionEntryLocked(readSelection, key)
 		}
 		if !ok {
 			return nil
