@@ -496,20 +496,24 @@ Examples:
 				betaReviewSubmitted = &value
 			}
 
-			for _, group := range addResult.SkippedInternalAllBuildsGroups {
-				fmt.Fprintf(
-					os.Stderr,
-					"Skipped internal group %q (%s) because it already receives all builds\n",
-					group.NameForDisplay(),
-					group.ID,
-				)
-			}
+			reportSkippedInternalAllBuildsGroups(addResult.SkippedInternalAllBuildsGroups)
 			result.BetaReviewSubmitted = betaReviewSubmitted
 			result.BetaReviewSubmissionID = submissionResult.SubmissionID
 			attachTestFlightLocalPublishResult(result, localBuildResult)
 
 			return shared.PrintOutput(result, *output.Output, *output.Pretty)
 		},
+	}
+}
+
+func reportSkippedInternalAllBuildsGroups(groups []shared.ResolvedBetaGroup) {
+	for _, group := range groups {
+		fmt.Fprintf(
+			os.Stderr,
+			"Skipped internal group %q (%s) because it already receives all builds\n",
+			group.NameForDisplay(),
+			shared.SanitizeTerminal(group.ID),
+		)
 	}
 }
 
