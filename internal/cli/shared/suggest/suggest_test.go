@@ -129,6 +129,18 @@ func TestCommandsSubstringSuggestion(t *testing.T) {
 	}
 }
 
+func TestCommandsSubstringSuggestionRequiresForwardHyphenComponents(t *testing.T) {
+	if got := Commands("release", []string{"phased-release"}); !slices.Equal(got, []string{"phased-release"}) {
+		t.Fatalf("Commands() = %v, want a hyphen-component match", got)
+	}
+	if got := Commands("hased", []string{"phased-release"}); got != nil {
+		t.Fatalf("Commands() = %v, want no mid-component match", got)
+	}
+	if got := Commands("my-phased-release-command", []string{"phased-release"}); got != nil {
+		t.Fatalf("Commands() = %v, want no reverse-containment match", got)
+	}
+}
+
 func TestCommandsRanksPrefixBeforeSubstringBeforeEdits(t *testing.T) {
 	got := Commands("list", []string{"lits", "listen", "app-list-all"})
 	want := []string{"listen", "app-list-all", "lits"}

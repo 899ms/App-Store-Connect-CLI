@@ -51,7 +51,7 @@ func TestRunUnknownSubcommandTaskHints(t *testing.T) {
 			name:         "typo keeps the nearest-match suggestion",
 			args:         []string{"builds", "lsit"},
 			wantOrder:    []string{"Error: unknown command `asc builds lsit`", "Try:", "For help:"},
-			wantContains: []string{"  asc builds list\n"},
+			wantContains: []string{"  asc builds list --help\n"},
 			wantAbsent:   []string{"Common tasks:"},
 		},
 		{

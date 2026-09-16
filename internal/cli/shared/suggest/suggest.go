@@ -12,9 +12,9 @@ type candidate struct {
 }
 
 // Commands returns up to three likely command-name suggestions for the provided
-// input, ranked by prefix relationship, then substring containment, then edit
-// distance. It is intentionally conservative: if we aren't reasonably
-// confident, it returns nil.
+// input, ranked by prefix relationship, then whole hyphen-component
+// containment, then edit distance. It is intentionally conservative: if we
+// aren't reasonably confident, it returns nil.
 func Commands(input string, candidates []string) []string {
 	in := strings.ToLower(strings.TrimSpace(input))
 	if in == "" {
@@ -35,8 +35,8 @@ func Commands(input string, candidates []string) []string {
 			collected = append(collected, candidate{name: name, score: 0, dist: d})
 			continue
 		}
-		// A remembered fragment of a hyphenated name (`phased` for
-		// `phased-release`) or a name buried in a longer guess.
+		// A remembered component span of a hyphenated name (`phased` for
+		// `phased-release` or `list` for `app-list-all`).
 		if isSubstringMatch(in, name) {
 			collected = append(collected, candidate{name: name, score: 1, dist: d})
 			continue
@@ -119,15 +119,15 @@ func Flags(input string, candidates []string) []string {
 	return suggestions
 }
 
-// minSubstringMatchLength keeps two-letter fragments from matching half the
-// command tree: a substring needs at least this many characters to count.
+// minSubstringMatchLength keeps tiny hyphen components from matching half the
+// command tree: a component span needs at least this many characters to count.
 const minSubstringMatchLength = 3
 
 func isSubstringMatch(input, name string) bool {
 	if min(len(input), len(name)) < minSubstringMatchLength {
 		return false
 	}
-	return strings.Contains(name, input) || strings.Contains(input, name)
+	return strings.Contains("-"+name+"-", "-"+input+"-")
 }
 
 func withinThreshold(input string, dist int) bool {

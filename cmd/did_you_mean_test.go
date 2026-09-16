@@ -71,13 +71,12 @@ func TestRun_UnknownChildOffersSynonymSuggestions(t *testing.T) {
 				"  asc agreements --help\n",
 		},
 		{
-			name: "synonyms rank before near matches and the merged list caps at three",
+			name: "curated synonyms do not mix in a weaker fuzzy tier",
 			args: []string{"apps", "search"},
 			wantStderr: "Error: unknown command `asc apps search`\n" +
 				"Try:\n" +
 				"  asc apps list --name NAME\n" +
 				"  asc apps list --bundle-id BUNDLE_ID\n" +
-				"  asc apps search-keywords\n" +
 				"For help:\n" +
 				"  asc apps --help\n",
 		},
@@ -105,9 +104,18 @@ func TestRun_UnknownChildOffersSynonymSuggestions(t *testing.T) {
 			args: []string{"versions", "phased"},
 			wantStderr: "Error: unknown command `asc versions phased`\n" +
 				"Try:\n" +
-				"  asc versions phased-release\n" +
+				"  asc versions phased-release --help\n" +
 				"For help:\n" +
 				"  asc versions --help\n",
+		},
+		{
+			name: "fuzzy typo points to runnable command help",
+			args: []string{"builds", "lsit"},
+			wantStderr: "Error: unknown command `asc builds lsit`\n" +
+				"Try:\n" +
+				"  asc builds list --help\n" +
+				"For help:\n" +
+				"  asc builds --help\n",
 		},
 	}
 
@@ -258,8 +266,8 @@ func TestRun_UnknownChildGenericAliasesReachUncuratedGroups(t *testing.T) {
 			args: []string{"accessibility", "get"},
 			wantStderr: "Error: unknown command `asc accessibility get`\n" +
 				"Try:\n" +
-				"  asc accessibility view\n" +
-				"  asc accessibility list\n" +
+				"  asc accessibility view --help\n" +
+				"  asc accessibility list --help\n" +
 				"For help:\n" +
 				"  asc accessibility --help\n",
 		},
@@ -268,7 +276,7 @@ func TestRun_UnknownChildGenericAliasesReachUncuratedGroups(t *testing.T) {
 			args: []string{"accessibility", "set"},
 			wantStderr: "Error: unknown command `asc accessibility set`\n" +
 				"Try:\n" +
-				"  asc accessibility update\n" +
+				"  asc accessibility update --help\n" +
 				"For help:\n" +
 				"  asc accessibility --help\n",
 		},
@@ -277,7 +285,7 @@ func TestRun_UnknownChildGenericAliasesReachUncuratedGroups(t *testing.T) {
 			args: []string{"devices", "add"},
 			wantStderr: "Error: unknown command `asc devices add`\n" +
 				"Try:\n" +
-				"  asc devices register\n" +
+				"  asc devices register --help\n" +
 				"For help:\n" +
 				"  asc devices --help\n",
 		},
@@ -286,7 +294,7 @@ func TestRun_UnknownChildGenericAliasesReachUncuratedGroups(t *testing.T) {
 			args: []string{"certificates", "rm"},
 			wantStderr: "Error: unknown command `asc certificates rm`\n" +
 				"Try:\n" +
-				"  asc certificates revoke\n" +
+				"  asc certificates revoke --help\n" +
 				"For help:\n" +
 				"  asc certificates --help\n",
 		},
@@ -295,9 +303,27 @@ func TestRun_UnknownChildGenericAliasesReachUncuratedGroups(t *testing.T) {
 			args: []string{"profiles", "rm"},
 			wantStderr: "Error: unknown command `asc profiles rm`\n" +
 				"Try:\n" +
-				"  asc profiles delete\n" +
+				"  asc profiles delete --help\n" +
 				"For help:\n" +
 				"  asc profiles --help\n",
+		},
+		{
+			name: "set reaches update without fuzzy top-ups",
+			args: []string{"versions", "set"},
+			wantStderr: "Error: unknown command `asc versions set`\n" +
+				"Try:\n" +
+				"  asc versions update --help\n" +
+				"For help:\n" +
+				"  asc versions --help\n",
+		},
+		{
+			name: "set reaches the subscription update help",
+			args: []string{"subscriptions", "set"},
+			wantStderr: "Error: unknown command `asc subscriptions set`\n" +
+				"Try:\n" +
+				"  asc subscriptions update --help\n" +
+				"For help:\n" +
+				"  asc subscriptions --help\n",
 		},
 	}
 
@@ -368,6 +394,49 @@ func TestUnknownChildCuratedSynonymsOutrankGenericAliases(t *testing.T) {
 	want := unknownChildSynonyms["asc apps"]["get"]
 	if !slices.Equal(got, want) {
 		t.Fatalf("unknownChildSuggestions() = %v, want the curated entries %v", got, want)
+	}
+}
+
+func TestUnknownChildGeneratedSuggestionsOpenRunnableHelp(t *testing.T) {
+	root := RootCommand("1.0.0")
+	tests := []struct {
+		group []string
+		token string
+	}{
+		{group: []string{"versions"}, token: "set"},
+		{group: []string{"subscriptions"}, token: "set"},
+		{group: []string{"devices"}, token: "add"},
+		{group: []string{"certificates"}, token: "rm"},
+		{group: []string{"builds"}, token: "lsit"},
+	}
+
+	for _, test := range tests {
+		name := strings.Join(append(append([]string{}, test.group...), test.token), " ")
+		t.Run(name, func(t *testing.T) {
+			command := resolveCommandPath(root, test.group)
+			if command == nil {
+				t.Fatalf("group %q does not resolve", strings.Join(test.group, " "))
+			}
+			commandName := "asc " + strings.Join(test.group, " ")
+			suggestions := unknownChildSuggestions(command, commandName, test.token)
+			if len(suggestions) == 0 {
+				t.Fatal("expected a suggestion")
+			}
+			for _, suggestion := range suggestions {
+				if !strings.HasSuffix(suggestion, " --help") {
+					t.Fatalf("generated suggestion %q does not open help", suggestion)
+				}
+				args := strings.Fields(strings.TrimPrefix(suggestion, "asc "))
+				stdout, stderr := captureCommandOutput(t, func() {
+					if code := Run(args, "1.0.0"); code != ExitSuccess {
+						t.Fatalf("Run(%q) exit code = %d, want %d", args, code, ExitSuccess)
+					}
+				})
+				if stderr != "" || strings.TrimSpace(stdout) == "" {
+					t.Fatalf("Run(%q) stdout=%q stderr=%q, want non-empty help on stdout", args, stdout, stderr)
+				}
+			}
+		})
 	}
 }
 

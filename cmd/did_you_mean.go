@@ -10,7 +10,7 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared/suggest"
 )
 
-// maxUnknownChildSuggestions caps the merged `Try:` block for an unknown
+// maxUnknownChildSuggestions caps the selected `Try:` tier for an unknown
 // subcommand. Three lines answer the caller without turning the error into a
 // second help page.
 const maxUnknownChildSuggestions = 3
@@ -181,13 +181,13 @@ var genericChildAliases = map[string][]string{
 	"destroy": {"delete"},
 }
 
-// unknownChildSuggestions ranks full invocations for an unknown subcommand of
-// command (rendered as commandName): curated synonyms for the exact token
-// first, then generic verb aliases the group can satisfy, then nearest-name
-// matches among the group's visible subcommands. A suggestion whose command
-// path an earlier one already uses is dropped so the block never lists `asc
-// review submit` twice. The result holds at most maxUnknownChildSuggestions
-// entries and is nil when nothing is confident.
+// unknownChildSuggestions returns the strongest non-empty suggestion tier for
+// an unknown subcommand of command (rendered as commandName): curated synonyms
+// for the exact token, then generic verb aliases the group can satisfy, then
+// nearest-name matches among the group's visible subcommands. Tiers are not
+// mixed: weaker guesses do not pad an already useful answer. Generic and fuzzy
+// matches point to command help because the matcher cannot know which required
+// flags the caller intended; curated entries carry complete invocations.
 func unknownChildSuggestions(command *ffcli.Command, commandName, token string) []string {
 	suggestions := make([]string, 0, maxUnknownChildSuggestions)
 	seen := make(map[string]struct{}, maxUnknownChildSuggestions)
@@ -201,40 +201,30 @@ func unknownChildSuggestions(command *ffcli.Command, commandName, token string) 
 
 	normalized := strings.ToLower(strings.TrimSpace(token))
 	curated, isCurated := unknownChildSynonyms[commandName][normalized]
-	for _, invocation := range curated {
-		add(invocation)
-	}
-	visible := visibleSubcommandNames(command)
-	if !isCurated {
-		// A curated entry for this exact token is the better answer, so the
-		// generic aliases stay out of its way rather than appending a flagless
-		// spelling of the same target.
-		for _, name := range genericChildAliases[normalized] {
-			if !slices.Contains(visible, name) {
-				continue
-			}
-			add(commandName + " " + name)
+	if isCurated {
+		for _, invocation := range curated {
+			add(invocation)
 		}
+		return suggestions
 	}
-	for _, name := range suggest.Commands(token, visible) {
-		invocation := commandName + " " + shared.SanitizeTerminal(name)
-		if suggestionsCoverCommandPath(suggestions, invocation) {
+
+	visible := visibleSubcommandNames(command)
+	for _, name := range genericChildAliases[normalized] {
+		if !slices.Contains(visible, name) {
 			continue
 		}
-		add(invocation)
+		add(commandName + " " + name + " --help")
+	}
+	if len(suggestions) > 0 {
+		return suggestions
+	}
+
+	for _, name := range suggest.Commands(token, visible) {
+		add(commandName + " " + shared.SanitizeTerminal(name) + " --help")
 	}
 
 	if len(suggestions) == 0 {
 		return nil
 	}
 	return suggestions
-}
-
-func suggestionsCoverCommandPath(suggestions []string, commandPath string) bool {
-	for _, suggestion := range suggestions {
-		if suggestion == commandPath || strings.HasPrefix(suggestion, commandPath+" ") {
-			return true
-		}
-	}
-	return false
 }
