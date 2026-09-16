@@ -36,6 +36,17 @@ var buildRelationshipKinds = map[string]relationshipKind{
 	"icons":                  relationshipList,
 }
 
+var buildRelationshipResourceTypes = map[string][]string{
+	"app":                    {"apps"},
+	"appStoreVersion":        {"appStoreVersions"},
+	"betaBuildLocalizations": {"betaBuildLocalizations"},
+	"buildBetaDetail":        {"buildBetaDetails"},
+	"diagnosticSignatures":   {"diagnosticSignatures"},
+	"icons":                  {"buildIcons"},
+	"individualTesters":      {"betaTesters"},
+	"preReleaseVersion":      {"preReleaseVersions"},
+}
+
 // BuildsRelationshipsCommand returns the builds links command group.
 func BuildsRelationshipsCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("links", flag.ExitOnError)
@@ -138,9 +149,10 @@ Examples:
 			// build ID. The --build-id hint applies only when that flag,
 			// rather than an --app selector, named the build.
 			parent := shared.RelationshipParent{
-				ResourceType: "builds",
-				Label:        "build",
-				ID:           buildID,
+				ResourceType:              "builds",
+				Label:                     "build",
+				ID:                        buildID,
+				RelationshipResourceTypes: buildRelationshipResourceTypes[relationshipType],
 			}
 			if strings.TrimSpace(selectors.value(selectors.buildID)) != "" {
 				parent.Hint = buildIDNotFoundHint

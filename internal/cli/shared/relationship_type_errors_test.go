@@ -13,6 +13,8 @@ const missingBuildBody = `{"errors":[{"id":"6f3a1c22-1d7e-4c0e-9f1a-7b2c3d4e5f60
 
 const missingRelationshipBody = `{"errors":[{"id":"7c8d9e0f-1a2b-4c3d-8e9f-0a1b2c3d4e5f","status":"404","code":"NOT_FOUND","title":"The specified resource does not exist","detail":"There is no resource of type 'buildBetaDetails' with id 'build-1'"}]}`
 
+const missingIrregularRelationshipBody = `{"errors":[{"id":"7c8d9e0f-1a2b-4c3d-8e9f-0a1b2c3d4e60","status":"404","code":"NOT_FOUND","title":"The specified resource does not exist","detail":"There is no resource of type 'buildIcons' with id 'build-1'"}]}`
+
 const missingUnrelatedBody = `{"errors":[{"id":"8d9e0f1a-2b3c-4d5e-9f0a-1b2c3d4e5f60","status":"404","code":"NOT_FOUND","title":"The specified resource does not exist","detail":"There is no resource of type 'apps' with id 'app-1'"}]}`
 
 func TestDescribeRelationshipLookupFailure(t *testing.T) {
@@ -70,6 +72,18 @@ func TestDescribeRelationshipLookupFailure(t *testing.T) {
 			relationshipType: "buildBetaDetail",
 			parent:           RelationshipParent{ResourceType: "builds", Label: "build"},
 			want:             "buildBetaDetail relationship was not found: The specified resource does not exist: There is no resource of type 'buildBetaDetails' with id 'build-1'",
+		},
+		{
+			name:             "explicit resource type maps an irregular relationship name",
+			err:              asc.ParseErrorWithStatus([]byte(missingIrregularRelationshipBody), 404),
+			relationshipType: "icons",
+			parent: RelationshipParent{
+				ResourceType:              "builds",
+				Label:                     "build",
+				ID:                        "build-1",
+				RelationshipResourceTypes: []string{"buildIcons"},
+			},
+			want: `icons relationship was not found for build "build-1": The specified resource does not exist: There is no resource of type 'buildIcons' with id 'build-1'`,
 		},
 		{
 			name:             "unclassified not found keeps the api message",

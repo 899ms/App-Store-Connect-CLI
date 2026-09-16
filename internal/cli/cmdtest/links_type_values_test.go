@@ -235,6 +235,20 @@ func TestLinksNotFoundNamesMissingResource(t *testing.T) {
 			wantPrefix: `builds links view: buildBetaDetail relationship was not found for build "build-1"`,
 		},
 		{
+			name:       "builds links missing icons relationship",
+			args:       []string{"builds", "links", "view", "--build-id", "build-1", "--type", "icons", "--output", "json"},
+			path:       "/v1/builds/build-1/relationships/icons",
+			body:       notFoundBody("buildIcons", "build-1"),
+			wantPrefix: `builds links view: icons relationship was not found for build "build-1"`,
+		},
+		{
+			name:       "builds links missing individual testers relationship",
+			args:       []string{"builds", "links", "view", "--build-id", "build-1", "--type", "individualTesters", "--output", "json"},
+			path:       "/v1/builds/build-1/relationships/individualTesters",
+			body:       notFoundBody("betaTesters", "build-1"),
+			wantPrefix: `builds links view: individualTesters relationship was not found for build "build-1"`,
+		},
+		{
 			name:    "builds links next url",
 			args:    []string{"builds", "links", "view", "--type", "individualTesters", "--next", "https://api.appstoreconnect.apple.com/v1/builds/other-build/relationships/individualTesters?cursor=NEXT", "--output", "json"},
 			path:    "/v1/builds/other-build/relationships/individualTesters",

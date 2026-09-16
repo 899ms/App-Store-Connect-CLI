@@ -56,6 +56,10 @@ type RelationshipParent struct {
 	ID string
 	// Hint is optional flag guidance appended to the unknown-parent message.
 	Hint string
+	// RelationshipResourceTypes are the JSON:API resource types that can back
+	// the selected relationship. Set this when the relationship path and
+	// resource type do not share the same name, such as icons and buildIcons.
+	RelationshipResourceTypes []string
 }
 
 // DescribeRelationshipLookupFailure names the resource App Store Connect could
@@ -69,7 +73,7 @@ func DescribeRelationshipLookupFailure(err error, relationshipType string, paren
 	if parent.ResourceType != "" && asc.IsMissingResourceOfType(err, parent.ResourceType) {
 		return NewErrorWithCause(errors.New(unknownRelationshipParentMessage(parent)), err)
 	}
-	if !namesRelationshipResource(err, relationshipType) {
+	if !namesRelationshipResource(err, relationshipType, parent.RelationshipResourceTypes) {
 		return err
 	}
 	if parent.ID == "" {
@@ -96,7 +100,12 @@ func unknownRelationshipParentMessage(parent RelationshipParent) string {
 // resource behind relationshipType, which Apple spells either exactly like the
 // relationship or as its plural. Any other 404 keeps its original message so
 // an unrelated failure is not relabeled as a missing relationship.
-func namesRelationshipResource(err error, relationshipType string) bool {
+func namesRelationshipResource(err error, relationshipType string, explicitResourceTypes []string) bool {
+	for _, resourceType := range explicitResourceTypes {
+		if asc.IsMissingResourceOfType(err, resourceType) {
+			return true
+		}
+	}
 	return asc.IsMissingResourceOfType(err, relationshipType) ||
 		asc.IsMissingResourceOfType(err, relationshipType+"s")
 }
