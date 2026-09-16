@@ -169,7 +169,7 @@ Examples:
 			case shared.LocalizationTypeVersion:
 				resolvedVersionID := strings.TrimSpace(*versionID)
 				resolvedAppID := shared.ResolveAppID(*appID)
-				if resolvedVersionID == "" && resolvedAppID == "" {
+				if resolvedVersionID == "" && resolvedAppID == "" && strings.TrimSpace(*next) == "" {
 					fmt.Fprintln(os.Stderr, "Error: --version is required for version localizations (or pass --app to use the app's editable or live version)")
 					return shared.MissingRequiredUsageError("--version")
 				}

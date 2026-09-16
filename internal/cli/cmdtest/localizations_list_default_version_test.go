@@ -184,7 +184,7 @@ func TestLocalizationsListNextContinuationSkipsDefaultVersionLookup(t *testing.T
 	})
 
 	nextURL := "https://api.appstoreconnect.apple.com/v1/appStoreVersions/ver-page2/appStoreVersionLocalizations?cursor=NEXT"
-	stdout, stderr, runErr := runLocalizationsList(t, "localizations", "list", "--app", "app-1", "--next", nextURL)
+	stdout, stderr, runErr := runLocalizationsList(t, "localizations", "list", "--next", nextURL)
 	if runErr != nil {
 		t.Fatalf("Run() error = %v", runErr)
 	}
