@@ -1098,6 +1098,26 @@ Changing the persistent next build number requires the App Store Connect Admin o
 
 `version-aliases list` returns at most 100 aliases without continuation metadata. `view` preserves Apple's raw detail response in JSON. `create` requires `--product-id`, `--name`, `--type macos_version|xcode_version`, `--build`, and `--confirm`; use a supported Apple build value. `update` requires `--product-id`, `--id`, at least one of `--name`, `--type`, `--build`, or `--locked`, and `--confirm`, preserving omitted fields. `delete` requires `--product-id`, `--id`, and `--confirm` and verifies absence afterward. Apple may restrict locked aliases or aliases used by workflows; ambiguous writes are not retried automatically.
 
+## Sign in with Apple private keys
+
+Developer Portal authentication keys are different from App Store Connect API keys.
+Use this family to create a key scoped to a primary Sign in with Apple App ID and save its one-time P8 download.
+
+```bash
+asc web sign-in-keys list --developer-team TEAM_ID --output json
+asc web sign-in-keys view --key-id KEY_ID --developer-team TEAM_ID --output json
+asc web sign-in-keys create --name "My App Sign in with Apple" --bundle-id BUNDLE_RESOURCE_ID --developer-team TEAM_ID --output-dir ./private-keys --confirm
+asc web sign-in-keys download --key-id KEY_ID --developer-team TEAM_ID --output-dir ./private-keys --confirm
+```
+
+`--bundle-id` is the opaque Bundle ID resource ID returned by `asc bundle-ids list`, not the reverse-DNS identifier. Enable Sign in with Apple on that App ID first. Creation requires `--confirm`, verifies the returned key's bundle association before downloading it, and does not duplicate an existing key with the same name. Standalone download also requires `--confirm` because it can consume Apple's one-time download.
+
+`list` includes other Developer Portal authentication-key services and requests up to 1000 keys. `view` exposes service configurations. JSON reads preserve Apple's response envelope. Creation and download print a non-secret receipt containing the key ID and saved path; private bytes are never printed. P8 files are saved with mode 0600 and existing destinations are never overwritten.
+
+Private key creation and download require macOS or Linux with native atomic file publication. Unsupported platforms fail before contacting Apple. If the destination changes during a download, it is preserved and the private key is retained in a mode-0600 recovery file whose path appears in the error.
+
+Apple's private Developer Portal endpoints may change. An uncertain mutation or one-time download is not retried automatically. If creation fails after Apple created the key, inspect `list` and `view`, then use `download` on the existing key rather than creating another. Store the downloaded file securely; Apple may not allow a second download.
+
 ## Session upkeep
 
 Cached web sessions expire. Use `asc web auth status` to inspect the current session and `asc web auth login` to refresh it.
