@@ -117,7 +117,7 @@ a later assignment will be accepted.`,
 					os.Stderr,
 					"Skipped internal group %q (%s) because --skip-internal was set\n",
 					group.NameForDisplay(),
-					group.ID,
+					shared.SanitizeTerminal(group.ID),
 				)
 			}
 

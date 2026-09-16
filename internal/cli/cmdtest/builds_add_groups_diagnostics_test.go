@@ -216,6 +216,55 @@ func TestBuildsAddGroupsDryRunAllInternalIsNoOp(t *testing.T) {
 	}
 }
 
+func TestBuildsAddGroupsSkippedInternalDiagnosticsSanitizeProviderID(t *testing.T) {
+	const groupID = "group-control-\x1b[31mID\nNEXT"
+
+	for _, testCase := range []struct {
+		name   string
+		dryRun bool
+	}{
+		{name: "normal", dryRun: false},
+		{name: "dry-run", dryRun: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := &addGroupsDiagnosticsFixture{
+				t:          t,
+				groupInput: groupID,
+				groupsBody: `{"data":[{"type":"betaGroups","id":"group-control-\u001b[31mID\nNEXT","attributes":{"name":"QA-\u001b[31mNAME\nINJECT","isInternalGroup":true}}]}`,
+			}
+			args := []string{"--skip-internal"}
+			if testCase.dryRun {
+				args = append(args, "--dry-run")
+			}
+
+			stdout, stderr, runErr := runAddGroupsDiagnosticsArgs(t, fixture, args...)
+			if runErr != nil {
+				t.Fatalf("unexpected error: %v (stdout=%q stderr=%q)", runErr, stdout, stderr)
+			}
+
+			wantSkippedLine := `Skipped internal group "QA-\x1b[31mNAME\nINJECT" (group-control-[31mID NEXT) because --skip-internal was set` + "\n"
+			if !strings.Contains(stderr, wantSkippedLine) {
+				t.Fatalf("stderr = %q, want sanitized skipped-group diagnostic %q", stderr, wantSkippedLine)
+			}
+			if strings.Contains(stderr, "\x1b") {
+				t.Fatalf("stderr contains raw ESC: %q", stderr)
+			}
+			if strings.Contains(stderr, groupID) {
+				t.Fatalf("stderr contains unsanitized provider ID: %q", stderr)
+			}
+
+			if testCase.dryRun {
+				if fixture.postCount != 0 {
+					t.Fatalf("postCount = %d, want zero for dry-run", fixture.postCount)
+				}
+				if !strings.Contains(stdout, `"action":"no-op"`) || !strings.Contains(stdout, `"dryRun":true`) {
+					t.Fatalf("stdout = %q, want dry-run no-op receipt", stdout)
+				}
+			}
+		})
+	}
+}
+
 func TestBuildsAddGroupsDryRunRejectsSubmitBeforeNetwork(t *testing.T) {
 	fixture := &addGroupsDiagnosticsFixture{t: t, external: true}
 	_, stderr, runErr := runAddGroupsDiagnosticsArgs(t, fixture, "--submit", "--confirm", "--dry-run")
