@@ -43,7 +43,13 @@ Examples:
 Use --dry-run to resolve the build and groups and preview the relationship
 without adding groups or submitting a review. Any state shown by its
 best-effort reads is observational and advisory, and does not predict whether
-a later assignment will be accepted.`,
+a later assignment will be accepted.
+
+Normal assignments verify the current build processing and expiry before
+sending the relationship request. Assignments that include an external group
+also verify encryption, audience, and beta-review state. If App Store Connect
+does not provide enough state to prove readiness, the command stops without
+sending that request.`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
@@ -98,6 +104,11 @@ a later assignment will be accepted.`,
 			})
 			if *dryRun {
 				return reportBuildBetaGroupAssignmentDryRun(requestCtx, client, buildID, plan, output)
+			}
+			if err := shared.PreflightBuildBetaGroupAssignment(requestCtx, client, buildID, plan, shared.BuildBetaGroupPreflightOptions{
+				OperationName: "builds add-groups",
+			}); err != nil {
+				return err
 			}
 
 			addResult, err := shared.AddBuildBetaGroups(requestCtx, client, buildID, resolvedGroups, shared.AddBuildBetaGroupsOptions{
