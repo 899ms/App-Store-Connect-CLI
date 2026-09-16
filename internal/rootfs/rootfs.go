@@ -674,7 +674,9 @@ func trustedAnchorFor(path string) (Root, string, error) {
 	}
 	volumeRoot := filepath.VolumeName(absolute) + string(filepath.Separator)
 	rootPath := volumeRoot
-	for _, candidate := range []string{workingDirectory(), os.TempDir()} {
+	candidates := []string{workingDirectory(), os.TempDir()}
+	candidates = append(candidates, trustedPathAliases()...)
+	for _, candidate := range candidates {
 		candidate, err = filepath.Abs(candidate)
 		if err != nil {
 			continue
