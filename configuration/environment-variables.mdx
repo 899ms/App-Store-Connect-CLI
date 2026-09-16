@@ -118,17 +118,19 @@ These variables apply only to `asc ads`. They do not replace `ASC_KEY_ID`,
 These variables apply only to the `asc web` command family, which authenticates
 with a cached Apple Account web session instead of an App Store Connect API key.
 They do not replace `ASC_KEY_ID`, `ASC_ISSUER_ID`, or the other API credentials.
+`ASC_WEB_APPLE_ID`, which selects an account before session resolution, is
+documented with the authentication variables above.
 
 <ParamField path="ASC_WEB_PASSWORD" type="string">
   Apple Account password used for a non-interactive `asc web` login
 
   Read only when a fresh login is required, so a resumable cached session is
-  used first. The deprecated `--password` flag on `asc web apps create` wins
-  when it is set; otherwise this variable is used before the saved-password
-  store and before the interactive prompt, which lets a login succeed without a
-  terminal. Only an interactively prompted password is written to the
-  saved-password store, so a password supplied here is used for that login and
-  never persisted. Mask it in CI and disable shell tracing.
+  used first. The temporary compatibility `--password` flag on `asc web apps
+  create` wins when it is set; otherwise this variable is used before the
+  saved-password store and before the interactive prompt, which lets a login
+  succeed without a terminal. Only an interactively prompted password is
+  written to the saved-password store, so a password supplied here is used for
+  that login and never persisted. Mask it in CI and disable shell tracing.
 </ParamField>
 
 <ParamField path="ASC_WEB_DONT_STORE_PASSWORD" type="boolean">
@@ -191,8 +193,10 @@ They do not replace `ASC_KEY_ID`, `ASC_ISSUER_ID`, or the other API credentials.
 
 <ParamField path="ASC_WEB_SESSION_PROVIDER" type="string">
   Not an input. Any nonempty value is rejected, without echoing its contents,
-  when `--session-from-env` is used; the variable is otherwise ignored. Select a
-  provider with `--provider-id` or `--public-provider-id` instead.
+  when `--session-from-env` is used; the variable is otherwise ignored. For a
+  cached or newly created session, select a provider with `--provider-id` or
+  `--public-provider-id`. Those flags are intentionally unavailable with
+  `--session-from-env` because its bundle already identifies the session.
 </ParamField>
 
 <ParamField path="ASC_WEB_SESSION_CSRF" type="string">

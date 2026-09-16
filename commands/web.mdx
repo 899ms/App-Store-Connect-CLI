@@ -121,8 +121,8 @@ For a login with no terminal, set `ASC_WEB_PASSWORD` and
 cached session and before the saved-password store and the interactive prompt,
 and a password supplied that way is used for the login without being saved.
 `--two-factor-code-command` wins over `ASC_WEB_2FA_CODE_COMMAND`, and
-`ASC_WEB_DONT_STORE_PASSWORD=1` disables saved-password reads and writes. Every
-`asc web` environment variable is listed in
+`ASC_WEB_DONT_STORE_PASSWORD=1` disables saved-password reads and writes. The
+web-session and non-interactive-login variables are listed in
 [Web session variables](/configuration/environment-variables#web-session-variables).
 
 #### Moving a session to another machine or to CI
@@ -836,7 +836,10 @@ Available commands:
 Apple returns, which must be on its `.apple.com`, `.mzstatic.com`,
 `.amazonaws.com`, or `.cloudfront.net` hosts. A signed URL on any other host is
 refused unless the host is added to `ASC_WEB_ALLOWED_ATTACHMENT_HOSTS` as a
-comma-separated list of exact hosts or `.suffix` patterns.
+comma-separated list of exact hosts, `.suffix` patterns, or `*.suffix`
+patterns. The allowlist is checked only against Apple's original signed URL;
+redirect destinations are followed without another host check, so add only
+hosts whose redirects you trust.
 
 Subscription JSON includes both `submitWithNextAppStoreVersion` and
 `submitWithNextAppStoreVersionKnown`. When the presence field is `false`, Apple
