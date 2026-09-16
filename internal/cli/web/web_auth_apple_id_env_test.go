@@ -95,9 +95,9 @@ func TestResolveSessionExplicitAppleIDOverridesEnvAppleID(t *testing.T) {
 
 	origDefault := defaultCachedAppleIDFn
 	t.Cleanup(func() { defaultCachedAppleIDFn = origDefault })
-	defaultCachedAppleIDFn = func() (string, error) {
+	defaultCachedAppleIDFn = func() (string, webcore.CachedSessionSource, error) {
 		t.Fatal("did not expect cached-session default resolution when --apple-id is set")
-		return "", nil
+		return "", webcore.CachedSessionSourceUnknown, nil
 	}
 
 	var lookups []string
@@ -183,9 +183,9 @@ func TestResolveWebSessionEnvAppleIDSkipsAppleIDPromptWithEmptyCache(t *testing.
 
 	origDefault := defaultCachedAppleIDFn
 	t.Cleanup(func() { defaultCachedAppleIDFn = origDefault })
-	defaultCachedAppleIDFn = func() (string, error) {
+	defaultCachedAppleIDFn = func() (string, webcore.CachedSessionSource, error) {
 		t.Fatal("did not expect cached-session default resolution when " + webAppleIDEnv + " names an account")
-		return "", nil
+		return "", webcore.CachedSessionSourceUnknown, nil
 	}
 
 	var lookups []string

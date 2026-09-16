@@ -14,13 +14,17 @@ import (
 )
 
 func writeDefaultTestSessionFile(t *testing.T, dir, email string, version int) {
+	writeDefaultTestSessionFileForKey(t, dir, email, email, version)
+}
+
+func writeDefaultTestSessionFileForKey(t *testing.T, dir, keyEmail, sessionEmail string, version int) {
 	t.Helper()
 	sess := persistedSession{
 		Version:   version,
 		UpdatedAt: time.Now(),
-		UserEmail: email,
+		UserEmail: sessionEmail,
 		Cookies: map[string][]pCookie{
-			"https://appstoreconnect.apple.com": {{Name: "myacinfo", Value: "cookie-" + email}},
+			"https://appstoreconnect.apple.com": {{Name: "myacinfo", Value: "cookie-" + sessionEmail}},
 		},
 	}
 	raw, err := json.Marshal(sess)
@@ -30,7 +34,7 @@ func writeDefaultTestSessionFile(t *testing.T, dir, email string, version int) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	path := filepath.Join(dir, "session-"+webSessionCacheKey(email)+".json")
+	path := filepath.Join(dir, "session-"+webSessionCacheKey(keyEmail)+".json")
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatalf("write session: %v", err)
 	}
@@ -214,5 +218,120 @@ func TestDefaultCachedAppleIDAutoBackendFallsBackToKeychainWhenFileCacheEmpty(t 
 	}
 	if kr.GetCount(webSessionStoreItem) != 0 {
 		t.Fatalf("keychain store read %d times, want 0", kr.GetCount(webSessionStoreItem))
+	}
+}
+
+func TestDefaultCachedAppleIDAutoBackendFallsBackToKeychainWhenFileCacheHasNoUsableIdentity(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(webSessionBackendEnv, "auto")
+	t.Setenv(webSessionCacheDirEnv, dir)
+	writeDefaultTestSessionFile(t, dir, "", webSessionCacheVersion)
+	kr := withArraySessionKeyring(t)
+
+	store := newPersistedSessionStore()
+	store.Sessions[webSessionCacheKey("kc@example.com")] = persistedSession{
+		Version:   webSessionCacheVersion,
+		UpdatedAt: time.Now(),
+		UserEmail: "kc@example.com",
+	}
+	raw, err := json.Marshal(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := kr.Set(keyring.Item{Key: webSessionStoreItem, Data: raw}); err != nil {
+		t.Fatal(err)
+	}
+	kr.ResetCounts()
+
+	appleID, err := DefaultCachedAppleID()
+	if err != nil {
+		t.Fatalf("DefaultCachedAppleID() error = %v", err)
+	}
+	if appleID != "kc@example.com" {
+		t.Fatalf("appleID = %q, want kc@example.com", appleID)
+	}
+	if got := kr.GetCount(webSessionStoreItem); got != 1 {
+		t.Fatalf("keychain store read %d times, want 1", got)
+	}
+}
+
+func TestDefaultCachedAppleIDAutoBackendDoesNotLetAnonymousFileEntryShadowKeychainSession(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(webSessionBackendEnv, "auto")
+	t.Setenv(webSessionCacheDirEnv, dir)
+	writeDefaultTestSessionFileForKey(t, dir, "kc@example.com", "", webSessionCacheVersion)
+	kr := withArraySessionKeyring(t)
+
+	store := newPersistedSessionStore()
+	store.Sessions[webSessionCacheKey("kc@example.com")] = persistedSession{
+		Version:   webSessionCacheVersion,
+		UpdatedAt: time.Now(),
+		UserEmail: "kc@example.com",
+		Cookies: map[string][]pCookie{
+			"https://appstoreconnect.apple.com": {{Name: "myacinfo", Value: "cookie-keychain"}},
+		},
+	}
+	raw, err := json.Marshal(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := kr.Set(keyring.Item{Key: webSessionStoreItem, Data: raw}); err != nil {
+		t.Fatal(err)
+	}
+
+	appleID, source, err := DefaultCachedAppleIDWithSource()
+	if err != nil {
+		t.Fatalf("DefaultCachedAppleIDWithSource() error = %v", err)
+	}
+	if appleID != "kc@example.com" {
+		t.Fatalf("appleID = %q, want kc@example.com", appleID)
+	}
+	if source != CachedSessionSourceKeychain {
+		t.Fatalf("source = %v, want keychain", source)
+	}
+	loaded, ok, err := LoadCachedSessionFromSource(appleID, source)
+	if err != nil || !ok {
+		t.Fatalf("LoadCachedSessionFromSource() = (%v, %t, %v), want keychain session", loaded, ok, err)
+	}
+	if loaded.UserEmail != "kc@example.com" {
+		t.Fatalf("loaded UserEmail = %q, want keychain identity", loaded.UserEmail)
+	}
+	loaded, ok, err = LoadCachedSession(appleID)
+	if err != nil || !ok {
+		t.Fatalf("LoadCachedSession() = (%v, %t, %v), want legacy file session", loaded, ok, err)
+	}
+	if loaded.UserEmail != "" {
+		t.Fatalf("generic loaded UserEmail = %q, want anonymous file precedence", loaded.UserEmail)
+	}
+}
+
+func TestDefaultCachedAppleIDExplicitFileBackendDoesNotFallbackForAnonymousCache(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(webSessionBackendEnv, "file")
+	t.Setenv(webSessionCacheDirEnv, dir)
+	writeDefaultTestSessionFile(t, dir, "", webSessionCacheVersion)
+	kr := withArraySessionKeyring(t)
+
+	store := newPersistedSessionStore()
+	store.Sessions[webSessionCacheKey("kc@example.com")] = persistedSession{
+		Version:   webSessionCacheVersion,
+		UpdatedAt: time.Now(),
+		UserEmail: "kc@example.com",
+	}
+	raw, err := json.Marshal(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := kr.Set(keyring.Item{Key: webSessionStoreItem, Data: raw}); err != nil {
+		t.Fatal(err)
+	}
+	kr.ResetCounts()
+
+	appleID, err := DefaultCachedAppleID()
+	if !errors.Is(err, ErrNoCachedSession) {
+		t.Fatalf("DefaultCachedAppleID() = %q, %v; want ErrNoCachedSession", appleID, err)
+	}
+	if got := kr.GetCount(webSessionStoreItem); got != 0 {
+		t.Fatalf("keychain store read %d times, want 0", got)
 	}
 }
