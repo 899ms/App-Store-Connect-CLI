@@ -638,6 +638,17 @@ func OpenFile(path string) (*os.File, error) {
 	return root.OpenFile(relative)
 }
 
+// CheckContainedPath verifies an operator-supplied path through the same
+// rooted traversal used by OpenFile without opening the target. It rejects a
+// symlink in any component below the selected trusted anchor.
+func CheckContainedPath(path string) error {
+	root, relative, err := trustedAnchorFor(path)
+	if err != nil {
+		return err
+	}
+	return errors.Join(root.CheckContained(relative), root.Close())
+}
+
 // ChmodFile changes the mode of an existing regular file through the same
 // rooted traversal OpenFile uses. A symlinked final component, a symlink in any
 // component below the selected root, and any non-regular file are rejected.

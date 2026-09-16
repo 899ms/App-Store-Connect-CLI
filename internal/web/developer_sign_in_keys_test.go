@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -124,5 +125,86 @@ func TestDeveloperSignInKeyRejectsOtherServiceBeforeDownload(t *testing.T) {
 	})
 	if _, err := client.DownloadDeveloperSignInKey(context.Background(), "KEY123"); err == nil || !strings.Contains(err.Error(), "not a Sign in") {
 		t.Fatalf("expected service rejection, got %v", err)
+	}
+}
+
+func TestDeveloperSignInKeyDownloadInvalid2xxRetainsRecoveryBody(t *testing.T) {
+	const raw = "provider-error-secret"
+	downloadCalls := 0
+	client := developerPortalTestClient(t, func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case developerPortalTeamsPath:
+			return developerPortalTestResponse(http.StatusOK, developerPortalTeamsFixture(), http.Header{"csrf": {"team"}, "csrf_ts": {"team-ts"}}), nil
+		case developerPortalLegacyPath + "/account/auth/key/list":
+			return developerPortalTestResponse(http.StatusOK, `{"resultCode":0,"keys":[{"keyId":"KEY123","canDownload":true}]}`, nil), nil
+		case developerPortalLegacyPath + "/account/auth/key/get":
+			return developerPortalTestResponse(http.StatusOK, `{"resultCode":0,"keys":[{"keyId":"KEY123","canDownload":true,"services":[{"id":"APPLE_ID_AUTH_KEY_CONFIGURATION","configurations":[]}]}]}`, nil), nil
+		case developerPortalLegacyPath + "/account/auth/key/download":
+			downloadCalls++
+			return developerPortalTestResponse(http.StatusOK, raw, nil), nil
+		default:
+			t.Fatalf("unexpected request %s", r.URL)
+			return nil, nil
+		}
+	})
+
+	_, err := client.DownloadDeveloperSignInKey(context.Background(), "KEY123")
+	if err == nil {
+		t.Fatal("expected malformed successful response to fail validation")
+	}
+	if !errors.Is(err, ErrAPIKeyResponseInvalid) {
+		t.Fatalf("expected invalid response error, got %v", err)
+	}
+	var recovery interface {
+		error
+		RecoveryBody() []byte
+	}
+	if !errors.As(err, &recovery) {
+		t.Fatalf("expected recoverable response error, got %T: %v", err, err)
+	}
+	if got := string(recovery.RecoveryBody()); got != raw {
+		t.Fatalf("recovery body = %q, want %q", got, raw)
+	}
+	body := recovery.RecoveryBody()
+	body[0] = 'X'
+	if got := string(recovery.RecoveryBody()); got != raw {
+		t.Fatalf("recovery body accessor did not return a copy: %q", got)
+	}
+	if downloadCalls != 1 {
+		t.Fatalf("download calls = %d, want 1", downloadCalls)
+	}
+}
+
+func TestDeveloperSignInKeyDownloadNon2xxHasNoRecoveryBody(t *testing.T) {
+	const raw = "provider-error-secret"
+	client := developerPortalTestClient(t, func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case developerPortalTeamsPath:
+			return developerPortalTestResponse(http.StatusOK, developerPortalTeamsFixture(), http.Header{"csrf": {"team"}, "csrf_ts": {"team-ts"}}), nil
+		case developerPortalLegacyPath + "/account/auth/key/list":
+			return developerPortalTestResponse(http.StatusOK, `{"resultCode":0,"keys":[{"keyId":"KEY123","canDownload":true}]}`, nil), nil
+		case developerPortalLegacyPath + "/account/auth/key/get":
+			return developerPortalTestResponse(http.StatusOK, `{"resultCode":0,"keys":[{"keyId":"KEY123","canDownload":true,"services":[{"id":"APPLE_ID_AUTH_KEY_CONFIGURATION","configurations":[]}]}]}`, nil), nil
+		case developerPortalLegacyPath + "/account/auth/key/download":
+			return developerPortalTestResponse(http.StatusInternalServerError, raw, nil), nil
+		default:
+			t.Fatalf("unexpected request %s", r.URL)
+			return nil, nil
+		}
+	})
+
+	_, err := client.DownloadDeveloperSignInKey(context.Background(), "KEY123")
+	if err == nil {
+		t.Fatal("expected non-2xx response to fail")
+	}
+	var recovery interface {
+		error
+		RecoveryBody() []byte
+	}
+	if errors.As(err, &recovery) {
+		t.Fatalf("non-2xx response unexpectedly exposed recovery body %q", recovery.RecoveryBody())
+	}
+	if errors.Is(err, ErrAPIKeyResponseInvalid) {
+		t.Fatalf("non-2xx response was classified as malformed P8: %v", err)
 	}
 }
