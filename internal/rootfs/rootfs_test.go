@@ -3751,6 +3751,74 @@ func TestChmodFileIfSameRejectsReplacementBeforeRootedValidation(t *testing.T) {
 	}
 }
 
+func TestChmodFileIfSameAcceptsDarwinTmpAlias(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("/tmp is a system symlink on Darwin")
+	}
+	dir, err := os.MkdirTemp("/tmp", "asc-rootfs-chmod-")
+	if err != nil {
+		t.Fatalf("MkdirTemp(/tmp) error = %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	target := filepath.Join(dir, "key.p8")
+	mustWrite(t, target, "private key")
+	if err := os.Chmod(target, 0o644); err != nil {
+		t.Fatalf("Chmod(target) error = %v", err)
+	}
+	expected, err := os.Lstat(target)
+	if err != nil {
+		t.Fatalf("Lstat(target) error = %v", err)
+	}
+
+	if err := ChmodFileIfSame(target, expected, 0o600); err != nil {
+		t.Fatalf("ChmodFileIfSame(%q) error = %v", target, err)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("Stat(target) error = %v", err)
+	}
+	if got, want := info.Mode().Perm(), os.FileMode(0o600); got != want {
+		t.Fatalf("target mode = %#o, want %#o", got, want)
+	}
+}
+
+func TestChmodFileIfSameDarwinTmpAliasRejectsNestedSymlink(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("/tmp is a system symlink on Darwin")
+	}
+	dir, err := os.MkdirTemp("/tmp", "asc-rootfs-symlink-")
+	if err != nil {
+		t.Fatalf("MkdirTemp(/tmp) error = %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	outside := t.TempDir()
+	target := filepath.Join(outside, "key.p8")
+	mustWrite(t, target, "private key")
+	if err := os.Chmod(target, 0o644); err != nil {
+		t.Fatalf("Chmod(target) error = %v", err)
+	}
+	linkedParent := filepath.Join(dir, "linked")
+	if err := os.Symlink(outside, linkedParent); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+	expected, err := os.Lstat(filepath.Join(linkedParent, "key.p8"))
+	if err != nil {
+		t.Fatalf("Lstat(linked target) error = %v", err)
+	}
+
+	err = ChmodFileIfSame(filepath.Join(linkedParent, "key.p8"), expected, 0o600)
+	if !errors.Is(err, ErrSymlink) {
+		t.Fatalf("ChmodFileIfSame() error = %v, want ErrSymlink", err)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("Stat(target) error = %v", err)
+	}
+	if got, want := info.Mode().Perm(), os.FileMode(0o644); got != want {
+		t.Fatalf("symlink target mode = %#o, want %#o untouched", got, want)
+	}
+}
+
 func TestChmodFileMutatesRetainedDescriptorAfterPathReplacement(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows does not expose POSIX permission bits")
