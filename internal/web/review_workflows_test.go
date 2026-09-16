@@ -428,3 +428,86 @@ func TestDownloadAttachmentRejectsUntrustedHost(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestDownloadAttachmentRejectsUntrustedRedirectBeforeClientPolicy(t *testing.T) {
+	policyCalls := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/start" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Location", "https://example.invalid/attachment")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer server.Close()
+	parsedURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	t.Setenv(attachmentHostsEnv, parsedURL.Hostname())
+	client := testWebClient(server)
+	client.httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		policyCalls++
+		return nil
+	}
+
+	_, _, err = client.DownloadAttachment(context.Background(), server.URL+"/start")
+	if err == nil || !strings.Contains(err.Error(), "host is not allowed") {
+		t.Fatalf("DownloadAttachment() error = %v, want redirect host rejection", err)
+	}
+	if policyCalls != 0 {
+		t.Fatalf("client redirect policy called %d times, want no callback before validation", policyCalls)
+	}
+}
+
+func TestDownloadAttachmentRejectsRedirectRewrittenByClientPolicy(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/start" {
+			http.Redirect(w, r, "/final", http.StatusFound)
+			return
+		}
+		if r.URL.Path == "/final" {
+			_, _ = w.Write([]byte("attachment"))
+			return
+		}
+		t.Fatalf("unexpected path: %s", r.URL.Path)
+	}))
+	defer server.Close()
+	parsedURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	t.Setenv(attachmentHostsEnv, parsedURL.Hostname())
+	client := testWebClient(server)
+	client.httpClient.CheckRedirect = func(redirect *http.Request, _ []*http.Request) error {
+		redirect.URL, _ = url.Parse("https://example.invalid/rewritten")
+		return nil
+	}
+
+	_, _, err = client.DownloadAttachment(context.Background(), server.URL+"/start")
+	if err == nil || !strings.Contains(err.Error(), "host is not allowed") {
+		t.Fatalf("DownloadAttachment() error = %v, want rewritten redirect host rejection", err)
+	}
+}
+
+func TestDownloadAttachmentCapsAllowedRedirectLoop(t *testing.T) {
+	redirects := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirects++
+		http.Redirect(w, r, "/loop", http.StatusFound)
+	}))
+	defer server.Close()
+	parsedURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	t.Setenv(attachmentHostsEnv, parsedURL.Hostname())
+	client := testWebClient(server)
+
+	_, _, err = client.DownloadAttachment(context.Background(), server.URL+"/loop")
+	if err == nil || !strings.Contains(err.Error(), "10 redirects") {
+		t.Fatalf("DownloadAttachment() error = %v, want redirect cap error", err)
+	}
+	if redirects > 11 {
+		t.Fatalf("redirect requests = %d, want at most 11", redirects)
+	}
+}
