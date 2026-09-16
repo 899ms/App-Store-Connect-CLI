@@ -321,7 +321,7 @@ the App Store Connect web-client source captured for issue #2299:
 ## Profiles and certificates list filters
 
 - `GET /v1/profiles` and `GET /v1/certificates` do not accept `filter[platform]`. `UNIVERSAL` is a bundle-ID platform, and sending it on these list endpoints is rejected by Apple. `asc profiles list` and `asc certificates list` must not add that parameter. Bundle ID list is the endpoint that accepts `filter[platform]`, including `UNIVERSAL`.
-- Generated provisioning-profile names have no documented maximum length in the OpenAPI snapshot. Do not truncate them until a live response proves the limit.
+- Generated provisioning-profile names have no `maxLength` in the OpenAPI snapshot. `signing fetch` and `signing sync` keep generated names within 64 characters, truncating the bundle component and appending a stable 6-character hash so siblings stay distinct. `profiles create --name` rejects a longer explicit name before any API call.
 
 ## Builds
 
