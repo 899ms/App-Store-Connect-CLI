@@ -42,6 +42,18 @@ asc builds info --app APP_ID --latest
 asc builds info --app APP_ID --build-number 42 --version 1.2.3 --platform IOS
 ```
 
+### Inspect build relationship links
+
+Use `links view` when you need the IDs connected to a build rather than the
+full related resources. Valid `--type` values are `app`, `appStoreVersion`,
+`betaBuildLocalizations`, `buildBetaDetail`, `diagnosticSignatures`, `icons`,
+`individualTesters`, and `preReleaseVersion`.
+
+```bash  theme={null}
+asc builds links view --build-id BUILD_ID --type app
+asc builds links view --build-id BUILD_ID --type individualTesters --paginate
+```
+
 ### Wait for processing
 
 ```bash  theme={null}
