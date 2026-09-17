@@ -288,6 +288,12 @@ func TestDefaultCachedAppleIDAutoBackendFallsBackToKeychainWhenFileSessionCannot
 				"https://example.com": {{Name: "session", Value: "unrelated-cookie"}},
 			},
 		},
+		{
+			name: "non-session path cookies",
+			cookies: map[string][]pCookie{
+				"https://appstoreconnect.apple.com": {{Name: "myacinfo", Value: "iris-only-cookie", Path: "/iris"}},
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -329,6 +335,52 @@ func TestDefaultCachedAppleIDAutoBackendFallsBackToKeychainWhenFileSessionCannot
 				t.Fatalf("source = %v, want keychain", source)
 			}
 		})
+	}
+}
+
+func TestDefaultCachedAppleIDAutoBackendKeepsSessionEndpointScopedFileCookie(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(webSessionBackendEnv, "auto")
+	t.Setenv(webSessionCacheDirEnv, dir)
+	writeDefaultTestSessionRecord(t, dir, "file@example.com", persistedSession{
+		Version:   webSessionCacheVersion,
+		UpdatedAt: time.Now(),
+		UserEmail: "file@example.com",
+		Cookies: map[string][]pCookie{
+			"https://appstoreconnect.apple.com": {{Name: "myacinfo", Value: "file-cookie", Path: "/olympus"}},
+		},
+	})
+	kr := withArraySessionKeyring(t)
+	store := newPersistedSessionStore()
+	store.Sessions[webSessionCacheKey("kc@example.com")] = persistedSession{
+		Version:   webSessionCacheVersion,
+		UpdatedAt: time.Now(),
+		UserEmail: "kc@example.com",
+		Cookies: map[string][]pCookie{
+			"https://appstoreconnect.apple.com": {{Name: "myacinfo", Value: "keychain-cookie"}},
+		},
+	}
+	raw, err := json.Marshal(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := kr.Set(keyring.Item{Key: webSessionStoreItem, Data: raw}); err != nil {
+		t.Fatal(err)
+	}
+	kr.ResetCounts()
+
+	appleID, source, err := DefaultCachedAppleIDWithSource()
+	if err != nil {
+		t.Fatalf("DefaultCachedAppleIDWithSource() error = %v", err)
+	}
+	if appleID != "file@example.com" {
+		t.Fatalf("appleID = %q, want file@example.com", appleID)
+	}
+	if source != CachedSessionSourceFile {
+		t.Fatalf("source = %v, want file", source)
+	}
+	if got := kr.GetCount(webSessionStoreItem); got != 0 {
+		t.Fatalf("keychain store read %d times, want 0", got)
 	}
 }
 

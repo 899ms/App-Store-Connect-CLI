@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http/cookiejar"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -145,6 +146,10 @@ func listSessionsBySelectionWithSource(selection backendSelection) ([]persistedS
 }
 
 func hydratableSessions(sessions []persistedSession) []persistedSession {
+	validationURL, err := url.Parse(olympusSessionURL)
+	if err != nil {
+		return nil
+	}
 	usable := make([]persistedSession, 0, len(sessions))
 	for _, sess := range sessions {
 		jar, err := cookiejar.New(nil)
@@ -152,14 +157,7 @@ func hydratableSessions(sessions []persistedSession) []persistedSession {
 			continue
 		}
 		hydrateCookieJar(jar, sess)
-		hydratable := false
-		for _, sessionURL := range sessionCookieURLs() {
-			if len(jar.Cookies(sessionURL)) > 0 {
-				hydratable = true
-				break
-			}
-		}
-		if !hydratable {
+		if len(jar.Cookies(validationURL)) == 0 {
 			continue
 		}
 		usable = append(usable, sess)
