@@ -3,6 +3,8 @@ package web
 import (
 	"errors"
 	"fmt"
+	"net/http/cookiejar"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -125,6 +127,9 @@ func listSessionsBySelectionWithSource(selection backendSelection) ([]persistedS
 		if err != nil {
 			return nil, CachedSessionSourceFile, err
 		}
+		if selection.fallbackKeychain {
+			sessions = hydratableSessions(sessions)
+		}
 		if len(cachedSessionAppleIDs(sessions)) > 0 || !selection.fallbackKeychain {
 			return sessions, CachedSessionSourceFile, nil
 		}
@@ -134,10 +139,30 @@ func listSessionsBySelectionWithSource(selection backendSelection) ([]persistedS
 			// leaves the empty file result standing instead of failing.
 			return nil, CachedSessionSourceFile, nil
 		}
-		return fallback, CachedSessionSourceKeychain, nil
+		return hydratableSessions(fallback), CachedSessionSourceKeychain, nil
 	default:
 		return nil, CachedSessionSourceUnknown, nil
 	}
+}
+
+func hydratableSessions(sessions []persistedSession) []persistedSession {
+	validationURL, err := url.Parse(olympusSessionURL)
+	if err != nil {
+		return nil
+	}
+	usable := make([]persistedSession, 0, len(sessions))
+	for _, sess := range sessions {
+		jar, err := cookiejar.New(nil)
+		if err != nil {
+			continue
+		}
+		hydrateCookieJar(jar, sess)
+		if len(jar.Cookies(validationURL)) == 0 {
+			continue
+		}
+		usable = append(usable, sess)
+	}
+	return usable
 }
 
 // listSessionsFromFile reads every well-formed, current-version session entry
