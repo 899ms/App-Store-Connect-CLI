@@ -725,6 +725,9 @@ func findMostRecentlyUploadedBuild(ctx context.Context, client *asc.Client, appI
 			if ctxErr := ctx.Err(); errors.Is(ctxErr, context.Canceled) || errors.Is(ctxErr, context.DeadlineExceeded) {
 				return nil, fmt.Errorf("failed to paginate builds: page %d: %w", pagesScanned+1, ctxErr)
 			}
+			if anomalyDetected {
+				return nil, fmt.Errorf("failed to paginate builds: page %d: %w", pagesScanned+1, err)
+			}
 			break
 		}
 		pagesScanned++

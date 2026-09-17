@@ -395,3 +395,43 @@ func TestResolveLatestBuildSelectionCarriesEveryEquivalentUploadVersion(t *testi
 		})
 	}
 }
+
+func TestFindMostRecentlyUploadedBuildPropagatesLaterHTTPErrorAfterOrderingAnomaly(t *testing.T) {
+	const (
+		pageTwoURL   = "https://api.appstoreconnect.apple.com/v1/builds?cursor=page-two"
+		pageThreeURL = "https://api.appstoreconnect.apple.com/v1/builds?cursor=page-three"
+	)
+
+	requestCount := 0
+	client := newBuildWaitTestClient(t, func(req *http.Request) (*http.Response, error) {
+		requestCount++
+		switch requestCount {
+		case 1:
+			return buildWaitJSONResponse(`{
+				"data": [{"type":"builds","id":"build-old","attributes":{"version":"1","uploadedDate":"2026-09-01T00:00:00Z"}}],
+				"links": {"next": "` + pageTwoURL + `"}
+			}`)
+		case 2:
+			return buildWaitJSONResponse(`{
+				"data": [{"type":"builds","id":"build-new","attributes":{"version":"2","uploadedDate":"2026-09-02T00:00:00Z"}}],
+				"links": {"next": "` + pageThreeURL + `"}
+			}`)
+		case 3:
+			return buildWaitJSONStatusResponse(http.StatusBadRequest, `{"errors":[{"code":"BAD_REQUEST","detail":"later page unavailable"}]}`)
+		default:
+			t.Fatalf("unexpected request #%d: %s", requestCount, req.URL.String())
+			return nil, nil
+		}
+	})
+
+	got, err := findMostRecentlyUploadedBuild(context.Background(), client, "app-1")
+	if err == nil {
+		t.Fatal("expected later pagination HTTP error, got nil")
+	}
+	if !strings.Contains(err.Error(), "later page unavailable") {
+		t.Fatalf("expected later page error to be preserved, got %v", err)
+	}
+	if got != nil {
+		t.Fatalf("expected no build alongside pagination error, got %#v", got)
+	}
+}
