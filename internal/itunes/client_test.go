@@ -493,6 +493,70 @@ func TestGetAllRatings_PreservesStorefrontFailureWhenFallbackOutlastsCountryDead
 	}
 }
 
+func TestGetAllRatings_PreservedStorefrontFailureWinsCountryDeadline(t *testing.T) {
+	client := &Client{
+		BaseURL: "https://example.test",
+		HTTPClient: &http.Client{
+			Transport: ratingsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusTooManyRequests,
+					Body:       http.NoBody,
+					Request:    req,
+				}, nil
+			}),
+		},
+	}
+	t.Setenv("ASC_MAX_RETRIES", "1")
+	t.Setenv("ASC_BASE_DELAY", "1s")
+	t.Setenv("ASC_MAX_DELAY", "1s")
+
+	var countries atomic.Int32
+	newCountryContext := func(parent context.Context) (context.Context, context.CancelFunc) {
+		countries.Add(1)
+		return context.WithDeadline(parent, time.Now().Add(-time.Second))
+	}
+	_, err := client.GetAllRatings(context.Background(), "123", 1, newCountryContext)
+	if err == nil {
+		t.Fatal("expected all-storefront failure")
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want the storefront failure rather than a country deadline", err)
+	}
+	var statusError interface{ HTTPStatusCode() int }
+	if !errors.As(err, &statusError) {
+		t.Fatalf("error %T does not retain HTTP status", err)
+	}
+	if got := statusError.HTTPStatusCode(); got != http.StatusTooManyRequests {
+		t.Fatalf("HTTPStatusCode() = %d, want %d", got, http.StatusTooManyRequests)
+	}
+	if got := countries.Load(); got != 1 {
+		t.Fatalf("country context factory called %d times, want 1 after retryable deadline cancellation", got)
+	}
+}
+
+func TestGetAllRatings_NonRetryableStorefrontFailureDoesNotOverrideCountryDeadline(t *testing.T) {
+	client := &Client{
+		BaseURL: "https://example.test",
+		HTTPClient: &http.Client{
+			Transport: ratingsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusNotFound,
+					Body:       http.NoBody,
+					Request:    req,
+				}, nil
+			}),
+		},
+	}
+
+	newCountryContext := func(parent context.Context) (context.Context, context.CancelFunc) {
+		return context.WithDeadline(parent, time.Now().Add(-time.Second))
+	}
+	_, err := client.GetAllRatings(context.Background(), "123", len(AllCountries()), newCountryContext)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("GetAllRatings() error = %v, want context.DeadlineExceeded", err)
+	}
+}
+
 func TestGetAllRatings_MixedHTTPFailuresSelectServerStatusDeterministically(t *testing.T) {
 	tests := []struct {
 		name            string
