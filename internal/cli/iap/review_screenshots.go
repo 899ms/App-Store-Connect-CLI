@@ -363,11 +363,30 @@ func completedIAPReviewScreenshotReplacementError(screenshotID string, relations
 	if relationshipID, err := relationshipResourceID(relationships, "inAppPurchaseV2"); err == nil {
 		iapID = relationshipID
 	}
-	manual := fmt.Sprintf("App Store Connect does not support replacing completed screenshot %q through update; run `asc iap review-screenshots delete --screenshot-id %q --confirm`, then `asc iap review-screenshots create --iap-id %q --file %q`", screenshotID, screenshotID, iapID, fileName)
+	deleteCommand, createCommand := completedIAPReviewScreenshotReplacementCommands(screenshotID, iapID, fileName)
+	manual := fmt.Sprintf("App Store Connect does not support replacing completed screenshot %s through update; run %s, then %s", shellQuotedRemediationArgument(screenshotID, "SCREENSHOT_ID"), deleteCommand, createCommand)
 	if !confirm {
 		return shared.UsageError("--confirm is required before attempting a completed screenshot replacement; " + manual)
 	}
 	return fmt.Errorf("%s", manual)
+}
+
+func completedIAPReviewScreenshotReplacementCommands(screenshotID, iapID, fileName string) (string, string) {
+	return fmt.Sprintf(
+			"asc iap review-screenshots delete --screenshot-id %s --confirm",
+			shellQuotedRemediationArgument(screenshotID, "SCREENSHOT_ID"),
+		), fmt.Sprintf(
+			"asc iap review-screenshots create --iap-id %s --file %s",
+			shellQuotedRemediationArgument(iapID, "IAP_ID"),
+			shellQuotedRemediationArgument(fileName, "FILE_PATH"),
+		)
+}
+
+func shellQuotedRemediationArgument(value, placeholder string) string {
+	if quoted, ok := shared.ShellQuote(value); ok {
+		return quoted
+	}
+	return placeholder
 }
 
 // IAPReviewScreenshotsDeleteCommand returns the review screenshots delete subcommand.
