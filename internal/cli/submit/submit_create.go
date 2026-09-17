@@ -120,7 +120,20 @@ func prepareReviewSubmissionForCreate(
 	client *asc.Client,
 	appID, platform, versionID string,
 	emit func(string),
-) submitCreateReviewSubmissionPreparation {
+) (submitCreateReviewSubmissionPreparation, error) {
+	if ctx == nil {
+		return submitCreateReviewSubmissionPreparation{}, fmt.Errorf("review submission preparation context is required")
+	}
+	if client == nil {
+		return submitCreateReviewSubmissionPreparation{}, fmt.Errorf("review submission preparation client is required")
+	}
+	appID = strings.TrimSpace(appID)
+	platform = strings.TrimSpace(platform)
+	versionID = strings.TrimSpace(versionID)
+	if appID == "" || platform == "" || versionID == "" {
+		return submitCreateReviewSubmissionPreparation{}, fmt.Errorf("app, platform, and version IDs are required")
+	}
+
 	emitMessage := func(format string, args ...any) {
 		message := fmt.Sprintf(format, args...)
 		if emit != nil {
@@ -139,26 +152,56 @@ func prepareReviewSubmissionForCreate(
 		asc.WithReviewSubmissionsLimit(200),
 	)
 	if err != nil {
-		emitMessage("Warning: failed to query stale review submissions: %v", err)
-		return submitCreateReviewSubmissionPreparation{}
+		return submitCreateReviewSubmissionPreparation{}, fmt.Errorf("query ready review submissions: %w", err)
 	}
+	if existing == nil {
+		return submitCreateReviewSubmissionPreparation{}, fmt.Errorf("query ready review submissions: response is required")
+	}
+	if existing.Data == nil {
+		return submitCreateReviewSubmissionPreparation{}, fmt.Errorf("query ready review submissions: response data is required")
+	}
+	expectedSubmissions, submissionsTotalKnown := asc.ParsePagingTotalOK(existing.Meta)
+	existing.Links.Next = strings.TrimSpace(existing.Links.Next)
 
-	submissions := make([]asc.ReviewSubmissionResource, 0, len(existing.Data))
-	for {
-		submissions = append(submissions, existing.Data...)
-		nextURL := strings.TrimSpace(existing.Links.Next)
-		if nextURL == "" {
-			break
+	paginated, err := asc.PaginateAll(ctx, existing, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
+		next, nextErr := client.GetReviewSubmissions(ctx, appID, asc.WithReviewSubmissionsNextURL(nextURL))
+		if nextErr != nil {
+			return nil, nextErr
 		}
-		existing, err = client.GetReviewSubmissions(ctx, appID, asc.WithReviewSubmissionsNextURL(nextURL))
-		if err != nil {
-			emitMessage("Warning: failed to query stale review submissions: %v", err)
-			return submitCreateReviewSubmissionPreparation{}
+		if next == nil {
+			return nil, fmt.Errorf("response is required")
 		}
+		if next.Data == nil {
+			return nil, fmt.Errorf("response data is required")
+		}
+		if nextTotal, ok := asc.ParsePagingTotalOK(next.Meta); ok {
+			if submissionsTotalKnown && nextTotal != expectedSubmissions {
+				return nil, fmt.Errorf("paging total changed from %d to %d", expectedSubmissions, nextTotal)
+			}
+			expectedSubmissions = nextTotal
+			submissionsTotalKnown = true
+		}
+		next.Links.Next = strings.TrimSpace(next.Links.Next)
+		return next, nil
+	})
+	if err != nil {
+		return submitCreateReviewSubmissionPreparation{}, fmt.Errorf("query ready review submissions: %w", err)
+	}
+	all, ok := paginated.(*asc.ReviewSubmissionsResponse)
+	if !ok || all == nil {
+		return submitCreateReviewSubmissionPreparation{}, fmt.Errorf("query ready review submissions: unexpected response type %T", paginated)
+	}
+	submissions := all.Data
+	if submissionsTotalKnown && len(submissions) != expectedSubmissions {
+		return submitCreateReviewSubmissionPreparation{}, fmt.Errorf(
+			"query ready review submissions: incomplete response: received %d of %d submissions",
+			len(submissions),
+			expectedSubmissions,
+		)
 	}
 
 	if len(submissions) == 0 {
-		return submitCreateReviewSubmissionPreparation{}
+		return submitCreateReviewSubmissionPreparation{}, nil
 	}
 
 	result := submitCreateReviewSubmissionPreparation{}
@@ -174,15 +217,12 @@ func prepareReviewSubmissionForCreate(
 		if normalizedPlatform != "" && !strings.EqualFold(string(sub.Attributes.Platform), normalizedPlatform) {
 			continue
 		}
+		if strings.TrimSpace(sub.ID) == "" {
+			return submitCreateReviewSubmissionPreparation{}, fmt.Errorf("ready review submission is missing an ID")
+		}
 		reusable, hasVersion, reuseErr := inspector.canReuse(ctx, &sub)
 		if reuseErr != nil {
-			emitMessage(
-				"Skipped stale review submission %s: could not confirm which versions it holds (%v). Cancel it explicitly with `asc submit cancel --id %s --confirm` if you intend to replace it.",
-				sub.ID,
-				reuseErr,
-				sub.ID,
-			)
-			continue
+			return submitCreateReviewSubmissionPreparation{}, fmt.Errorf("inspect ready review submission %q: %w", strings.TrimSpace(sub.ID), reuseErr)
 		}
 		if reusable {
 			if hasVersion {
@@ -192,7 +232,7 @@ func prepareReviewSubmissionForCreate(
 			}
 			result.reuseSubmissionID = strings.TrimSpace(sub.ID)
 			result.reuseSubmissionHasVersion = hasVersion
-			return result
+			return result, nil
 		}
 		emitMessage(
 			"Skipped stale review submission %s because it is not exclusively usable for version %s. Cancel it explicitly with `asc submit cancel --id %s --confirm` if you intend to replace it.",
@@ -201,7 +241,7 @@ func prepareReviewSubmissionForCreate(
 			sub.ID,
 		)
 	}
-	return result
+	return result, nil
 }
 
 func reviewSubmissionAppStoreVersionID(submission *asc.ReviewSubmissionResource) string {
@@ -287,9 +327,16 @@ func summarizeReviewSubmissionItems(
 ) (reviewSubmissionItemSummary, error) {
 	var summary reviewSubmissionItemSummary
 
+	if ctx == nil {
+		return summary, fmt.Errorf("review submission item context is required")
+	}
 	submissionID = strings.TrimSpace(submissionID)
-	if submissionID == "" || client == nil {
-		return summary, nil
+	targetVersionID = strings.TrimSpace(targetVersionID)
+	if client == nil {
+		return summary, fmt.Errorf("review submission item client is required")
+	}
+	if submissionID == "" || targetVersionID == "" {
+		return summary, fmt.Errorf("submission and target version IDs are required")
 	}
 
 	// appStoreVersion must be INCLUDED, not merely named in fields[]. fields[] is a sparse-fieldset
@@ -308,19 +355,60 @@ func summarizeReviewSubmissionItems(
 	if err != nil {
 		return summary, err
 	}
+	if resp == nil {
+		return summary, fmt.Errorf("review submission items response is required")
+	}
+	if resp.Data == nil {
+		return summary, fmt.Errorf("review submission items response data is required")
+	}
 
+	page := 1
+	itemsSeen := 0
+	expectedItems, itemsTotalKnown := asc.ParsePagingTotalOK(resp.Meta)
+	seenNext := make(map[string]struct{})
 	for {
 		accumulateReviewSubmissionItemSummary(&summary, resp.Data, targetVersionID)
+		itemsSeen += len(resp.Data)
 
 		nextURL := strings.TrimSpace(resp.Links.Next)
 		if nextURL == "" {
+			if itemsTotalKnown && itemsSeen != expectedItems {
+				return summary, fmt.Errorf(
+					"review submission items response is incomplete: received %d of %d items",
+					itemsSeen,
+					expectedItems,
+				)
+			}
 			return summary, nil
 		}
+		if _, ok := seenNext[nextURL]; ok {
+			return summary, fmt.Errorf("review submission items page %d: %w", page+1, asc.ErrRepeatedPaginationURL)
+		}
+		seenNext[nextURL] = struct{}{}
 
 		resp, err = client.GetReviewSubmissionItems(ctx, submissionID, asc.WithReviewSubmissionItemsNextURL(nextURL))
 		if err != nil {
-			return summary, err
+			return summary, fmt.Errorf("review submission items page %d: %w", page+1, err)
 		}
+		if resp == nil {
+			return summary, fmt.Errorf("review submission items page %d: response is required", page+1)
+		}
+		if resp.Data == nil {
+			return summary, fmt.Errorf("review submission items page %d: response data is required", page+1)
+		}
+		if nextTotal, ok := asc.ParsePagingTotalOK(resp.Meta); ok {
+			if itemsTotalKnown && nextTotal != expectedItems {
+				return summary, fmt.Errorf(
+					"review submission items page %d: paging total changed from %d to %d",
+					page+1,
+					expectedItems,
+					nextTotal,
+				)
+			}
+			expectedItems = nextTotal
+			itemsTotalKnown = true
+		}
+		page++
 	}
 }
 

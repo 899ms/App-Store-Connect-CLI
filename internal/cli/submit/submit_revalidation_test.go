@@ -371,9 +371,12 @@ func TestPrepareReviewSubmissionForCreateNeverCancelsExistingSubmission(t *testi
 	}))
 
 	var messages []string
-	got := prepareReviewSubmissionForCreate(context.Background(), client, "app-1", "IOS", "version-1", func(message string) {
+	got, err := prepareReviewSubmissionForCreate(context.Background(), client, "app-1", "IOS", "version-1", func(message string) {
 		messages = append(messages, message)
 	})
+	if err != nil {
+		t.Fatalf("prepareReviewSubmissionForCreate() error: %v", err)
+	}
 	if got.reuseSubmissionID != "" {
 		t.Fatalf("must not reuse a submission explicitly bound to another version: %#v", got)
 	}

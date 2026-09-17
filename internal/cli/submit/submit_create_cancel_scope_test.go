@@ -49,7 +49,10 @@ func TestPrepareReviewSubmissionForCreateDoesNotCancelSubmissionForAnotherVersio
 	}))
 
 	stderr := captureSubmitStderr(t, func() {
-		got := prepareReviewSubmissionForCreate(context.Background(), client, "app-1", "IOS", "version-1", nil)
+		got, err := prepareReviewSubmissionForCreate(context.Background(), client, "app-1", "IOS", "version-1", nil)
+		if err != nil {
+			t.Fatalf("prepareReviewSubmissionForCreate() error: %v", err)
+		}
 		if got.reuseSubmissionID != "" {
 			t.Fatalf("expected no reusable submission, got %#v", got)
 		}
@@ -93,7 +96,10 @@ func TestPrepareReviewSubmissionForCreateDoesNotCancelUnprovenSubmission(t *test
 	}))
 
 	stderr := captureSubmitStderr(t, func() {
-		got := prepareReviewSubmissionForCreate(context.Background(), client, "app-1", "IOS", "version-1", nil)
+		got, err := prepareReviewSubmissionForCreate(context.Background(), client, "app-1", "IOS", "version-1", nil)
+		if err == nil {
+			t.Fatal("expected unproven submission inspection to fail")
+		}
 		if got.reuseSubmissionID != "" {
 			t.Fatalf("expected unproven submission not to be reused, got %#v", got)
 		}
@@ -104,7 +110,7 @@ func TestPrepareReviewSubmissionForCreateDoesNotCancelUnprovenSubmission(t *test
 			t.Fatalf("expected no cancellation request, got %v", requests)
 		}
 	}
-	if !strings.Contains(stderr, "Skipped stale review submission unproven-submission") {
-		t.Fatalf("expected skip diagnostic naming the submission, got %q", stderr)
+	if stderr != "" {
+		t.Fatalf("expected preparation failure to return through the error channel, got stderr %q", stderr)
 	}
 }
