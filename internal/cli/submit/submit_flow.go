@@ -246,7 +246,15 @@ func SubmitResolvedVersion(ctx context.Context, client *asc.Client, opts SubmitR
 		if createErr != nil {
 			return result, fmt.Errorf("submit review: create review submission: %w", createErr)
 		}
-		createdSubmissionID = strings.TrimSpace(reviewSubmission.Data.ID)
+		if reviewSubmission != nil {
+			createdSubmissionID = strings.TrimSpace(reviewSubmission.Data.ID)
+		}
+		if receiptErr := validateReviewSubmissionCreateReceipt(reviewSubmission, appID, platform); receiptErr != nil {
+			if createdSubmissionID != "" {
+				preserveCreatedReviewSubmission(createdSubmissionID, emit)
+			}
+			return result, fmt.Errorf("submit review: create review submission receipt: %w", receiptErr)
+		}
 		submissionIDToSubmit = createdSubmissionID
 	}
 
