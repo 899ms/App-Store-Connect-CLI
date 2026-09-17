@@ -1266,11 +1266,11 @@ func TestImportSessionBundleRestoresKeychainMirrorAfterFilePersistenceFails(t *t
 	previousKeychainRaw := append([]byte(nil), keychainItem.Data...)
 
 	previousWrite := sessionFileWrite
-	sessionFileWrite = func(path string, data []byte, perm os.FileMode) error {
+	sessionFileWrite = func(path string, file *os.File, data []byte, perm os.FileMode) error {
 		if strings.HasSuffix(path, ".tmp") && strings.Contains(filepath.Base(path), "session-") {
 			return errors.New("file replacement refused")
 		}
-		return previousWrite(path, data, perm)
+		return previousWrite(path, file, data, perm)
 	}
 	t.Cleanup(func() { sessionFileWrite = previousWrite })
 
@@ -1402,15 +1402,16 @@ func TestImportSessionBundleRestoresPriorStateWhenLastPointerWriteFailsAfterSess
 
 	previousWrite := sessionFileWrite
 	sessionWriteSucceeded := false
-	sessionFileWrite = func(path string, data []byte, perm os.FileMode) error {
-		if filepath.Base(path) == "last.json.tmp" {
+	sessionFileWrite = func(path string, file *os.File, data []byte, perm os.FileMode) error {
+		base := filepath.Base(path)
+		if strings.Contains(base, "last.json-") {
 			if !sessionWriteSucceeded {
 				return errors.New("injected before session rename")
 			}
 			return errors.New("injected last-session pointer write failure")
 		}
-		err := previousWrite(path, data, perm)
-		if err == nil && filepath.Base(path) == "session-"+key+".json.tmp" {
+		err := previousWrite(path, file, data, perm)
+		if err == nil && strings.Contains(base, "session-"+key+".json-") {
 			sessionWriteSucceeded = true
 		}
 		return err
