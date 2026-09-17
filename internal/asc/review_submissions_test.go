@@ -135,6 +135,31 @@ func TestReviewSubmissionsResponsePreservesSchemaMetadata(t *testing.T) {
 	}
 }
 
+func TestReviewSubmissionCollectionAllowsSparseToManyItemsRelationship(t *testing.T) {
+	tests := []struct {
+		name         string
+		relationship string
+	}{
+		{
+			name:         "links only",
+			relationship: `{"links":{"related":"/v1/reviewSubmissions/submission-1/items"}}`,
+		},
+		{
+			name:         "meta only",
+			relationship: `{"meta":{"paging":{"limit":50}}}`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := `{"data":[{"type":"reviewSubmissions","id":"submission-1","relationships":{"items":` + test.relationship + `}}],"links":{"self":"/v1/apps/app-1/reviewSubmissions"}}`
+			if err := validateReviewSubmissionCollectionEnvelope([]byte(body), "review submissions", reviewSubmissionCollectionResourceSpec); err != nil {
+				t.Fatalf("validateReviewSubmissionCollectionEnvelope() error = %v, want sparse to-many relationship accepted", err)
+			}
+		})
+	}
+}
+
 func TestSubmitReviewSubmission(t *testing.T) {
 	response := reviewSubmissionsJSONResponse(http.StatusOK, `{
 		"data": {
@@ -732,6 +757,49 @@ func TestGetReviewSubmissionItems(t *testing.T) {
 	}
 }
 
+func TestReviewSubmissionItemResponsesRejectTopLevelErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		call func(*Client) error
+	}{
+		{
+			name: "relationships",
+			body: `{"errors":[],"data":[]}`,
+			call: func(client *Client) error {
+				_, err := client.GetReviewSubmissionItemsRelationships(context.Background(), "submission-1")
+				return err
+			},
+		},
+		{
+			name: "create",
+			body: `{"errors":[],"data":{}}`,
+			call: func(client *Client) error {
+				_, err := client.CreateReviewSubmissionItem(context.Background(), "submission-1", ReviewSubmissionItemTypeAppStoreVersion, "version-1")
+				return err
+			},
+		},
+		{
+			name: "update",
+			body: `{"errors":[],"data":{}}`,
+			call: func(client *Client) error {
+				resolved := true
+				_, err := client.UpdateReviewSubmissionItem(context.Background(), "item-1", ReviewSubmissionItemUpdateAttributes{Resolved: &NullableBool{Value: &resolved}})
+				return err
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := newTestClient(t, nil, reviewSubmissionsJSONResponse(http.StatusOK, test.body))
+			if err := test.call(client); err == nil || !strings.Contains(err.Error(), "top-level errors") {
+				t.Fatalf("call error = %v, want top-level errors rejection", err)
+			}
+		})
+	}
+}
+
 func TestGetReviewSubmissionItems_WithIncludeAndFields(t *testing.T) {
 	response := reviewSubmissionsJSONResponse(http.StatusOK, `{
 		"data": [
@@ -739,7 +807,8 @@ func TestGetReviewSubmissionItems_WithIncludeAndFields(t *testing.T) {
 				"type": "reviewSubmissionItems",
 				"id": "item-456"
 			}
-		]
+		],
+		"links": {"self": "https://api.appstoreconnect.apple.com/v1/reviewSubmissions/submission-456/items"}
 	}`)
 
 	client := newTestClient(t, func(req *http.Request) {
@@ -785,6 +854,7 @@ func TestGetReviewSubmissionItems_With441VersionSparseFields(t *testing.T) {
 			{"type":"subscriptionVersions","id":"subv-1"},
 			{"type":"subscriptionGroupVersions","id":"sgv-1"}
 		],
+		"links":{"self":"https://api.appstoreconnect.apple.com/v1/reviewSubmissions/submission-456/items"},
 		"meta":{"paging":{"total":1,"limit":200}}
 	}`)
 
@@ -849,6 +919,7 @@ func TestGetReviewSubmissions_WithInclude(t *testing.T) {
 				}
 			}
 		],
+		"links": {"self": "https://api.appstoreconnect.apple.com/v1/apps/app-123/reviewSubmissions"},
 		"included": [
 			{
 				"type": "appStoreVersions",
@@ -903,7 +974,7 @@ func TestReviewSubmissionGetOperationsSend441ItemFieldsAndIncludeItems(t *testin
 		{
 			name: "app related list",
 			path: "/v1/apps/app-1/reviewSubmissions",
-			body: `{"data":[]}`,
+			body: `{"data":[],"links":{"self":"https://api.appstoreconnect.apple.com/v1/apps/app-1/reviewSubmissions"}}`,
 			call: func(client *Client) error {
 				_, err := client.GetReviewSubmissions(context.Background(), "app-1", WithReviewSubmissionsItemFields(strings.Split(wantFields, ",")), WithReviewSubmissionsInclude([]string{"items"}))
 				return err
@@ -912,7 +983,7 @@ func TestReviewSubmissionGetOperationsSend441ItemFieldsAndIncludeItems(t *testin
 		{
 			name: "top-level list",
 			path: "/v1/reviewSubmissions",
-			body: `{"data":[]}`,
+			body: `{"data":[],"links":{"self":"https://api.appstoreconnect.apple.com/v1/reviewSubmissions"}}`,
 			call: func(client *Client) error {
 				_, err := client.ListReviewSubmissions(context.Background(), WithReviewSubmissionsItemFields(strings.Split(wantFields, ",")), WithReviewSubmissionsInclude([]string{"items"}))
 				return err

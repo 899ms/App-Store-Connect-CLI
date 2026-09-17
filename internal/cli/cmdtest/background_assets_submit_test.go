@@ -295,7 +295,7 @@ func TestBackgroundAssetsSubmitReuseExistingSkipsAttached(t *testing.T) {
 			}
 			return jsonResponse(http.StatusOK, `{"data":[
 				{"type":"reviewSubmissionItems","id":"existing-item-1","attributes":{"state":"READY_FOR_REVIEW"},"relationships":{"backgroundAssetVersion":{"data":{"type":"backgroundAssetVersions","id":"asset-1-v1"}}}}
-			],"links":{"next":""}}`)
+			],"links":{"self":"https://api.appstoreconnect.apple.com/v1/reviewSubmissions/sub-existing/items","next":""}}`)
 		case req.Method == http.MethodPost && path == "/v1/reviewSubmissions":
 			atomic.AddInt32(&createSubmission, 1)
 			t.Errorf("CreateReviewSubmission should not be called when reusing")
