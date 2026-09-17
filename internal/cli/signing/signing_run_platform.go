@@ -40,6 +40,8 @@ const (
 	signingRunXcodebuildPath      = "/usr/bin/xcodebuild"
 )
 
+var errSigningRunStagedProfileChanged = errors.New("staged provisioning profile changed")
+
 var (
 	signingRunActiveXcodeMajorVersion     = activeSigningRunXcodeMajorVersion
 	signingRunCommandContext              = exec.CommandContext
@@ -323,10 +325,22 @@ func recoverSigningRunJournal(ctx context.Context) error {
 		return fmt.Errorf("%w: %w", ErrEphemeralRecoveryJournalInvalid, err)
 	}
 	var recoveryErr error
+	var preservedStagedProfileErr error
 	if journal.ProfileCreated {
-		recoveryErr = errors.Join(recoveryErr, removeSigningRunStagedProfile(
-			journal.StagedProfilePath, journal.ProfileDevice, journal.ProfileInode,
-		))
+		stagedDigest := journal.StagedProfileDigest
+		if stagedDigest == "" {
+			// Journals created before staged digests were recorded can only prove
+			// ownership of a fully written staged profile.
+			stagedDigest = journal.ProfileDigest
+		}
+		stagedProfileErr := removeSigningRunStagedProfile(
+			journal.StagedProfilePath, journal.ProfileDevice, journal.ProfileInode, stagedDigest,
+		)
+		if errors.Is(stagedProfileErr, errSigningRunStagedProfileChanged) {
+			preservedStagedProfileErr = fmt.Errorf("preserved changed staged provisioning profile: %w", stagedProfileErr)
+		} else {
+			recoveryErr = errors.Join(recoveryErr, stagedProfileErr)
+		}
 		recoveryErr = errors.Join(recoveryErr, removeSigningRunProfile(signingRunProfileInstall{
 			Path: journal.ProfilePath, Created: true, Digest: journal.ProfileDigest,
 			Device: journal.ProfileDevice, Inode: journal.ProfileInode,
@@ -340,7 +354,10 @@ func recoverSigningRunJournal(ctx context.Context) error {
 	if err := removeSigningRunTempDir(journal.TempDir); err != nil {
 		return err
 	}
-	return removeSigningRunJournalWithAnchor(anchor)
+	if err := removeSigningRunJournalWithAnchor(anchor); err != nil {
+		return err
+	}
+	return preservedStagedProfileErr
 }
 
 func validateSigningRunJournal(journal signingRunJournal) error {
@@ -356,7 +373,7 @@ func validateSigningRunJournal(journal signingRunJournal) error {
 		return fmt.Errorf("keychain path does not match the temporary directory")
 	}
 	if !journal.ProfileCreated {
-		if journal.ProfilePath != "" || journal.StagedProfilePath != "" || journal.ProfileDigest != "" ||
+		if journal.ProfilePath != "" || journal.StagedProfilePath != "" || journal.ProfileDigest != "" || journal.StagedProfileDigest != "" ||
 			journal.ProfileDevice != 0 || journal.ProfileInode != 0 {
 			return fmt.Errorf("profile recovery fields are inconsistent")
 		}
@@ -367,6 +384,14 @@ func validateSigningRunJournal(journal signingRunJournal) error {
 	}
 	if _, err := hex.DecodeString(journal.ProfileDigest); err != nil {
 		return fmt.Errorf("profile digest is invalid")
+	}
+	if journal.StagedProfileDigest != "" {
+		if len(journal.StagedProfileDigest) != sha256.Size*2 {
+			return fmt.Errorf("staged profile digest is invalid")
+		}
+		if _, err := hex.DecodeString(journal.StagedProfileDigest); err != nil {
+			return fmt.Errorf("staged profile digest is invalid")
+		}
 	}
 	if journal.ProfileDevice == 0 || journal.ProfileInode == 0 {
 		return fmt.Errorf("profile file identity is missing")
@@ -623,7 +648,7 @@ func deleteSigningRunKeychain(ctx context.Context, keychainPath string) error {
 	return nil
 }
 
-func installSigningRunProfile(ctx context.Context, uuid string, data []byte, digest string, beforeCreate func(signingRunProfileInstall) error) (result signingRunProfileInstall, resultErr error) {
+func installSigningRunProfile(ctx context.Context, uuid string, data []byte, digest string, recordCreate func(signingRunProfileInstall) error) (result signingRunProfileInstall, resultErr error) {
 	if ctx == nil {
 		return signingRunProfileInstall{}, fmt.Errorf("install provisioning profile: context is required")
 	}
@@ -698,6 +723,8 @@ func installSigningRunProfile(ctx context.Context, uuid string, data []byte, dig
 	planned := signingRunProfileInstall{
 		Path: path, StagedPath: stagedPath, Created: true, Digest: digest,
 	}
+	emptyDigest := sha256.Sum256(nil)
+	planned.StagedDigest = hex.EncodeToString(emptyDigest[:])
 	fileOpen := true
 	closeFile := func() error {
 		if !fileOpen {
@@ -721,7 +748,7 @@ func installSigningRunProfile(ctx context.Context, uuid string, data []byte, dig
 			}
 		}
 		resultErr = errors.Join(resultErr, closeFile())
-		if err := removeSigningRunStagedProfile(planned.StagedPath, planned.Device, planned.Inode); err != nil {
+		if err := removeSigningRunStagedProfile(planned.StagedPath, planned.Device, planned.Inode, planned.StagedDigest); err != nil {
 			resultErr = errors.Join(resultErr, fmt.Errorf("remove staged provisioning profile: %w", err))
 		}
 	}()
@@ -735,17 +762,21 @@ func installSigningRunProfile(ctx context.Context, uuid string, data []byte, dig
 	}
 	planned.Device = uint64(stat.Dev)
 	planned.Inode = stat.Ino
-	if err := beforeCreate(planned); err != nil {
+	if err := recordCreate(planned); err != nil {
 		return planned, errors.Join(fmt.Errorf("journal profile installation: %w", err), closeFile())
 	}
 	if err := ctx.Err(); err != nil {
 		return planned, errors.Join(err, closeFile())
 	}
-	if _, err := file.Write(data); err != nil {
+	planned.StagedDigest, err = writeSigningRunStagedProfile(file, data)
+	if err != nil {
 		return planned, errors.Join(err, closeFile())
 	}
 	if err := file.Sync(); err != nil {
 		return planned, errors.Join(err, closeFile())
+	}
+	if err := recordCreate(planned); err != nil {
+		return planned, errors.Join(fmt.Errorf("journal written profile staging: %w", err), closeFile())
 	}
 	if err := ctx.Err(); err != nil {
 		return planned, errors.Join(err, closeFile())
@@ -772,7 +803,11 @@ func installSigningRunProfile(ctx context.Context, uuid string, data []byte, dig
 func removeSigningRunProfile(install signingRunProfileInstall) error {
 	var cleanupErr error
 	if install.StagedPath != "" {
-		if err := removeSigningRunStagedProfile(install.StagedPath, install.Device, install.Inode); err != nil {
+		stagedDigest := install.StagedDigest
+		if stagedDigest == "" {
+			stagedDigest = install.Digest
+		}
+		if err := removeSigningRunStagedProfile(install.StagedPath, install.Device, install.Inode, stagedDigest); err != nil {
 			cleanupErr = fmt.Errorf("remove staged provisioning profile: %w", err)
 		}
 	}
@@ -885,12 +920,16 @@ func verifySigningRunProfileEntry(rooted *os.Root, name string, install signingR
 	return nil
 }
 
-func removeSigningRunStagedProfile(path string, device, inode uint64) error {
+func removeSigningRunStagedProfile(path string, device, inode uint64, digest string) error {
 	if path == "" {
 		return nil
 	}
 	if device == 0 && inode == 0 {
 		return fmt.Errorf("refusing to remove staged profile because its file identity is unavailable")
+	}
+	digest = strings.TrimSpace(digest)
+	if len(digest) != sha256.Size*2 {
+		return fmt.Errorf("refusing to remove staged profile because its content identity is unavailable")
 	}
 	installRoot, err := rootfs.New(filepath.Dir(path))
 	if err != nil {
@@ -903,16 +942,16 @@ func removeSigningRunStagedProfile(path string, device, inode uint64) error {
 	}
 	defer rooted.Close()
 	name := filepath.Base(path)
-	if err := verifySigningRunStagedProfileEntry(rooted, name, device, inode); err != nil {
+	if err := verifySigningRunStagedProfileEntry(rooted, name, device, inode, digest); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 		return err
 	}
-	return removeSigningRunStagedProfileEntry(installRoot, name, device, inode)
+	return removeSigningRunStagedProfileEntry(installRoot, name, device, inode, digest)
 }
 
-func removeSigningRunStagedProfileEntry(installRoot rootfs.Root, name string, device, inode uint64) error {
+func removeSigningRunStagedProfileEntry(installRoot rootfs.Root, name string, device, inode uint64, digest string) error {
 	identity, err := installRoot.CaptureFile(name)
 	if err != nil {
 		return err
@@ -920,26 +959,56 @@ func removeSigningRunStagedProfileEntry(installRoot rootfs.Root, name string, de
 	info := identity.Info()
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || uint64(stat.Dev) != device || stat.Ino != inode {
-		return fmt.Errorf("refusing to remove staged profile because its file identity changed")
+		return fmt.Errorf("%w: refusing to remove staged profile because its file identity changed", errSigningRunStagedProfileChanged)
+	}
+	if err := signingRunStagedProfileContentMatches(identity.Data(), digest); err != nil {
+		return err
 	}
 	return installRoot.RemoveFileIfSameIdentity(name, identity)
 }
 
-func verifySigningRunStagedProfileEntry(rooted *os.Root, name string, device, inode uint64) error {
+func verifySigningRunStagedProfileEntry(rooted *os.Root, name string, device, inode uint64, digest string) error {
 	file, err := secureopen.OpenExistingNoFollowInRoot(rooted, name)
 	if err != nil {
 		return err
 	}
 	info, statErr := file.Stat()
+	data, readErr := io.ReadAll(io.LimitReader(file, signingRunInputLimit+1))
 	closeErr := file.Close()
-	if statErr != nil || closeErr != nil {
-		return errors.Join(statErr, closeErr)
+	if statErr != nil || readErr != nil || closeErr != nil {
+		return errors.Join(statErr, readErr, closeErr)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || !info.Mode().IsRegular() || uint64(stat.Dev) != device || uint64(stat.Ino) != inode {
-		return fmt.Errorf("refusing to remove staged profile because its file identity changed")
+		return fmt.Errorf("%w: refusing to remove staged profile because its file identity changed", errSigningRunStagedProfileChanged)
 	}
-	return nil
+	if len(data) > signingRunInputLimit {
+		return fmt.Errorf("refusing to remove staged profile because it exceeds the size limit")
+	}
+	return signingRunStagedProfileContentMatches(data, digest)
+}
+
+func signingRunStagedProfileContentMatches(data []byte, digest string) error {
+	actual := sha256.Sum256(data)
+	if strings.EqualFold(hex.EncodeToString(actual[:]), digest) {
+		return nil
+	}
+	return fmt.Errorf("%w: refusing to remove staged profile because its content changed", errSigningRunStagedProfileChanged)
+}
+
+func writeSigningRunStagedProfile(file io.Writer, data []byte) (string, error) {
+	written, err := file.Write(data)
+	if written < 0 || written > len(data) {
+		return "", fmt.Errorf("write staged provisioning profile returned invalid byte count %d", written)
+	}
+	digest := sha256.Sum256(data[:written])
+	if err != nil {
+		return hex.EncodeToString(digest[:]), err
+	}
+	if written != len(data) {
+		return hex.EncodeToString(digest[:]), io.ErrShortWrite
+	}
+	return hex.EncodeToString(digest[:]), nil
 }
 
 var signingRunXcodeVersionPattern = regexp.MustCompile(`(?m)^Xcode[\t ]+([0-9]+)(?:[.][0-9]+)*(?:[\t ].*)?$`)
