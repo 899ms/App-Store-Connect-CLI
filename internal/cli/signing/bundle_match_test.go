@@ -5,9 +5,31 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestRemoveSigningFilesDeletesPartialArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	profilePath := filepath.Join(dir, "App.mobileprovision")
+	certPath := filepath.Join(dir, "cert.cer")
+	if err := os.WriteFile(profilePath, []byte("profile"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(certPath, []byte("cert"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	removeSigningFiles([]string{profilePath, certPath})
+
+	for _, path := range []string{profilePath, certPath} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("partial artifact %s still present: %v", path, err)
+		}
+	}
+}
 
 func TestBundleIdentifierMatches(t *testing.T) {
 	tests := []struct {

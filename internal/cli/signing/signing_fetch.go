@@ -261,20 +261,28 @@ func fetchMatchedSigningBundles(
 			continue
 		}
 		result.ProfileFile = profilePath
+		written := []string{profilePath}
+		targetFailed := false
 		for _, cert := range certs.Data {
 			certPath := certificateOutputPath(outputDir, cert)
 			certContent, err := decodeBase64Content("certificate", cert.Attributes.CertificateContent)
 			if err != nil {
-				failed = true
+				targetFailed = true
 				batch.Failures = append(batch.Failures, fmt.Sprintf("%s: %v", identifier, err))
-				continue
+				break
 			}
 			if err := writeBinaryFile(certPath, certContent); err != nil {
-				failed = true
+				targetFailed = true
 				batch.Failures = append(batch.Failures, fmt.Sprintf("%s: %v", identifier, err))
-				continue
+				break
 			}
+			written = append(written, certPath)
 			result.CertificateFiles = append(result.CertificateFiles, certPath)
+		}
+		if targetFailed {
+			failed = true
+			removeSigningFiles(written)
+			continue
 		}
 		batch.Results = append(batch.Results, result)
 	}
@@ -285,6 +293,12 @@ func fetchMatchedSigningBundles(
 		return fmt.Errorf("signing fetch: %d bundle ID(s) failed", len(batch.Failures))
 	}
 	return nil
+}
+
+func removeSigningFiles(paths []string) {
+	for _, path := range paths {
+		_ = os.Remove(path)
+	}
 }
 
 func validateBundleIDMatchesApp(ctx context.Context, client *asc.Client, appID, bundleID string) error {
