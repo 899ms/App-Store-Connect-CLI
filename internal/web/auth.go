@@ -125,6 +125,8 @@ type AuthSession struct {
 	cachedUpdatedAt  time.Time
 	cachedGeneration string
 	cachedSource     CachedSessionSource
+	cachedSession    *persistedSession
+	persistMu        sync.Mutex
 
 	// Prepared 2FA delivery state so callers can request code delivery before prompting.
 	twoFactorMethod        string
@@ -639,6 +641,16 @@ func LoginWithClient(ctx context.Context, client *http.Client, creds LoginCreden
 	return loginWithHTTPClient(ctx, client, creds)
 }
 
+func ensureSessionCookieTrackingJar(client *http.Client) {
+	if client == nil || client.Jar == nil {
+		return
+	}
+	if _, ok := client.Jar.(*sessionCookieTrackingJar); ok {
+		return
+	}
+	client.Jar = newSessionCookieTrackingJar(client.Jar)
+}
+
 func applySessionInfo(session *AuthSession, info *sessionInfo) {
 	if session == nil || info == nil {
 		return
@@ -657,6 +669,7 @@ func loginWithHTTPClient(ctx context.Context, client *http.Client, creds LoginCr
 	if strings.TrimSpace(creds.Password) == "" {
 		return nil, fmt.Errorf("password is required")
 	}
+	ensureSessionCookieTrackingJar(client)
 
 	serviceKey, err := getAuthServiceKey(ctx, client)
 	if err != nil {
