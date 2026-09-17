@@ -70,6 +70,31 @@ type ReviewSubmissionResponse struct {
 	Included json.RawMessage          `json:"included,omitempty"`
 }
 
+// ReviewSubmissionCreatePartialError reports that App Store Connect returned
+// a created review-submission ID together with a response validation error.
+// Callers can use Response to preserve or roll back the created resource.
+type ReviewSubmissionCreatePartialError struct {
+	Response *ReviewSubmissionResponse
+	Err      error
+}
+
+func (e *ReviewSubmissionCreatePartialError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	if e.Response == nil {
+		return fmt.Sprintf("review submission create response was invalid: %v", e.Err)
+	}
+	return fmt.Sprintf("review submission %q may have been created, but its response was invalid: %v", strings.TrimSpace(e.Response.Data.ID), e.Err)
+}
+
+func (e *ReviewSubmissionCreatePartialError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
 // ReviewSubmissionItemsLinkagesResponse is the response from review submission item linkage endpoints.
 type ReviewSubmissionItemsLinkagesResponse = LinkagesResponse
 
@@ -320,6 +345,9 @@ func (c *Client) CreateReviewSubmission(ctx context.Context, appID string, platf
 		return nil, fmt.Errorf("failed to parse review submission response: %w", err)
 	}
 	if err := rejectReviewSubmissionTopLevelErrorsInDocument(data, "review submission"); err != nil {
+		if response.Data.Type == ResourceTypeReviewSubmissions && strings.TrimSpace(response.Data.ID) != "" {
+			return nil, &ReviewSubmissionCreatePartialError{Response: &response, Err: err}
+		}
 		return nil, err
 	}
 

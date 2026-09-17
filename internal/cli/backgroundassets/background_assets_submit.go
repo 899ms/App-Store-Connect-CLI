@@ -145,6 +145,14 @@ Examples:
 			if currentSubmissionID == "" {
 				createResp, err := client.CreateReviewSubmission(requestCtx, resolvedAppID, asc.Platform(normalizedPlatform))
 				if err != nil {
+					var partialErr *asc.ReviewSubmissionCreatePartialError
+					if errors.As(err, &partialErr) && partialErr.Response != nil &&
+						partialErr.Response.Data.Type == asc.ResourceTypeReviewSubmissions {
+						createdSubmissionID := strings.TrimSpace(partialErr.Response.Data.ID)
+						if createdSubmissionID != "" {
+							return rollbackBackgroundAssetReviewSubmission(requestCtx, client, createdSubmissionID, "create review submission", err)
+						}
+					}
 					return fmt.Errorf("background-assets submit: create review submission: %w", err)
 				}
 				createdSubmissionID := ""

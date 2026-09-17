@@ -3,6 +3,7 @@ package asc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -85,6 +86,75 @@ func TestCreateReviewSubmission(t *testing.T) {
 	}
 	if resp.Data.Attributes.SubmissionState != ReviewSubmissionStateReadyForReview {
 		t.Fatalf("expected state %s, got %s", ReviewSubmissionStateReadyForReview, resp.Data.Attributes.SubmissionState)
+	}
+}
+
+func TestCreateReviewSubmissionPreservesPartialCreateID(t *testing.T) {
+	for _, errorsMember := range []string{
+		`[]`,
+		`[{"status":"500","detail":"partial response"}]`,
+	} {
+		response := reviewSubmissionsJSONResponse(http.StatusCreated, `{
+			"errors": `+errorsMember+`,
+			"data": {"type": "reviewSubmissions", "id": "submission-created"}
+		}`)
+		client := newTestClient(t, nil, response)
+
+		receipt, err := client.CreateReviewSubmission(context.Background(), "app-123", PlatformIOS)
+		if err == nil || !strings.Contains(err.Error(), "top-level errors") {
+			t.Fatalf("CreateReviewSubmission() error = %v, want top-level errors rejection", err)
+		}
+		if receipt != nil {
+			t.Fatalf("CreateReviewSubmission() receipt = %+v, want nil on response validation error", receipt)
+		}
+		var partialErr *ReviewSubmissionCreatePartialError
+		if !errors.As(err, &partialErr) {
+			t.Fatalf("CreateReviewSubmission() error = %T, want ReviewSubmissionCreatePartialError", err)
+		}
+		if partialErr.Response == nil || partialErr.Response.Data.ID != "submission-created" {
+			t.Fatalf("partial create response = %+v, want submission-created", partialErr.Response)
+		}
+		if partialErr.Unwrap() == nil {
+			t.Fatal("partial create error did not retain its validation cause")
+		}
+	}
+}
+
+func TestCreateReviewSubmissionDoesNotClassifyFailedRequestAsPartialCreate(t *testing.T) {
+	response := reviewSubmissionsJSONResponse(http.StatusBadRequest, `{
+		"errors": [{"status": "400", "detail": "request failed"}],
+		"data": {"type": "reviewSubmissions", "id": "untrusted-id"}
+	}`)
+	client := newTestClient(t, nil, response)
+
+	receipt, err := client.CreateReviewSubmission(context.Background(), "app-123", PlatformIOS)
+	if err == nil {
+		t.Fatal("CreateReviewSubmission() error = nil, want API failure")
+	}
+	if receipt != nil {
+		t.Fatalf("CreateReviewSubmission() receipt = %+v, want nil", receipt)
+	}
+	var partialErr *ReviewSubmissionCreatePartialError
+	if errors.As(err, &partialErr) {
+		t.Fatalf("CreateReviewSubmission() error = %+v, must not trust an ID from a failed request", partialErr)
+	}
+}
+
+func TestCreateReviewSubmissionDoesNotInventPartialCreateID(t *testing.T) {
+	tests := []string{
+		`{"errors":[],"data":{"type":"reviewSubmissions","id":""}}`,
+		`{"errors":[],"data":{"type":"apps","id":"app-123"}}`,
+	}
+	for _, body := range tests {
+		client := newTestClient(t, nil, reviewSubmissionsJSONResponse(http.StatusCreated, body))
+		_, err := client.CreateReviewSubmission(context.Background(), "app-123", PlatformIOS)
+		if err == nil || !strings.Contains(err.Error(), "top-level errors") {
+			t.Fatalf("CreateReviewSubmission() error = %v, want top-level errors rejection", err)
+		}
+		var partialErr *ReviewSubmissionCreatePartialError
+		if errors.As(err, &partialErr) {
+			t.Fatalf("CreateReviewSubmission() error = %+v, must not expose an untrusted create ID", partialErr)
+		}
 	}
 }
 

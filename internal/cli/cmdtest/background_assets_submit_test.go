@@ -37,6 +37,8 @@ func TestBackgroundAssetsSubmitPreflightRejectsAdversarialResponses(t *testing.T
 		createBody         string
 		detailBody         string
 		itemsBody          string
+		cancelStatus       int
+		cancelBody         string
 		wantErr            string
 		wantDetailRequests int32
 		wantCancelRequests int32
@@ -112,6 +114,22 @@ func TestBackgroundAssetsSubmitPreflightRejectsAdversarialResponses(t *testing.T
 			itemsBody:          validItems,
 			wantErr:            "returned review submission sub-other instead of sub-existing",
 			wantDetailRequests: 1,
+		},
+		{
+			name:               "created receipt mixed errors",
+			createBody:         `{"data":{"type":"reviewSubmissions","id":"sub-created"},"errors":[{"status":"500","detail":"partial response"}]}`,
+			itemsBody:          validItems,
+			wantErr:            "review submission response must not contain top-level errors",
+			wantCancelRequests: 1,
+		},
+		{
+			name:               "created receipt mixed errors and rollback fails",
+			createBody:         `{"data":{"type":"reviewSubmissions","id":"sub-created"},"errors":[]}`,
+			itemsBody:          validItems,
+			cancelStatus:       http.StatusInternalServerError,
+			cancelBody:         `{"errors":[{"status":"500","detail":"cancel unavailable"}]}`,
+			wantErr:            `submission "sub-created" is leaked`,
+			wantCancelRequests: 1,
 		},
 		{
 			name:               "created receipt wrong resource type",
@@ -238,7 +256,15 @@ func TestBackgroundAssetsSubmitPreflightRejectsAdversarialResponses(t *testing.T
 					return jsonResponse(http.StatusCreated, `{"data":{"type":"reviewSubmissionItems","id":"item-created"}}`)
 				case req.Method == http.MethodPatch:
 					atomic.AddInt32(&cancelRequests, 1)
-					return jsonResponse(http.StatusOK, `{"data":{"type":"reviewSubmissions","id":"sub-created","attributes":{"state":"CANCELING"}}}`)
+					status := test.cancelStatus
+					if status == 0 {
+						status = http.StatusOK
+					}
+					body := test.cancelBody
+					if body == "" {
+						body = `{"data":{"type":"reviewSubmissions","id":"sub-created","attributes":{"state":"CANCELING"}}}`
+					}
+					return jsonResponse(status, body)
 				default:
 					t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
 					return nil, nil
