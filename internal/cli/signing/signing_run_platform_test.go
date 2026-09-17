@@ -382,6 +382,7 @@ func TestRecoverSigningRunJournalDistinguishesPartialWriteFromReplacement(t *tes
 		{name: "unrecorded partial write", recorded: nil, staged: []byte("signed"), wantErr: true, wantPreserve: true},
 		{name: "recorded full write", recorded: []byte("signed-profile"), staged: []byte("signed-profile")},
 		{name: "foreign replacement", recorded: nil, staged: []byte("foreign replacement"), wantErr: true, wantPreserve: true},
+		{name: "oversized foreign replacement", recorded: nil, staged: bytes.Repeat([]byte("x"), signingRunInputLimit+1), wantErr: true, wantPreserve: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			stateDir := t.TempDir()

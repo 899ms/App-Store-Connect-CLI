@@ -954,6 +954,9 @@ func removeSigningRunStagedProfile(path string, device, inode uint64, digest str
 func removeSigningRunStagedProfileEntry(installRoot rootfs.Root, name string, device, inode uint64, digest string) error {
 	identity, err := installRoot.CaptureFileLimited(name, signingRunInputLimit)
 	if err != nil {
+		if errors.Is(err, rootfs.ErrFileIdentityChanged) || errors.Is(err, rootfs.ErrFileIdentityDataTooLarge) {
+			return fmt.Errorf("%w: refusing to remove changed staged profile: %w", errSigningRunStagedProfileChanged, err)
+		}
 		return err
 	}
 	info := identity.Info()
@@ -983,7 +986,7 @@ func verifySigningRunStagedProfileEntry(rooted *os.Root, name string, device, in
 		return fmt.Errorf("%w: refusing to remove staged profile because its file identity changed", errSigningRunStagedProfileChanged)
 	}
 	if len(data) > signingRunInputLimit {
-		return fmt.Errorf("refusing to remove staged profile because it exceeds the size limit")
+		return fmt.Errorf("%w: refusing to remove staged profile because it exceeds the size limit", errSigningRunStagedProfileChanged)
 	}
 	return signingRunStagedProfileContentMatches(data, digest)
 }
