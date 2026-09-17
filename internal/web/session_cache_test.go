@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/cookiejar"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -1816,6 +1817,274 @@ func TestTryResumeSessionReturnsExpiredErrorForUnauthorizedCache(t *testing.T) {
 	}
 	if resumed != nil {
 		t.Fatal("did not expect resumed session")
+	}
+}
+
+func TestTryResumeSessionFromSourceFallsBackToKeychainWhenFileSessionIsRejectedByServer(t *testing.T) {
+	withArraySessionKeyring(t)
+	t.Setenv(webSessionCacheEnabledEnv, "1")
+	t.Setenv(webSessionBackendEnv, "auto")
+	t.Setenv(webSessionCacheDirEnv, filepath.Join(t.TempDir(), "web-cache"))
+
+	key := webSessionCacheKey(webTestSessionEmail)
+	if err := writeSessionToFile(key, webTestPersistedSession(t, "file-token", time.Now().UTC())); err != nil {
+		t.Fatalf("writeSessionToFile() error: %v", err)
+	}
+	if err := writeSessionToKeychain(key, webTestPersistedSession(t, "keychain-token", time.Now().UTC())); err != nil {
+		t.Fatalf("writeSessionToKeychain() error: %v", err)
+	}
+
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := ""
+		if cookie, err := r.Cookie("myacinfo"); err == nil {
+			token = cookie.Value
+		}
+		requests = append(requests, token)
+		switch token {
+		case "file-token":
+			w.WriteHeader(http.StatusUnauthorized)
+		case "keychain-token":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"provider":{"providerId":42},"user":{"emailAddress":"user@example.com"}}`)
+		default:
+			t.Fatalf("unexpected session cookie %q", token)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	previousFetcher := sessionInfoFetcher
+	sessionInfoFetcher = func(ctx context.Context, client *http.Client) (*sessionInfo, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL, nil)
+		if err != nil {
+			return nil, err
+		}
+		validationURL, err := url.Parse(olympusSessionURL)
+		if err != nil {
+			return nil, err
+		}
+		for _, cookie := range client.Jar.Cookies(validationURL) {
+			req.AddCookie(cookie)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			return nil, &sessionInfoStatusError{Status: resp.StatusCode}
+		}
+		var info sessionInfo
+		if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+			return nil, err
+		}
+		return &info, nil
+	}
+	t.Cleanup(func() { sessionInfoFetcher = previousFetcher })
+
+	appleID, source, err := DefaultCachedAppleIDWithSource()
+	if err != nil {
+		t.Fatalf("DefaultCachedAppleIDWithSource() error: %v", err)
+	}
+	if appleID != webTestSessionEmail || source != CachedSessionSourceFile {
+		t.Fatalf("default cache selection = (%q, %v), want (%q, file)", appleID, source, webTestSessionEmail)
+	}
+
+	resumed, ok, err := TryResumeSessionFromSource(context.Background(), appleID, source)
+	if err != nil {
+		t.Fatalf("TryResumeSessionFromSource() error: %v", err)
+	}
+	if !ok || resumed == nil {
+		t.Fatalf("TryResumeSessionFromSource() = (%v, %t, %v), want keychain-backed session", resumed, ok, err)
+	}
+	if resumed.UserEmail != webTestSessionEmail || resumed.ProviderID != 42 {
+		t.Fatalf("resumed session = %+v, want user %q and provider 42", resumed, webTestSessionEmail)
+	}
+	if got, want := strings.Join(requests, ","), "file-token,keychain-token"; got != want {
+		t.Fatalf("server validation sequence = %q, want %q", got, want)
+	}
+
+	stored, ok, err := readSessionFromFile(key)
+	if err != nil || !ok {
+		t.Fatalf("readSessionFromFile() = (%v, %t, %v), want refreshed file mirror", stored, ok, err)
+	}
+	if got := persistedMyacinfoCookieValue(stored, "https://appstoreconnect.apple.com/"); got != "keychain-token" {
+		t.Fatalf("refreshed file cookie = %q, want keychain-token", got)
+	}
+}
+
+func TestTryResumeSessionFromSourceHonorsExplicitFileBackend(t *testing.T) {
+	kr := withArraySessionKeyring(t)
+	t.Setenv(webSessionCacheEnabledEnv, "1")
+	t.Setenv(webSessionBackendEnv, "file")
+	t.Setenv(webSessionCacheDirEnv, filepath.Join(t.TempDir(), "web-cache"))
+
+	key := webSessionCacheKey(webTestSessionEmail)
+	if err := writeSessionToFile(key, webTestPersistedSession(t, "file-token", time.Now().UTC())); err != nil {
+		t.Fatalf("writeSessionToFile() error: %v", err)
+	}
+	if err := writeSessionToKeychain(key, webTestPersistedSession(t, "keychain-token", time.Now().UTC())); err != nil {
+		t.Fatalf("writeSessionToKeychain() error: %v", err)
+	}
+	kr.ResetCounts()
+
+	previousFetcher := sessionInfoFetcher
+	var validationCalls int
+	sessionInfoFetcher = func(context.Context, *http.Client) (*sessionInfo, error) {
+		validationCalls++
+		return nil, &sessionInfoStatusError{Status: http.StatusUnauthorized}
+	}
+	t.Cleanup(func() { sessionInfoFetcher = previousFetcher })
+
+	resumed, ok, err := TryResumeSessionFromSource(context.Background(), webTestSessionEmail, CachedSessionSourceFile)
+	if !errors.Is(err, ErrCachedSessionExpired) || ok || resumed != nil {
+		t.Fatalf("TryResumeSessionFromSource() = (%v, %t, %v), want explicit file expiry", resumed, ok, err)
+	}
+	if validationCalls != 1 {
+		t.Fatalf("validation calls = %d, want 1", validationCalls)
+	}
+	if got := kr.GetCount(webSessionStoreItem); got != 0 {
+		t.Fatalf("explicit file source read keychain %d times, want 0", got)
+	}
+}
+
+func TestTryResumeSessionFromSourceFallsBackToKeychainWhenSelectedFileDisappears(t *testing.T) {
+	withArraySessionKeyring(t)
+	withSessionInfoStub(t)
+	t.Setenv(webSessionCacheEnabledEnv, "1")
+	t.Setenv(webSessionBackendEnv, "auto")
+	t.Setenv(webSessionCacheDirEnv, filepath.Join(t.TempDir(), "web-cache"))
+
+	key := webSessionCacheKey(webTestSessionEmail)
+	if err := writeSessionToFile(key, webTestPersistedSession(t, "file-token", time.Now().UTC())); err != nil {
+		t.Fatalf("writeSessionToFile() error: %v", err)
+	}
+	if err := writeSessionToKeychain(key, webTestPersistedSession(t, "keychain-token", time.Now().UTC())); err != nil {
+		t.Fatalf("writeSessionToKeychain() error: %v", err)
+	}
+
+	appleID, source, err := DefaultCachedAppleIDWithSource()
+	if err != nil {
+		t.Fatalf("DefaultCachedAppleIDWithSource() error: %v", err)
+	}
+	if appleID != webTestSessionEmail || source != CachedSessionSourceFile {
+		t.Fatalf("default cache selection = (%q, %v), want (%q, file)", appleID, source, webTestSessionEmail)
+	}
+	path, err := webSessionFilePath(key)
+	if err != nil {
+		t.Fatalf("webSessionFilePath() error: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove selected file session: %v", err)
+	}
+
+	resumed, ok, err := TryResumeSessionFromSource(context.Background(), appleID, source)
+	if err != nil || !ok || resumed == nil {
+		t.Fatalf("TryResumeSessionFromSource() = (%v, %t, %v), want keychain fallback", resumed, ok, err)
+	}
+	if resumed.cachedSource != CachedSessionSourceKeychain {
+		t.Fatalf("cached source = %v, want keychain", resumed.cachedSource)
+	}
+	stored, ok, err := readSessionFromFile(key)
+	if err != nil || !ok {
+		t.Fatalf("readSessionFromFile() = (%v, %t, %v), want refreshed file mirror", stored, ok, err)
+	}
+	if got := persistedMyacinfoCookieValue(stored, "https://appstoreconnect.apple.com/"); got != "keychain-token" {
+		t.Fatalf("refreshed file cookie = %q, want keychain-token", got)
+	}
+}
+
+func TestTryResumeLastSessionFallsBackToKeychainWhenFileSessionIsRejectedByServer(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		fileUserEmail string
+	}{
+		{name: "matching metadata", fileUserEmail: webTestSessionEmail},
+		{name: "legacy empty metadata", fileUserEmail: ""},
+		{name: "marker key differs from metadata", fileUserEmail: "other@example.com"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withArraySessionKeyring(t)
+			t.Setenv(webSessionCacheEnabledEnv, "1")
+			t.Setenv(webSessionBackendEnv, "auto")
+			t.Setenv(webSessionCacheDirEnv, filepath.Join(t.TempDir(), "web-cache"))
+
+			key := webSessionCacheKey(webTestSessionEmail)
+			fileSession := webTestPersistedSession(t, "file-token", time.Now().UTC())
+			fileSession.UserEmail = tc.fileUserEmail
+			if err := writeSessionToFile(key, fileSession); err != nil {
+				t.Fatalf("writeSessionToFile() error: %v", err)
+			}
+			if err := writeSessionToKeychain(key, webTestPersistedSession(t, "keychain-token", time.Now().UTC())); err != nil {
+				t.Fatalf("writeSessionToKeychain() error: %v", err)
+			}
+
+			var requests []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				token := ""
+				if cookie, err := r.Cookie("myacinfo"); err == nil {
+					token = cookie.Value
+				}
+				requests = append(requests, token)
+				switch token {
+				case "file-token":
+					w.WriteHeader(http.StatusForbidden)
+				case "keychain-token":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"provider":{"providerId":42},"user":{"emailAddress":"user@example.com"}}`)
+				default:
+					t.Fatalf("unexpected session cookie %q", token)
+				}
+			}))
+			t.Cleanup(server.Close)
+
+			previousFetcher := sessionInfoFetcher
+			sessionInfoFetcher = func(ctx context.Context, client *http.Client) (*sessionInfo, error) {
+				req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL, nil)
+				if err != nil {
+					return nil, err
+				}
+				validationURL, err := url.Parse(olympusSessionURL)
+				if err != nil {
+					return nil, err
+				}
+				for _, cookie := range client.Jar.Cookies(validationURL) {
+					req.AddCookie(cookie)
+				}
+				resp, err := client.Do(req)
+				if err != nil {
+					return nil, err
+				}
+				defer func() { _ = resp.Body.Close() }()
+				if resp.StatusCode != http.StatusOK {
+					return nil, &sessionInfoStatusError{Status: resp.StatusCode}
+				}
+				var info sessionInfo
+				if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+					return nil, err
+				}
+				return &info, nil
+			}
+			t.Cleanup(func() { sessionInfoFetcher = previousFetcher })
+
+			resumed, ok, err := TryResumeLastSession(context.Background())
+			if err != nil || !ok || resumed == nil {
+				t.Fatalf("TryResumeLastSession() = (%v, %t, %v), want keychain fallback", resumed, ok, err)
+			}
+			if resumed.cachedSource != CachedSessionSourceKeychain {
+				t.Fatalf("cached source = %v, want keychain", resumed.cachedSource)
+			}
+			if got, want := strings.Join(requests, ","), "file-token,keychain-token"; got != want {
+				t.Fatalf("server validation sequence = %q, want %q", got, want)
+			}
+			stored, ok, err := readSessionFromFile(key)
+			if err != nil || !ok {
+				t.Fatalf("readSessionFromFile() = (%v, %t, %v), want refreshed file mirror", stored, ok, err)
+			}
+			if got := persistedMyacinfoCookieValue(stored, "https://appstoreconnect.apple.com/"); got != "keychain-token" {
+				t.Fatalf("refreshed file cookie = %q, want keychain-token", got)
+			}
+		})
 	}
 }
 

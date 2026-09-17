@@ -1309,11 +1309,6 @@ func persistImportedSessionBySelectionLocked(selection backendSelection, key str
 	}
 }
 
-func readSessionFromFileWithKeychainFallback(key string, fallbackKeychain bool) (persistedSession, bool, error) {
-	sess, _, ok, err := readSessionFromFileWithKeychainFallbackOrigin(key, fallbackKeychain)
-	return sess, ok, err
-}
-
 func readSessionFromFileWithKeychainFallbackOrigin(key string, fallbackKeychain bool) (persistedSession, sessionEntryOrigin, bool, error) {
 	sess, ok, err := readSessionFromFile(key)
 	if err == nil && (ok || !fallbackKeychain) {
@@ -1343,20 +1338,21 @@ func sessionEntryOriginWhenFound(origin sessionEntryOrigin, found bool) sessionE
 	return origin
 }
 
-func readSessionFromFileIgnoringErrors(key string) (persistedSession, bool, error) {
+func readSessionFromFileIgnoringErrors(key string) (persistedSession, bool) {
 	sess, ok, err := readSessionFromFile(key)
 	if err != nil {
-		return persistedSession{}, false, nil
+		return persistedSession{}, false
 	}
-	return sess, ok, nil
+	return sess, ok
 }
 
-func readLastSessionFromFileIgnoringErrors() (persistedSession, bool, error) {
+func readLastSessionFromFileIgnoringErrorsWithKey() (persistedSession, string, bool) {
 	key, ok, err := readLastKeyFromFile()
 	if err != nil || !ok {
-		return persistedSession{}, false, nil
+		return persistedSession{}, "", false
 	}
-	return readSessionFromFileIgnoringErrors(key)
+	sess, ok := readSessionFromFileIgnoringErrors(key)
+	return sess, key, ok
 }
 
 func readSessionBySelection(selection backendSelection, key string) (persistedSession, bool, error) {
@@ -1410,71 +1406,84 @@ func readSessionBySelectionWithOrigin(selection backendSelection, key string) (p
 }
 
 func readSessionFromFileIgnoringErrorsWithOrigin(key string) (persistedSession, sessionEntryOrigin, bool, error) {
-	sess, ok, err := readSessionFromFileIgnoringErrors(key)
-	return sess, sessionEntryOriginWhenFound(sessionEntryOriginFile, ok), ok, err
+	sess, ok := readSessionFromFileIgnoringErrors(key)
+	return sess, sessionEntryOriginWhenFound(sessionEntryOriginFile, ok), ok, nil
 }
 
 func readLastSessionFromKeychain() (persistedSession, bool, error) {
+	sess, _, ok, err := readLastSessionFromKeychainWithKey()
+	return sess, ok, err
+}
+
+func readLastSessionFromKeychainWithKey() (persistedSession, string, bool, error) {
 	kr, err := sessionKeyringOpen()
 	if err != nil {
-		return persistedSession{}, false, err
+		return persistedSession{}, "", false, err
 	}
 	store, ok, err := readSessionStoreFromKeyring(kr)
 	if err != nil || !ok {
-		return persistedSession{}, false, err
+		return persistedSession{}, "", false, err
 	}
 	lastKey, ok := resolvePersistedSessionStoreLastKey(store)
 	if !ok {
-		return persistedSession{}, false, nil
+		return persistedSession{}, "", false, nil
 	}
 	sess, ok := store.Sessions[lastKey]
 	if !ok {
-		return persistedSession{}, false, nil
+		return persistedSession{}, "", false, nil
 	}
-	return sess, true, nil
+	return sess, lastKey, true, nil
 }
 
 func readLastSessionBySelection(selection backendSelection) (persistedSession, bool, error) {
+	sess, _, _, ok, err := readLastSessionBySelectionWithOrigin(selection)
+	return sess, ok, err
+}
+
+func readLastSessionBySelectionWithOrigin(selection backendSelection) (persistedSession, sessionEntryOrigin, string, bool, error) {
 	switch selection.backend {
 	case sessionBackendOff:
-		return persistedSession{}, false, nil
+		return persistedSession{}, sessionEntryOriginNone, "", false, nil
 	case sessionBackendKeychain:
-		sess, ok, err := readLastSessionFromKeychain()
+		sess, key, ok, err := readLastSessionFromKeychainWithKey()
 		if err != nil {
 			if selection.fallbackFile && isKeyringUnavailable(err) {
-				return readLastSessionFromFileIgnoringErrors()
+				fallback, fallbackKey, fallbackOK := readLastSessionFromFileIgnoringErrorsWithKey()
+				return fallback, sessionEntryOriginWhenFound(sessionEntryOriginFile, fallbackOK), fallbackKey, fallbackOK, nil
 			}
-			return persistedSession{}, false, err
+			return persistedSession{}, sessionEntryOriginNone, "", false, err
 		}
 		if !ok && selection.fallbackFile {
-			return readLastSessionFromFileIgnoringErrors()
+			fallback, fallbackKey, fallbackOK := readLastSessionFromFileIgnoringErrorsWithKey()
+			return fallback, sessionEntryOriginWhenFound(sessionEntryOriginFile, fallbackOK), fallbackKey, fallbackOK, nil
 		}
-		return sess, ok, nil
+		return sess, sessionEntryOriginWhenFound(sessionEntryOriginKeychain, ok), key, ok, nil
 	case sessionBackendFile:
 		key, ok, err := readLastKeyFromFile()
 		if err == nil && ok {
-			return readSessionFromFileWithKeychainFallback(key, selection.fallbackKeychain)
+			sess, origin, found, readErr := readSessionFromFileWithKeychainFallbackOrigin(key, selection.fallbackKeychain)
+			return sess, origin, key, found, readErr
 		}
 		if err != nil {
 			if !selection.fallbackKeychain {
-				return persistedSession{}, false, err
+				return persistedSession{}, sessionEntryOriginNone, "", false, err
 			}
-			sess, ok, keychainErr := readLastSessionFromKeychain()
+			sess, key, ok, keychainErr := readLastSessionFromKeychainWithKey()
 			if keychainErr == nil && ok {
-				return sess, ok, nil
+				return sess, sessionEntryOriginKeychain, key, true, nil
 			}
-			return persistedSession{}, false, err
+			return persistedSession{}, sessionEntryOriginNone, "", false, err
 		}
 		if !selection.fallbackKeychain {
-			return persistedSession{}, false, nil
+			return persistedSession{}, sessionEntryOriginNone, "", false, nil
 		}
-		sess, ok, err := readLastSessionFromKeychain()
+		sess, key, ok, err := readLastSessionFromKeychainWithKey()
 		if err != nil {
-			return persistedSession{}, false, nil
+			return persistedSession{}, sessionEntryOriginNone, "", false, nil
 		}
-		return sess, ok, nil
+		return sess, sessionEntryOriginWhenFound(sessionEntryOriginKeychain, ok), key, ok, nil
 	default:
-		return persistedSession{}, false, nil
+		return persistedSession{}, sessionEntryOriginNone, "", false, nil
 	}
 }
 
@@ -1848,11 +1857,14 @@ func tryResumeSessionWithSource(ctx context.Context, username string, source Cac
 		return nil, false, nil
 	}
 
-	selection := resolveBackendSelection()
+	configuredSelection := resolveBackendSelection()
+	selection := configuredSelection
 	if selection.backend == sessionBackendOff {
 		return nil, false, nil
 	}
-	if selected, ok := selectionForCachedSessionSource(source); ok {
+	preserveAutoFileFallback := source == CachedSessionSourceFile &&
+		configuredSelection.backend == sessionBackendFile && configuredSelection.fallbackKeychain
+	if selected, ok := selectionForCachedSessionSource(source); ok && !preserveAutoFileFallback {
 		selection = selected
 	}
 
@@ -1861,7 +1873,13 @@ func tryResumeSessionWithSource(ctx context.Context, username string, source Cac
 	if err != nil || !ok {
 		return nil, false, err
 	}
-	resumed, ok, err := resumeFromPersistedSession(ctx, sess)
+	resumed, origin, ok, err := resumePersistedSessionWithKeychainFallback(
+		ctx,
+		sess,
+		origin,
+		key,
+		configuredSelection.fallbackKeychain,
+	)
 	if resumed != nil {
 		resumed.cachedSource = cachedSessionSourceForOrigin(origin)
 	}
@@ -1871,6 +1889,33 @@ func tryResumeSessionWithSource(ctx context.Context, username string, source Cac
 	// Best effort: persist refreshed cookies after successful session validation.
 	_ = PersistSession(resumed)
 	return resumed, true, nil
+}
+
+func resumePersistedSessionWithKeychainFallback(
+	ctx context.Context,
+	sess persistedSession,
+	origin sessionEntryOrigin,
+	key string,
+	allowKeychainFallback bool,
+) (*AuthSession, sessionEntryOrigin, bool, error) {
+	resumed, ok, err := resumeFromPersistedSession(ctx, sess)
+	if origin != sessionEntryOriginFile || !allowKeychainFallback || strings.TrimSpace(key) == "" || !errors.Is(err, ErrCachedSessionExpired) {
+		return resumed, origin, ok, err
+	}
+
+	// Automatic discovery can select a locally hydratable file session whose
+	// cookie has since been rejected by Apple. Retry the same account from the
+	// keychain mirror before making the caller reauthenticate. The account key
+	// stays fixed, so this cannot silently switch to another cached identity.
+	fallback, fallbackOK, fallbackErr := readSessionFromKeychain(key)
+	if fallbackErr != nil || !fallbackOK {
+		return resumed, origin, ok, err
+	}
+	fallbackResumed, fallbackResumedOK, fallbackResumeErr := resumeFromPersistedSession(ctx, fallback)
+	if fallbackResumeErr != nil || !fallbackResumedOK || fallbackResumed == nil {
+		return resumed, origin, ok, err
+	}
+	return fallbackResumed, sessionEntryOriginKeychain, true, nil
 }
 
 // LoadLastCachedSession loads the last cached web session cookie jar without
@@ -1918,11 +1963,20 @@ func TryResumeLastSession(ctx context.Context) (*AuthSession, bool, error) {
 		return nil, false, nil
 	}
 
-	sess, ok, err := readLastSessionBySelection(selection)
+	sess, origin, key, ok, err := readLastSessionBySelectionWithOrigin(selection)
 	if err != nil || !ok {
 		return nil, false, err
 	}
-	resumed, ok, err := resumeFromPersistedSession(ctx, sess)
+	resumed, origin, ok, err := resumePersistedSessionWithKeychainFallback(
+		ctx,
+		sess,
+		origin,
+		key,
+		selection.fallbackKeychain,
+	)
+	if resumed != nil {
+		resumed.cachedSource = cachedSessionSourceForOrigin(origin)
+	}
 	if err != nil || !ok || resumed == nil {
 		return resumed, ok, err
 	}
