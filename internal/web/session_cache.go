@@ -90,15 +90,16 @@ type persistedSessionStore struct {
 }
 
 type pCookie struct {
-	Name     string    `json:"name"`
-	Value    string    `json:"value"`
-	Path     string    `json:"path,omitempty"`
-	Domain   string    `json:"domain,omitempty"`
-	Expires  time.Time `json:"expires,omitempty"`
-	MaxAge   int       `json:"max_age,omitempty"`
-	Secure   bool      `json:"secure,omitempty"`
-	HttpOnly bool      `json:"http_only,omitempty"`
-	SameSite int       `json:"same_site,omitempty"`
+	Name        string    `json:"name"`
+	Value       string    `json:"value"`
+	Path        string    `json:"path,omitempty"`
+	Domain      string    `json:"domain,omitempty"`
+	ScopeDomain string    `json:"scope_domain,omitempty"`
+	Expires     time.Time `json:"expires,omitempty"`
+	MaxAge      int       `json:"max_age,omitempty"`
+	Secure      bool      `json:"secure,omitempty"`
+	HttpOnly    bool      `json:"http_only,omitempty"`
+	SameSite    int       `json:"same_site,omitempty"`
 }
 
 type persistedLastSession struct {
@@ -634,18 +635,24 @@ func cookieScopesMatchForOrigin(origin string, a, b pCookie) bool {
 	}
 	base, err := url.Parse(origin)
 	if err != nil || base == nil {
-		return normalizedCookieDomain(a.Domain) == normalizedCookieDomain(b.Domain)
+		return persistedCookieScopeDomain(nil, a) == persistedCookieScopeDomain(nil, b)
 	}
-	return cookieDomainsMatchForOrigin(base, a.Domain, b.Domain)
+	return persistedCookieScopeDomain(base, a) == persistedCookieScopeDomain(base, b)
 }
 
-func cookieDomainsMatchForOrigin(_ *url.URL, a, b string) bool {
-	// Do not map an empty host-only Domain to the request host here. An
-	// explicit host Domain and a parent Domain are separate RFC 6265 storage
-	// scopes even though all may be sent to this origin. The cache may narrow a
-	// valid parent Domain when hydrating, but update/tombstone matching must
-	// still compare the source scope exactly.
-	return normalizedCookieDomain(a) == normalizedCookieDomain(b)
+func persistedCookieScopeDomain(origin *url.URL, cookie pCookie) string {
+	domain := normalizedCookieDomain(cookie.Domain)
+	if domain != "" {
+		return domain
+	}
+	scopeDomain := normalizedCookieDomain(cookie.ScopeDomain)
+	if scopeDomain == "" || origin == nil {
+		return scopeDomain
+	}
+	if cookieDomainMatchesHost(scopeDomain, origin.Hostname()) {
+		return scopeDomain
+	}
+	return ""
 }
 
 func cachedCookieHasActiveScope(cached *persistedSession, origin string, cookie pCookie, now time.Time) bool {
@@ -711,7 +718,8 @@ func cachedCookieScopesForProbe(cached *persistedSession, probe *url.URL, name, 
 					continue
 				}
 				duplicate = true
-				if !matches[index].Expires.Equal(candidate.Expires) || matches[index].MaxAge != candidate.MaxAge {
+				if !cookieScopesMatchForOrigin(probe.String(), matches[index], candidate) ||
+					!matches[index].Expires.Equal(candidate.Expires) || matches[index].MaxAge != candidate.MaxAge {
 					ambiguous[index] = true
 				}
 				break
@@ -847,13 +855,25 @@ func isAppStoreConnectRootOrigin(raw string) bool {
 }
 
 func narrowCookieDomainForOrigin(origin *url.URL, cookie pCookie) pCookie {
-	if origin == nil || normalizedCookieDomain(cookie.Domain) == "" {
+	if origin == nil {
+		return cookie
+	}
+	if normalizedCookieDomain(cookie.Domain) == "" {
+		if scopeDomain := normalizedCookieDomain(cookie.ScopeDomain); scopeDomain != "" {
+			if cookieDomainMatchesHost(scopeDomain, origin.Hostname()) {
+				cookie.ScopeDomain = scopeDomain
+			} else {
+				cookie.ScopeDomain = ""
+			}
+		}
 		return cookie
 	}
 	if cookieDomainMatchesHost(cookie.Domain, origin.Hostname()) {
 		// The old cache representation narrowed domain cookies to the host that
-		// was being serialized. Keep that compatibility behavior instead of
-		// producing a bundle that the transfer validator must reject.
+		// was being serialized. Preserve the response's RFC storage scope as
+		// internal provenance so a later renewal or tombstone can still match it
+		// without exporting or hydrating the broader Domain.
+		cookie.ScopeDomain = normalizedCookieDomain(cookie.Domain)
 		cookie.Domain = ""
 	}
 	return cookie
@@ -881,8 +901,9 @@ func persistedCookiePathMatches(path, requestPath string) bool {
 // dropAmbiguousPersistedCookies resolves duplicate storage identities. The
 // cookie jar intentionally omits the domain and path scope from Cookies, so a
 // tracked update cannot prove which of two aliases it renewed. Equivalent
-// records can be collapsed; conflicting records are dropped fail-closed so a
-// resume cannot extend or send the wrong credential.
+// records can be collapsed only when their original RFC storage scope also
+// matches; conflicting records are dropped fail-closed so a resume cannot
+// extend or send the wrong credential.
 func dropAmbiguousPersistedCookies(cookies []pCookie) []pCookie {
 	type cookieGroup struct {
 		first      pCookie
@@ -904,9 +925,9 @@ func dropAmbiguousPersistedCookies(cookies []pCookie) []pCookie {
 	}
 
 	// A narrowed parent-domain cookie can alias a host-only record in the
-	// persisted representation. Equivalent records are safe to collapse; any
-	// disagreement in value, flags, or deadline is unsafe to resolve by input
-	// order, so drop the whole identity and require a fresh login.
+	// persisted representation. A disagreement in original scope, value,
+	// flags, or deadline is unsafe to resolve by input order, so drop the whole
+	// identity and require a fresh login.
 	filtered := make([]pCookie, 0, len(groups))
 	for _, identity := range order {
 		group := groups[identity]
@@ -919,6 +940,7 @@ func dropAmbiguousPersistedCookies(cookies []pCookie) []pCookie {
 
 func samePersistedCookieRecord(a, b pCookie) bool {
 	return samePersistedCookieScope(a, b) &&
+		persistedCookieScopeDomain(nil, a) == persistedCookieScopeDomain(nil, b) &&
 		a.Expires.Equal(b.Expires) &&
 		a.MaxAge == b.MaxAge
 }
