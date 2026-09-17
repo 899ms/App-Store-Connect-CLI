@@ -510,10 +510,12 @@ func TestGetAllRatings_PreservedStorefrontFailureWinsCountryDeadline(t *testing.
 	t.Setenv("ASC_BASE_DELAY", "1s")
 	t.Setenv("ASC_MAX_DELAY", "1s")
 
+	var countries atomic.Int32
 	newCountryContext := func(parent context.Context) (context.Context, context.CancelFunc) {
+		countries.Add(1)
 		return context.WithDeadline(parent, time.Now().Add(-time.Second))
 	}
-	_, err := client.GetAllRatings(context.Background(), "123", len(AllCountries()), newCountryContext)
+	_, err := client.GetAllRatings(context.Background(), "123", 1, newCountryContext)
 	if err == nil {
 		t.Fatal("expected all-storefront failure")
 	}
@@ -526,6 +528,9 @@ func TestGetAllRatings_PreservedStorefrontFailureWinsCountryDeadline(t *testing.
 	}
 	if got := statusError.HTTPStatusCode(); got != http.StatusTooManyRequests {
 		t.Fatalf("HTTPStatusCode() = %d, want %d", got, http.StatusTooManyRequests)
+	}
+	if got := countries.Load(); got != 1 {
+		t.Fatalf("country context factory called %d times, want 1 after retryable deadline cancellation", got)
 	}
 }
 
