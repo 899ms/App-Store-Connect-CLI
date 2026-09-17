@@ -402,9 +402,10 @@ func TestSubmitResolvedVersionValidatesCreateReceiptBeforeAddingItem(t *testing.
 			want:     "empty ID",
 		},
 		{
-			name:     "top-level errors member",
-			response: `{"errors":[],"data":{"type":"reviewSubmissions","id":"new-submission"}}`,
-			want:     "top-level errors",
+			name:          "top-level errors member",
+			response:      `{"errors":[],"data":{"type":"reviewSubmissions","id":"new-submission"}}`,
+			want:          "top-level errors",
+			wantPreserved: true,
 		},
 	}
 

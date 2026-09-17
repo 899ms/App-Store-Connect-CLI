@@ -20,6 +20,7 @@ type fakeSubmitClient struct {
 	createItemErrFor   map[string]error
 	canceled           []string
 	cancelContextErr   error
+	cancelErr          error
 	submitted          []string
 	attached           []string
 }
@@ -85,6 +86,9 @@ func (f *fakeSubmitClient) SubmitReviewSubmission(_ context.Context, submissionI
 func (f *fakeSubmitClient) CancelReviewSubmission(ctx context.Context, submissionID string) (*asc.ReviewSubmissionResponse, error) {
 	f.cancelContextErr = ctx.Err()
 	f.canceled = append(f.canceled, submissionID)
+	if f.cancelErr != nil {
+		return nil, f.cancelErr
+	}
 	return &asc.ReviewSubmissionResponse{Data: asc.ReviewSubmissionResource{ID: submissionID}}, nil
 }
 
@@ -150,6 +154,21 @@ func TestRollbackBackgroundAssetReviewSubmissionUsesFreshContext(t *testing.T) {
 	}
 	if client.cancelContextErr != nil {
 		t.Fatalf("rollback used canceled context: %v", client.cancelContextErr)
+	}
+}
+
+func TestRollbackBackgroundAssetReviewSubmissionRetainsBothFailures(t *testing.T) {
+	client := newFakeSubmitClient()
+	cause := errors.New("invalid create response")
+	cancelErr := errors.New("cancel unavailable")
+	client.cancelErr = cancelErr
+
+	err := rollbackBackgroundAssetReviewSubmission(context.Background(), client, "sub-1", "create review submission", cause)
+	if err == nil || !strings.Contains(err.Error(), "rollback also failed") || !strings.Contains(err.Error(), "sub-1") {
+		t.Fatalf("rollback error = %v, want leaked submission detail", err)
+	}
+	if !errors.Is(err, cause) || !errors.Is(err, cancelErr) {
+		t.Fatalf("rollback error = %v, want both original and cancellation causes", err)
 	}
 }
 

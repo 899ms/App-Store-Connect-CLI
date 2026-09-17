@@ -2,6 +2,7 @@ package submit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -244,6 +245,12 @@ func SubmitResolvedVersion(ctx context.Context, client *asc.Client, opts SubmitR
 	if submissionIDToSubmit == "" {
 		reviewSubmission, createErr := client.CreateReviewSubmission(submitCtx, appID, asc.Platform(platform))
 		if createErr != nil {
+			var partialErr *asc.ReviewSubmissionCreatePartialError
+			if errors.As(createErr, &partialErr) && partialErr.Response != nil &&
+				partialErr.Response.Data.Type == asc.ResourceTypeReviewSubmissions {
+				createdSubmissionID = strings.TrimSpace(partialErr.Response.Data.ID)
+				preserveCreatedReviewSubmission(createdSubmissionID, emit)
+			}
 			return result, fmt.Errorf("submit review: create review submission: %w", createErr)
 		}
 		if reviewSubmission != nil {
