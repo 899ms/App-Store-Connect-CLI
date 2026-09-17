@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -354,5 +355,42 @@ func TestResolveBuildByNumberSelectionSinceDoesNotClaimUninspectedNextPageMatche
 	}
 	if calls != 1 {
 		t.Fatalf("requests = %d, want 1", calls)
+	}
+}
+
+func TestResolveBuildByNumberSelectionSinceRejectsRepeatedNextURL(t *testing.T) {
+	calls := 0
+	const repeatedNext = "https://api.appstoreconnect.apple.com/v1/builds?cursor=older"
+	client := newBuildsWaitTestClient(t, func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/v1/builds" {
+			return nil, fmt.Errorf("unexpected path: %s", req.URL.Path)
+		}
+		calls++
+		switch calls {
+		case 1:
+			return buildsWaitJSONResponse(http.StatusOK, fmt.Sprintf(`{"data":[
+				{"type":"builds","id":"build-1","attributes":{"version":"42","uploadedDate":"2026-03-02T18:01:00Z","processingState":"VALID"}}
+			],"links":{"next":%q}}`, repeatedNext))
+		case 2:
+			// The repeated page must be rejected before this duplicate row can
+			// be interpreted as an ambiguity.
+			return buildsWaitJSONResponse(http.StatusOK, fmt.Sprintf(`{"data":[
+				{"type":"builds","id":"build-1","attributes":{"version":"42","uploadedDate":"2026-03-02T18:01:00Z","processingState":"VALID"}}
+			],"links":{"next":%q}}`, repeatedNext))
+		default:
+			return nil, context.Canceled
+		}
+	})
+
+	since := time.Date(2026, 3, 2, 17, 0, 0, 0, time.UTC)
+	_, err := resolveBuildByNumberSelectionSince(
+		context.Background(), client, "123456789", "42", "", "IOS",
+		[]asc.BuildsOption{asc.WithBuildsVersion("42")}, &since, false,
+	)
+	if !errors.Is(err, asc.ErrRepeatedPaginationURL) {
+		t.Fatalf("expected repeated pagination URL error, got %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("requests = %d, want 2 before repeated-link rejection", calls)
 	}
 }

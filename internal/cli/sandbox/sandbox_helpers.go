@@ -81,6 +81,7 @@ func sandboxRenewalRateValues() []string {
 
 func findSandboxTesterByEmail(ctx context.Context, client *asc.Client, email string) (*asc.SandboxTesterResponse, error) {
 	next := ""
+	seenNext := make(map[string]struct{})
 	matches := make([]asc.Resource[asc.SandboxTesterAttributes], 0, 1)
 	seenIDs := make(map[string]struct{})
 	for {
@@ -139,6 +140,10 @@ func findSandboxTesterByEmail(ctx context.Context, client *asc.Client, email str
 		if err := shared.ValidateNextURL(nextURL); err != nil {
 			return nil, err
 		}
+		if _, ok := seenNext[nextURL]; ok {
+			return nil, asc.ErrRepeatedPaginationURL
+		}
+		seenNext[nextURL] = struct{}{}
 		next = nextURL
 	}
 	return nil, fmt.Errorf("no sandbox tester found for %q", strings.TrimSpace(email))
