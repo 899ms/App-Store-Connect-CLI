@@ -29,7 +29,8 @@ const (
 	webSessionCacheDirEnv     = "ASC_WEB_SESSION_CACHE_DIR"
 	webSessionBackendEnv      = "ASC_WEB_SESSION_CACHE_BACKEND"
 
-	webSessionCacheVersion = 1
+	webSessionCacheVersion  = 1
+	webSessionCacheMaxBytes = 16 << 20
 
 	webSessionKeyringService = "asc-web-session"
 	webSessionStoreItem      = "asc:web-session:store"
@@ -121,7 +122,7 @@ var (
 			},
 		})
 	}
-	sessionFileWrite   = os.WriteFile
+	sessionFileWrite   = writeSessionFileNoFollow
 	sessionInfoFetcher = getSessionInfo
 
 	// sessionCompareDeleteBarrier runs between the stamp comparison and the
@@ -845,15 +846,216 @@ type sessionFileState struct {
 	last        sessionFileBackup
 }
 
-func backupSessionFile(path string) (sessionFileBackup, error) {
-	info, err := os.Stat(path)
+// writeSessionFileNoFollow writes through the already-open staging descriptor.
+// The descriptor is created exclusively by createSessionTempFile, so this
+// helper never reopens or mutates a caller-controlled pathname.
+func writeSessionFileNoFollow(_ string, file *os.File, data []byte, perm os.FileMode) error {
+	if file == nil {
+		return errors.New("web session cache temporary file is nil")
+	}
+	info, err := file.Stat()
 	if err != nil {
+		return fmt.Errorf("failed to stat web session cache temporary file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%w: temporary path is not a regular file", errUnsafeSessionCacheFile)
+	}
+	if err := file.Chmod(perm); err != nil {
+		return fmt.Errorf("failed to set web session cache temporary file permissions: %w", err)
+	}
+	if err := file.Truncate(0); err != nil {
+		return err
+	}
+
+	n, err := file.Write(data)
+	if err != nil {
+		return err
+	}
+	if n != len(data) {
+		return io.ErrShortWrite
+	}
+	return nil
+}
+
+type sessionTempFile struct {
+	root *os.Root
+	file *os.File
+	name string
+	path string
+	mode os.FileMode
+}
+
+// createSessionTempFile creates a fresh staging inode beneath the destination
+// directory. The rooted helper provides exclusive creation and no-follow
+// semantics; callers own the returned root until cleanup.
+func createSessionTempFile(destination string, perm os.FileMode) (*sessionTempFile, error) {
+	parent, err := os.OpenRoot(filepath.Dir(destination))
+	if err != nil {
+		return nil, err
+	}
+	privatePerm := perm.Perm() & 0o700
+	if privatePerm == 0 {
+		privatePerm = 0o600
+	}
+	pattern := fmt.Sprintf(".asc-web-session-%s-*.tmp", filepath.Base(destination))
+	file, name, err := secureopen.CreateTempNoFollowInRootWithCreator(
+		parent,
+		".",
+		pattern,
+		privatePerm,
+		secureopen.OpenNewPrivateFileNoFollowInRoot,
+	)
+	if err != nil {
+		_ = parent.Close()
+		return nil, err
+	}
+	if err := secureopen.PreparePrivateFile(file, privatePerm); err != nil {
+		_ = file.Close()
+		_ = parent.Remove(name)
+		_ = parent.Close()
+		return nil, fmt.Errorf("failed to secure web session cache temporary file: %w", err)
+	}
+	return &sessionTempFile{
+		root: parent,
+		file: file,
+		name: name,
+		path: filepath.Join(filepath.Dir(destination), name),
+		mode: privatePerm,
+	}, nil
+}
+
+func (temp *sessionTempFile) close() error {
+	if temp == nil || temp.file == nil {
+		return nil
+	}
+	err := temp.file.Close()
+	temp.file = nil
+	return err
+}
+
+func (temp *sessionTempFile) cleanup() {
+	if temp == nil {
+		return
+	}
+	_ = temp.close()
+	if temp.root != nil {
+		if temp.name != "" {
+			_ = temp.root.Remove(temp.name)
+		}
+		_ = temp.root.Close()
+		temp.root = nil
+	}
+}
+
+func createAndWriteSessionTempFile(destination string, data []byte, perm os.FileMode) (*sessionTempFile, error) {
+	temp, err := createSessionTempFile(destination, perm)
+	if err != nil {
+		return nil, err
+	}
+	if err := sessionFileWrite(temp.path, temp.file, data, temp.mode); err != nil {
+		temp.cleanup()
+		return nil, err
+	}
+	if err := temp.close(); err != nil {
+		temp.cleanup()
+		return nil, err
+	}
+	return temp, nil
+}
+
+func publishSessionTempFile(temp *sessionTempFile, destination string) error {
+	if temp == nil || temp.root == nil {
+		return errors.New("web session cache temporary file is unavailable")
+	}
+	if err := temp.root.Rename(temp.name, filepath.Base(destination)); err != nil {
+		return err
+	}
+	temp.name = ""
+	return nil
+}
+
+func writeNewPrivateSessionFile(path string, data []byte) error {
+	parent, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+
+	name := filepath.Base(path)
+	file, err := secureopen.OpenNewPrivateFileNoFollowInRoot(parent, name, 0o600)
+	if err != nil {
+		return err
+	}
+	cleanup := func() {
+		_ = file.Close()
+		_ = parent.Remove(name)
+	}
+	if err := secureopen.PreparePrivateFile(file, 0o600); err != nil {
+		cleanup()
+		return fmt.Errorf("failed to secure web session cache file: %w", err)
+	}
+	if n, writeErr := file.Write(data); writeErr != nil {
+		cleanup()
+		return writeErr
+	} else if n != len(data) {
+		cleanup()
+		return io.ErrShortWrite
+	}
+	if err := file.Close(); err != nil {
+		_ = parent.Remove(name)
+		return err
+	}
+	return nil
+}
+
+func classifySessionCachePathError(path string, err error) error {
+	info, statErr := os.Lstat(path)
+	if statErr != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%w: refusing symlink %q", errUnsafeSessionCacheFile, path)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%w: path is not a regular file: %q", errUnsafeSessionCacheFile, path)
+	}
+	return err
+}
+
+func readBoundedSessionCacheFile(file *os.File, path string) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(file, webSessionCacheMaxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > webSessionCacheMaxBytes {
+		return nil, fmt.Errorf("%w: %q exceeds the %d-byte size limit", errUnsafeSessionCacheFile, path, webSessionCacheMaxBytes)
+	}
+	return data, nil
+}
+
+func backupSessionFile(path string) (sessionFileBackup, error) {
+	file, err := secureopen.OpenExistingNoFollow(path)
+	if err != nil {
+		err = classifySessionCachePathError(path, err)
 		if os.IsNotExist(err) {
 			return sessionFileBackup{}, nil
 		}
 		return sessionFileBackup{}, err
 	}
-	data, err := os.ReadFile(path)
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return sessionFileBackup{}, fmt.Errorf("failed to stat web session cache backup: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return sessionFileBackup{}, fmt.Errorf("%w: path is not a regular file: %q", errUnsafeSessionCacheFile, path)
+	}
+
+	if info.Size() > webSessionCacheMaxBytes {
+		return sessionFileBackup{}, fmt.Errorf("%w: %q exceeds the %d-byte size limit", errUnsafeSessionCacheFile, path, webSessionCacheMaxBytes)
+	}
+	data, err := readBoundedSessionCacheFile(file, path)
 	if err != nil {
 		return sessionFileBackup{}, err
 	}
@@ -868,24 +1070,34 @@ func restoreSessionFile(path string, backup sessionFileBackup) error {
 		return nil
 	}
 
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".asc-web-session-rollback-*")
+	tmp, err := createSessionTempFile(path, backup.mode)
 	if err != nil {
 		return err
 	}
-	tmpPath := tmp.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
-	if err := tmp.Chmod(backup.mode); err != nil {
-		_ = tmp.Close()
+	// Rollback must not reuse the injectable persistence writer: the writer may
+	// be the failure being recovered from. The private staging descriptor still
+	// preserves the same exclusive no-follow write boundary.
+	if err := writeSessionFileNoFollow(tmp.path, tmp.file, backup.data, tmp.mode); err != nil {
+		tmp.cleanup()
 		return err
 	}
-	if _, err := tmp.Write(backup.data); err != nil {
-		_ = tmp.Close()
+	// The staging inode stays private while secret bytes are written. Restore
+	// the captured mode only after the write so rollback remains an exact state
+	// restoration without exposing a broader temporary file.
+	if err := tmp.file.Chmod(backup.mode.Perm()); err != nil {
+		tmp.cleanup()
 		return err
 	}
-	if err := tmp.Close(); err != nil {
+	if err := tmp.close(); err != nil {
+		tmp.cleanup()
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	if err := publishSessionTempFile(tmp, path); err != nil {
+		tmp.cleanup()
+		return err
+	}
+	tmp.cleanup()
+	return nil
 }
 
 // captureFileSessionState snapshots both files that make up a file-backed
@@ -947,29 +1159,29 @@ func writeSessionToFile(key string, sess persistedSession) error {
 		return cause
 	}
 
-	tmpSessionPath := state.sessionPath + ".tmp"
-	if err := sessionFileWrite(tmpSessionPath, raw, 0o600); err != nil {
-		_ = os.Remove(tmpSessionPath)
+	tmpSession, err := createAndWriteSessionTempFile(state.sessionPath, raw, 0o600)
+	if err != nil {
 		return fmt.Errorf("failed to write session cache: %w", err)
 	}
-	if err := os.Rename(tmpSessionPath, state.sessionPath); err != nil {
-		_ = os.Remove(tmpSessionPath)
+	if err := publishSessionTempFile(tmpSession, state.sessionPath); err != nil {
+		tmpSession.cleanup()
 		return fmt.Errorf("failed to finalize session cache: %w", err)
 	}
+	tmpSession.cleanup()
 
 	lastRaw, err := json.Marshal(persistedLastSession{Version: webSessionCacheVersion, Key: key})
 	if err != nil {
 		return rollback(fmt.Errorf("failed to marshal last session pointer: %w", err))
 	}
-	tmpLastPath := state.lastPath + ".tmp"
-	if err := sessionFileWrite(tmpLastPath, lastRaw, 0o600); err != nil {
-		_ = os.Remove(tmpLastPath)
+	tmpLast, err := createAndWriteSessionTempFile(state.lastPath, lastRaw, 0o600)
+	if err != nil {
 		return rollback(fmt.Errorf("failed to write last session pointer: %w", err))
 	}
-	if err := os.Rename(tmpLastPath, state.lastPath); err != nil {
-		_ = os.Remove(tmpLastPath)
+	if err := publishSessionTempFile(tmpLast, state.lastPath); err != nil {
+		tmpLast.cleanup()
 		return rollback(fmt.Errorf("failed to finalize last session pointer: %w", err))
 	}
+	tmpLast.cleanup()
 	return nil
 }
 
@@ -1000,37 +1212,26 @@ func writeSessionToFileIfAbsent(key string, sess persistedSession) error {
 		return cause
 	}
 
-	file, err := os.OpenFile(state.sessionPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
+	if err := writeNewPrivateSessionFile(state.sessionPath, raw); err != nil {
 		if os.IsExist(err) {
 			return cachedSessionAlreadyExistsError(key)
 		}
-		return fmt.Errorf("failed to create session cache: %w", err)
-	}
-	if n, writeErr := file.Write(raw); writeErr != nil {
-		_ = file.Close()
-		return rollback(fmt.Errorf("failed to write session cache: %w", writeErr))
-	} else if n != len(raw) {
-		_ = file.Close()
-		return rollback(fmt.Errorf("failed to write session cache: %w", io.ErrShortWrite))
-	}
-	if err := file.Close(); err != nil {
-		return rollback(fmt.Errorf("failed to finalize session cache: %w", err))
+		return rollback(fmt.Errorf("failed to create session cache: %w", err))
 	}
 
 	lastRaw, err := json.Marshal(persistedLastSession{Version: webSessionCacheVersion, Key: key})
 	if err != nil {
 		return rollback(fmt.Errorf("failed to marshal last session pointer: %w", err))
 	}
-	tmpLastPath := state.lastPath + ".tmp"
-	if err := sessionFileWrite(tmpLastPath, lastRaw, 0o600); err != nil {
-		_ = os.Remove(tmpLastPath)
+	tmpLast, err := createAndWriteSessionTempFile(state.lastPath, lastRaw, 0o600)
+	if err != nil {
 		return rollback(fmt.Errorf("failed to write last session pointer: %w", err))
 	}
-	if err := os.Rename(tmpLastPath, state.lastPath); err != nil {
-		_ = os.Remove(tmpLastPath)
+	if err := publishSessionTempFile(tmpLast, state.lastPath); err != nil {
+		tmpLast.cleanup()
 		return rollback(fmt.Errorf("failed to finalize last session pointer: %w", err))
 	}
+	tmpLast.cleanup()
 	return nil
 }
 
@@ -1119,8 +1320,11 @@ func readSessionCacheFile(path string) ([]byte, error) {
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("%w: path is not a regular file: %q", errUnsafeSessionCacheFile, path)
 	}
+	if info.Size() > webSessionCacheMaxBytes {
+		return nil, fmt.Errorf("%w: %q exceeds the %d-byte size limit", errUnsafeSessionCacheFile, path, webSessionCacheMaxBytes)
+	}
 
-	return io.ReadAll(file)
+	return readBoundedSessionCacheFile(file, path)
 }
 
 func persistSessionBySelection(selection backendSelection, key string, sess persistedSession) error {

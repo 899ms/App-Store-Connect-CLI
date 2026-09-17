@@ -1141,7 +1141,7 @@ func TestPersistSessionKeepsSessionOnlyUpdateNonPersistable(t *testing.T) {
 func TestPersistSessionDoesNotAdvanceBaselineWhenPersistenceFails(t *testing.T) {
 	withFileSessionCache(t)
 	previousWrite := sessionFileWrite
-	sessionFileWrite = func(string, []byte, os.FileMode) error {
+	sessionFileWrite = func(string, *os.File, []byte, os.FileMode) error {
 		return errors.New("injected session-cache write failure")
 	}
 	t.Cleanup(func() { sessionFileWrite = previousWrite })
@@ -1539,7 +1539,7 @@ func TestTryResumeSessionFailedRefreshPreservesNewerReplacementOnCleanup(t *test
 	}
 
 	previousWrite := sessionFileWrite
-	sessionFileWrite = func(string, []byte, os.FileMode) error {
+	sessionFileWrite = func(string, *os.File, []byte, os.FileMode) error {
 		return errors.New("injected refresh persistence failure")
 	}
 	resumed, ok, err := TryResumeSession(context.Background(), webTestSessionEmail)
