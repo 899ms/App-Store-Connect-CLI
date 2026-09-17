@@ -544,6 +544,7 @@ Examples:
 						}{
 							{"name.txt", loc.Attributes.Name},
 							{"subtitle.txt", loc.Attributes.Subtitle},
+							{"privacy_url.txt", loc.Attributes.PrivacyPolicyURL},
 						}
 						for _, file := range files {
 							written, err := writeAndCount(root, filepath.Join(localeDir, file.name), file.content)
