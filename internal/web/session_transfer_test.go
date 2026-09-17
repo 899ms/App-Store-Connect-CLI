@@ -137,6 +137,36 @@ func TestExportSessionBundleUsesLastCachedSessionWithoutAppleID(t *testing.T) {
 	}
 }
 
+func TestExportBundleCookiesDoesNotResetPersistedMaxAge(t *testing.T) {
+	now := time.Date(2026, time.September, 17, 3, 0, 0, 0, time.UTC)
+	updatedAt := now.Add(-30 * time.Second)
+	sess := persistedSession{
+		UpdatedAt: updatedAt,
+		Cookies: map[string][]pCookie{
+			"https://appstoreconnect.apple.com/": {{
+				Name: "myacinfo", Value: "token", MaxAge: 60, Expires: now.Add(-time.Hour),
+			}},
+		},
+	}
+
+	cookies := exportBundleCookies(sess, now)
+	if len(cookies) != 1 {
+		t.Fatalf("exportBundleCookies() returned %d cookies, want 1", len(cookies))
+	}
+	wantExpiry := updatedAt.Add(time.Minute)
+	if cookies[0].Expires == nil || !cookies[0].Expires.Equal(wantExpiry) {
+		t.Fatalf("exported expiry = %v, want %v", cookies[0].Expires, wantExpiry)
+	}
+	if cookies[0].MaxAge != 0 {
+		t.Fatalf("exported MaxAge = %d, want 0", cookies[0].MaxAge)
+	}
+
+	sess.UpdatedAt = now.Add(-time.Minute)
+	if cookies := exportBundleCookies(sess, now); len(cookies) != 0 {
+		t.Fatalf("elapsed MaxAge exported %d cookies, want 0", len(cookies))
+	}
+}
+
 func TestExportSessionBundleReportsDisabledCache(t *testing.T) {
 	withFileSessionCache(t)
 	t.Setenv(webSessionCacheEnabledEnv, "0")
