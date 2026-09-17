@@ -224,15 +224,17 @@ func SubmitResolvedVersion(ctx context.Context, client *asc.Client, opts SubmitR
 	}
 
 	preparationCtx, preparationCancel := submitResolvedVersionPhaseContext(ctx, opts.RequestTimeout)
-	preparedSubmission := prepareReviewSubmissionForCreate(preparationCtx, client, appID, platform, versionID, emit)
+	preparedSubmission, err := prepareReviewSubmissionForCreate(preparationCtx, client, appID, platform, versionID, emit)
 	preparationCancel()
+	if err != nil {
+		return result, fmt.Errorf("submit review: prepare review submission: %w", err)
+	}
 
 	submitCtx, submitCancel := submitResolvedVersionPhaseContext(ctx, opts.RequestTimeout)
 	defer submitCancel()
 
 	submissionIDToSubmit := strings.TrimSpace(preparedSubmission.reuseSubmissionID)
 	createdSubmissionID := ""
-	var err error
 	if submissionIDToSubmit == "" {
 		reviewSubmission, createErr := client.CreateReviewSubmission(submitCtx, appID, asc.Platform(platform))
 		if createErr != nil {
