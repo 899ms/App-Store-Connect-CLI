@@ -157,6 +157,9 @@ func prepareReviewSubmissionForCreate(
 	if existing == nil {
 		return submitCreateReviewSubmissionPreparation{}, fmt.Errorf("query ready review submissions: response is required")
 	}
+	if existing.Data == nil {
+		return submitCreateReviewSubmissionPreparation{}, fmt.Errorf("query ready review submissions: response data is required")
+	}
 	existing.Links.Next = strings.TrimSpace(existing.Links.Next)
 
 	paginated, err := asc.PaginateAll(ctx, existing, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
@@ -166,6 +169,9 @@ func prepareReviewSubmissionForCreate(
 		}
 		if next == nil {
 			return nil, fmt.Errorf("response is required")
+		}
+		if next.Data == nil {
+			return nil, fmt.Errorf("response data is required")
 		}
 		next.Links.Next = strings.TrimSpace(next.Links.Next)
 		return next, nil
@@ -337,6 +343,9 @@ func summarizeReviewSubmissionItems(
 	if resp == nil {
 		return summary, fmt.Errorf("review submission items response is required")
 	}
+	if resp.Data == nil {
+		return summary, fmt.Errorf("review submission items response data is required")
+	}
 
 	page := 1
 	seenNext := make(map[string]struct{})
@@ -358,6 +367,9 @@ func summarizeReviewSubmissionItems(
 		}
 		if resp == nil {
 			return summary, fmt.Errorf("review submission items page %d: response is required", page+1)
+		}
+		if resp.Data == nil {
+			return summary, fmt.Errorf("review submission items page %d: response data is required", page+1)
 		}
 		page++
 	}
