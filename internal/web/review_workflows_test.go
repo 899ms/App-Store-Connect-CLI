@@ -479,8 +479,10 @@ func TestDownloadAttachmentStripsCredentialsAddedByRedirectPolicy(t *testing.T) 
 	client.httpClient.CheckRedirect = func(redirect *http.Request, _ []*http.Request) error {
 		policyCookie = redirect.Header.Get("Cookie")
 		policyReferer = redirect.Header.Get("Referer")
-		redirect.Header.Set("Cookie", "policy=secret")
-		redirect.Header.Set("Referer", "https://example.test/source?token=secret")
+		// A custom policy can bypass http.Header's canonicalization by assigning
+		// directly to the map. Credential stripping must still be case-insensitive.
+		redirect.Header["cookie"] = []string{"policy=secret"}
+		redirect.Header["referer"] = []string{"https://example.test/source?token=secret"}
 		return nil
 	}
 

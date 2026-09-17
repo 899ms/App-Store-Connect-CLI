@@ -1345,8 +1345,11 @@ func stripReviewAttachmentRedirectCredentials(request *http.Request) {
 	if request == nil {
 		return
 	}
-	request.Header.Del("Cookie")
-	request.Header.Del("Referer")
+	for name := range request.Header {
+		if strings.EqualFold(name, "Cookie") || strings.EqualFold(name, "Referer") {
+			delete(request.Header, name)
+		}
+	}
 }
 
 // validateReviewAttachmentDownloadTarget validates a redirect target without
