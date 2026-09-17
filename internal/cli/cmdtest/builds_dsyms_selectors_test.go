@@ -14,6 +14,42 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
+func TestBuildsDSYMExactVersionDownloadsNewestMatchingBuild(t *testing.T) {
+	setupAuth(t)
+	outputDir := filepath.Join(t.TempDir(), "dsyms")
+	restoreTransport(t)
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.URL.Path == "/v1/builds" && req.URL.Query().Get("include") == "preReleaseVersion":
+			body := `{"data":[
+				{"type":"builds","id":"build-old","attributes":{"version":"8","uploadedDate":"2026-01-01T00:00:00Z"},"relationships":{"preReleaseVersion":{"data":{"id":"prv-old"}}}},
+				{"type":"builds","id":"build-match-old","attributes":{"version":"40","uploadedDate":"2026-02-01T00:00:00Z"},"relationships":{"preReleaseVersion":{"data":{"id":"prv-match"}}}},
+				{"type":"builds","id":"build-match","attributes":{"version":"41","uploadedDate":"2026-03-01T00:00:00Z"},"relationships":{"preReleaseVersion":{"data":{"id":"prv-match"}}}}
+			],"included":[
+				{"type":"preReleaseVersions","id":"prv-old","attributes":{"version":"1.0","platform":"IOS"}},
+				{"type":"preReleaseVersions","id":"prv-match","attributes":{"version":"1.2.3","platform":"IOS"}}
+			],"links":{}}`
+			return dsymJSON(body), nil
+		case req.URL.Path == "/v1/builds/build-match" && req.URL.Query().Get("include") == "buildBundles":
+			body := `{"data":{"type":"builds","id":"build-match"},"included":[{"type":"buildBundles","id":"bundle","attributes":{"bundleId":"com.example.app","dSYMUrl":"https://downloads.example.com/match.zip"}}]}`
+			return dsymJSON(body), nil
+		case req.URL.Host == "downloads.example.com" && req.URL.Path == "/match.zip":
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("match")), Header: make(http.Header)}, nil
+		default:
+			t.Fatalf("unexpected request: %s %s?%s", req.Method, req.URL.Path, req.URL.RawQuery)
+			return nil, nil
+		}
+	})
+
+	stdout, stderr := runDSYM(t, outputDir, "builds", "dsyms", "--app", "123456789", "--version", "1.2.3", "--output", "json")
+	if strings.Contains(stderr, "--build-id, --latest, or --build-number is required") {
+		t.Fatalf("exact version was rejected: %s", stderr)
+	}
+	if !strings.Contains(stdout, `"buildId":"build-match"`) || strings.Contains(stdout, "build-old") || strings.Contains(stdout, "build-match-old") {
+		t.Fatalf("stdout=%s stderr=%s", stdout, stderr)
+	}
+}
+
 func TestBuildsDSYMVersionLiveDownloadsNewestReleasedBuild(t *testing.T) {
 	setupAuth(t)
 	outputDir := filepath.Join(t.TempDir(), "dsyms")

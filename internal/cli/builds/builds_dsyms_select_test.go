@@ -6,6 +6,19 @@ import (
 	"time"
 )
 
+func TestParseDSYMSelectionExactVersionDoesNotRequireLatest(t *testing.T) {
+	selection, err := parseDSYMSelection(dsymFlagInput{
+		AppID:   "123",
+		Version: "1.2.3",
+	})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !selection.selectsByMarketingVersion() || selection.Resolve.Latest || selection.All || selection.Resolve.Version != "1.2.3" {
+		t.Fatalf("selection = %+v, want exact version without --latest", selection)
+	}
+}
+
 func TestParseDSYMSelectionVersionLatestMatchesLatestFlag(t *testing.T) {
 	selection, err := parseDSYMSelection(dsymFlagInput{
 		AppID:   "123",

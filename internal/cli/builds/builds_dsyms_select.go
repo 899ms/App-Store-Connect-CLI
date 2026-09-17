@@ -137,7 +137,7 @@ func parseDSYMSelection(input dsymFlagInput) (dsymSelection, error) {
 	if err := validateDSYMSelection(selection, input.TimeoutSet, input.PollSet, input.Timeout, input.PollInterval); err != nil {
 		return dsymSelection{}, err
 	}
-	if !selection.Multi && !selection.Live {
+	if !selection.selectsByMarketingVersion() {
 		if err := validateResolveBuildOptions(selection.Resolve); err != nil {
 			return dsymSelection{}, err
 		}
@@ -145,6 +145,20 @@ func parseDSYMSelection(input dsymFlagInput) (dsymSelection, error) {
 		return dsymSelection{}, shared.UsageError("builds dsyms: --app is required (or set ASC_APP_ID)")
 	}
 	return selection, nil
+}
+
+// selectsByMarketingVersion reports selectors that list builds by App Store
+// version instead of the historical --latest or --build-number lookup.
+// An exact --version without --latest downloads the newest build of that
+// version unless --all is also set.
+func (selection dsymSelection) selectsByMarketingVersion() bool {
+	if selection.Multi || selection.Live {
+		return true
+	}
+	return selection.Resolve.BuildID == "" &&
+		selection.Resolve.BuildNumber == "" &&
+		!selection.Resolve.Latest &&
+		selection.Resolve.Version != ""
 }
 
 func validateDSYMSelection(selection dsymSelection, timeoutSet, pollSet bool, timeout, poll time.Duration) error {
@@ -184,7 +198,7 @@ func validateDSYMSelection(selection dsymSelection, timeoutSet, pollSet bool, ti
 }
 
 func resolveDSYMTargets(ctx context.Context, client *asc.Client, selection dsymSelection) ([]dsymTarget, error) {
-	if selection.Multi || selection.Live {
+	if selection.selectsByMarketingVersion() {
 		return resolveSelectedDSYMTargets(ctx, client, selection)
 	}
 	requestCtx, cancel := shared.ContextWithTimeout(ctx)

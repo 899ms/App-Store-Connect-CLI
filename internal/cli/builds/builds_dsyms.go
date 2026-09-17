@@ -80,6 +80,7 @@ Examples:
   asc builds dsyms --app "com.example.app" --latest
   asc builds dsyms --app "com.example.app" --latest --platform IOS
   asc builds dsyms --app "com.example.app" --latest --version "1.2.3"
+  asc builds dsyms --app "com.example.app" --version "1.2.3"
   asc builds dsyms --app "com.example.app" --version live
   asc builds dsyms --app "com.example.app" --min-version "1.2.0" --output-dir "./dsyms"
   asc builds dsyms --app "com.example.app" --version live --wait --timeout 15m
