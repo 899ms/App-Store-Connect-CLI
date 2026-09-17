@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -840,6 +842,450 @@ func TestHydrateCookieJarSkipsExpiredCookies(t *testing.T) {
 	}
 }
 
+func TestNormalizePersistedCookieDeadlineHonorsMaxAgePrecedence(t *testing.T) {
+	now := time.Date(2026, time.September, 17, 3, 0, 0, 0, time.UTC)
+	observedAt := now.Add(-30 * time.Second)
+	tests := []struct {
+		name        string
+		cookie      pCookie
+		observedAt  time.Time
+		wantOK      bool
+		wantExpiry  time.Time
+		wantMaxAge  int
+		wantExpired bool
+	}{
+		{
+			name: "positive max age overrides stale expires",
+			cookie: pCookie{
+				MaxAge:  60,
+				Expires: now.Add(-time.Hour),
+			},
+			observedAt:  observedAt,
+			wantOK:      true,
+			wantExpiry:  observedAt.Add(time.Minute),
+			wantMaxAge:  0,
+			wantExpired: false,
+		},
+		{
+			name: "negative max age overrides future expires",
+			cookie: pCookie{
+				MaxAge:  -1,
+				Expires: now.Add(time.Hour),
+			},
+			observedAt:  observedAt,
+			wantOK:      true,
+			wantExpiry:  now.Add(time.Hour),
+			wantMaxAge:  -1,
+			wantExpired: true,
+		},
+		{
+			name: "expires at current time",
+			cookie: pCookie{
+				Expires: now,
+			},
+			observedAt:  observedAt,
+			wantOK:      true,
+			wantExpiry:  now,
+			wantExpired: true,
+		},
+		{
+			name:   "positive max age without observation time",
+			cookie: pCookie{MaxAge: 60},
+			wantOK: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := normalizePersistedCookieDeadline(test.cookie, test.observedAt)
+			if ok != test.wantOK {
+				t.Fatalf("normalizePersistedCookieDeadline() ok = %t, want %t", ok, test.wantOK)
+			}
+			if !ok {
+				return
+			}
+			if !got.Expires.Equal(test.wantExpiry) {
+				t.Fatalf("Expires = %v, want %v", got.Expires, test.wantExpiry)
+			}
+			if got.MaxAge != test.wantMaxAge {
+				t.Fatalf("MaxAge = %d, want %d", got.MaxAge, test.wantMaxAge)
+			}
+			if expired := isExpiredCookie(got, now); expired != test.wantExpired {
+				t.Fatalf("isExpiredCookie() = %t, want %t", expired, test.wantExpired)
+			}
+		})
+	}
+}
+
+func TestHydrateCookieJarDoesNotResetPersistedMaxAge(t *testing.T) {
+	now := time.Now().UTC()
+	for _, test := range []struct {
+		name       string
+		updatedAt  time.Time
+		wantLoaded int
+	}{
+		{name: "remaining lifetime", updatedAt: now.Add(-30 * time.Second), wantLoaded: 1},
+		{name: "elapsed lifetime", updatedAt: now.Add(-60 * time.Second), wantLoaded: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			jar, err := cookiejar.New(nil)
+			if err != nil {
+				t.Fatalf("cookiejar.New() error: %v", err)
+			}
+			sess := persistedSession{
+				Version:   webSessionCacheVersion,
+				UpdatedAt: test.updatedAt,
+				Cookies: map[string][]pCookie{
+					"https://appstoreconnect.apple.com/": {{
+						Name: "myacinfo", Value: "token", MaxAge: 60, Expires: now.Add(-time.Hour),
+					}},
+				},
+			}
+			if loaded := hydrateCookieJar(jar, sess); loaded != test.wantLoaded {
+				t.Fatalf("hydrateCookieJar() = %d, want %d", loaded, test.wantLoaded)
+			}
+		})
+	}
+}
+
+func TestSessionCookieTrackingJarScopesUpdatesByOriginAndPath(t *testing.T) {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar.New() error: %v", err)
+	}
+	appURL, _ := url.Parse("https://appstoreconnect.apple.com/olympus/v1/session")
+	appRoot, _ := url.Parse("https://appstoreconnect.apple.com/")
+	developerRoot, _ := url.Parse("https://developer.apple.com/")
+	oldExpiry := time.Date(2026, time.September, 18, 3, 0, 0, 0, time.UTC)
+	appExpiry := oldExpiry.Add(time.Hour)
+	pathExpiry := oldExpiry.Add(2 * time.Hour)
+	for _, target := range []*url.URL{appRoot, developerRoot} {
+		jar.SetCookies(target, []*http.Cookie{{
+			Name: "token", Value: "same", Path: "/", Expires: oldExpiry,
+		}})
+	}
+
+	tracker := newSessionCookieTrackingJar(jar)
+	tracker.SetCookies(appURL, []*http.Cookie{{
+		Name: "token", Value: "same", Path: "/", Expires: appExpiry,
+	}})
+	_, updates, err := tracker.serializeWithUpdates("user@example.com")
+	if err != nil {
+		t.Fatalf("serializeWithUpdates() error: %v", err)
+	}
+	if got, ok := updates[trackedCookieKey{origin: appRoot.String(), name: "token", value: "same"}]; !ok || !got.cookie.Expires.Equal(appExpiry) {
+		t.Fatalf("app-store update = (%+v, %t), want expiry %v", got, ok, appExpiry)
+	}
+	if _, ok := updates[trackedCookieKey{origin: developerRoot.String(), name: "token", value: "same"}]; ok {
+		t.Fatal("host-only app-store update was attributed to developer.apple.com")
+	}
+
+	// The source URL's default path is /olympus/v1, so this update does not
+	// apply to the cached root cookie even though its name and value match.
+	tracker.SetCookies(appURL, []*http.Cookie{{
+		Name: "token", Value: "same", Expires: pathExpiry,
+	}})
+	_, updates, err = tracker.serializeWithUpdates("user@example.com")
+	if err != nil {
+		t.Fatalf("serializeWithUpdates() after path update error: %v", err)
+	}
+	if got := updates[trackedCookieKey{origin: appRoot.String(), name: "token", value: "same"}].cookie.Expires; !got.Equal(appExpiry) {
+		t.Fatalf("root-cookie expiry changed to %v after path-scoped update, want %v", got, appExpiry)
+	}
+}
+
+func TestPreserveCachedCookieDeadlineDropsSessionOnlySameValueUpdate(t *testing.T) {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar.New() error: %v", err)
+	}
+	target, _ := url.Parse("https://appstoreconnect.apple.com/")
+	oldExpiry := time.Date(2026, time.September, 18, 3, 0, 0, 0, time.UTC)
+	jar.SetCookies(target, []*http.Cookie{{Name: "token", Value: "same", Path: "/", Expires: oldExpiry}})
+	tracker := newSessionCookieTrackingJar(jar)
+	tracker.SetCookies(target, []*http.Cookie{{Name: "token", Value: "same", Path: "/"}})
+	serialized, updates, err := tracker.serializeWithUpdates("user@example.com")
+	if err != nil {
+		t.Fatalf("serializeWithUpdates() error: %v", err)
+	}
+	cached := persistedSession{
+		UpdatedAt: time.Date(2026, time.September, 17, 3, 0, 0, 0, time.UTC),
+		Cookies:   map[string][]pCookie{target.String(): {{Name: "token", Value: "same", Expires: oldExpiry}}},
+	}
+	preserveCachedCookieDeadlines(&serialized, &cached, updates, oldExpiry.Add(-time.Hour))
+	if got := serialized.Cookies[target.String()]; len(got) != 0 {
+		t.Fatalf("session-only replacement persisted as %#v, want none", got)
+	}
+}
+
+func TestPreserveCachedCookieDeadlineUsesLatestPersistentUpdate(t *testing.T) {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar.New() error: %v", err)
+	}
+	target, _ := url.Parse("https://appstoreconnect.apple.com/")
+	oldExpiry := time.Date(2026, time.September, 18, 3, 0, 0, 0, time.UTC)
+	firstExpiry := oldExpiry.Add(time.Hour)
+	latestExpiry := oldExpiry.Add(2 * time.Hour)
+	jar.SetCookies(target, []*http.Cookie{{Name: "token", Value: "same", Path: "/", Expires: oldExpiry}})
+	tracker := newSessionCookieTrackingJar(jar)
+	tracker.SetCookies(target, []*http.Cookie{
+		{Name: "token", Value: "same", Path: "/", Expires: firstExpiry},
+		{Name: "token", Value: "same", Path: "/", Expires: latestExpiry},
+	})
+	serialized, updates, err := tracker.serializeWithUpdates("user@example.com")
+	if err != nil {
+		t.Fatalf("serializeWithUpdates() error: %v", err)
+	}
+	cached := persistedSession{
+		UpdatedAt: time.Date(2026, time.September, 17, 3, 0, 0, 0, time.UTC),
+		Cookies:   map[string][]pCookie{target.String(): {{Name: "token", Value: "same", Expires: oldExpiry}}},
+	}
+	preserveCachedCookieDeadlines(&serialized, &cached, updates, oldExpiry.Add(-time.Hour))
+	got := serialized.Cookies[target.String()][0]
+	if !got.Expires.Equal(latestExpiry) {
+		t.Fatalf("latest persistent update expiry = %v, want %v", got.Expires, latestExpiry)
+	}
+}
+
+func TestPreserveCachedCookieDeadlineDoesNotCrossCookiePaths(t *testing.T) {
+	now := time.Date(2026, time.September, 17, 3, 0, 0, 0, time.UTC)
+	origin := "https://appstoreconnect.apple.com/"
+	current := persistedSession{
+		Cookies: map[string][]pCookie{
+			origin: {{Name: "token", Value: "same"}},
+		},
+	}
+	cached := persistedSession{
+		UpdatedAt: now.Add(-time.Hour),
+		Cookies: map[string][]pCookie{
+			origin: {{Name: "token", Value: "same", Path: "/olympus/v1", Expires: now.Add(time.Hour)}},
+		},
+	}
+	preserveCachedCookieDeadlines(&current, &cached, nil, now)
+	if got := current.Cookies[origin][0].Expires; !got.IsZero() {
+		t.Fatalf("root cookie inherited path-scoped expiry %v", got)
+	}
+}
+
+func TestSerializeCookieJarDropsHostOnlyDomainScopeAmbiguity(t *testing.T) {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar.New() error: %v", err)
+	}
+	target, _ := url.Parse("https://appstoreconnect.apple.com/")
+	oldExpiry := time.Date(2026, time.September, 18, 3, 0, 0, 0, time.UTC)
+	jar.SetCookies(target, []*http.Cookie{
+		{Name: "token", Value: "host", Path: "/", Expires: oldExpiry},
+		{Name: "token", Value: "domain", Domain: ".apple.com", Path: "/", Expires: oldExpiry},
+	})
+	tracker := newSessionCookieTrackingJar(jar)
+	tracker.SetCookies(target, []*http.Cookie{{
+		Name: "token", Value: "host", Path: "/", Expires: oldExpiry.Add(time.Hour),
+	}})
+	serialized, _, err := tracker.serializeWithUpdates("user@example.com")
+	if err != nil {
+		t.Fatalf("serializeWithUpdates() error: %v", err)
+	}
+	if got := serialized.Cookies[target.String()]; len(got) != 0 {
+		t.Fatalf("ambiguous host-only/domain cookies persisted as %#v, want none", got)
+	}
+}
+
+func TestPersistSessionKeepsSessionOnlyUpdateNonPersistable(t *testing.T) {
+	withFileSessionCache(t)
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar.New() error: %v", err)
+	}
+	target, _ := url.Parse("https://appstoreconnect.apple.com/")
+	oldExpiry := time.Date(2026, time.September, 18, 3, 0, 0, 0, time.UTC)
+	firstExpiry := oldExpiry.Add(time.Hour)
+	jar.SetCookies(target, []*http.Cookie{{Name: "token", Value: "same", Path: "/", Expires: oldExpiry}})
+	tracker := newSessionCookieTrackingJar(jar)
+	cached := persistedSession{
+		UpdatedAt: oldExpiry.Add(-24 * time.Hour),
+		Cookies:   map[string][]pCookie{target.String(): {{Name: "token", Value: "same", Expires: oldExpiry}}},
+	}
+	session := &AuthSession{
+		Client:        &http.Client{Jar: tracker},
+		UserEmail:     "user@example.com",
+		cachedSession: &cached,
+	}
+
+	tracker.SetCookies(target, []*http.Cookie{{Name: "token", Value: "same", Path: "/", Expires: firstExpiry}})
+	if err := PersistSession(session); err != nil {
+		t.Fatalf("PersistSession(first) error: %v", err)
+	}
+	tracker.SetCookies(target, []*http.Cookie{{Name: "token", Value: "same", Path: "/"}})
+	if err := PersistSession(session); err != nil {
+		t.Fatalf("PersistSession(second) error: %v", err)
+	}
+	if err := PersistSession(session); err != nil {
+		t.Fatalf("PersistSession(third) error: %v", err)
+	}
+
+	stored, ok, err := readSessionFromFile(webSessionCacheKey(session.UserEmail))
+	if err != nil || !ok {
+		t.Fatalf("readSessionFromFile() = (%t, %v), want stored session", ok, err)
+	}
+	if got := stored.Cookies[target.String()]; len(got) != 0 {
+		t.Fatalf("session-only replacement persisted after repeated saves as %#v, want none", got)
+	}
+	if session.cachedSession == nil || len(session.cachedSession.Cookies[target.String()]) != 0 {
+		t.Fatal("successful persistence did not advance the cached baseline")
+	}
+}
+
+func TestPersistSessionDoesNotAdvanceBaselineWhenPersistenceFails(t *testing.T) {
+	withFileSessionCache(t)
+	previousWrite := sessionFileWrite
+	sessionFileWrite = func(string, []byte, os.FileMode) error {
+		return errors.New("injected session-cache write failure")
+	}
+	t.Cleanup(func() { sessionFileWrite = previousWrite })
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar.New() error: %v", err)
+	}
+	target, _ := url.Parse("https://appstoreconnect.apple.com/")
+	oldExpiry := time.Date(2026, time.September, 18, 3, 0, 0, 0, time.UTC)
+	newExpiry := oldExpiry.Add(time.Hour)
+	jar.SetCookies(target, []*http.Cookie{{Name: "token", Value: "same", Path: "/", Expires: oldExpiry}})
+	tracker := newSessionCookieTrackingJar(jar)
+	cached := persistedSession{
+		UpdatedAt: oldExpiry.Add(-24 * time.Hour),
+		Cookies:   map[string][]pCookie{target.String(): {{Name: "token", Value: "same", Expires: oldExpiry}}},
+	}
+	session := &AuthSession{
+		Client:        &http.Client{Jar: tracker},
+		UserEmail:     "user@example.com",
+		cachedSession: &cached,
+	}
+	tracker.SetCookies(target, []*http.Cookie{{Name: "token", Value: "same", Path: "/", Expires: newExpiry}})
+	if err := PersistSession(session); err == nil {
+		t.Fatal("PersistSession() unexpectedly succeeded")
+	}
+	if session.cachedSession == nil || !session.cachedSession.Cookies[target.String()][0].Expires.Equal(oldExpiry) {
+		t.Fatal("failed persistence advanced the cached baseline")
+	}
+	_, updates, err := tracker.serializeWithUpdates("user@example.com")
+	if err != nil {
+		t.Fatalf("serializeWithUpdates() error: %v", err)
+	}
+	if len(updates) == 0 {
+		t.Fatal("failed persistence cleared the pending tracker update")
+	}
+}
+
+type blockingSessionCookieJar struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+	cookie  *http.Cookie
+}
+
+func (j *blockingSessionCookieJar) Cookies(*url.URL) []*http.Cookie {
+	if j.cookie == nil {
+		return nil
+	}
+	return []*http.Cookie{{Name: j.cookie.Name, Value: j.cookie.Value}}
+}
+
+func (j *blockingSessionCookieJar) SetCookies(_ *url.URL, cookies []*http.Cookie) {
+	j.once.Do(func() { close(j.entered) })
+	<-j.release
+	if len(cookies) > 0 && cookies[len(cookies)-1] != nil {
+		copy := *cookies[len(cookies)-1]
+		j.cookie = &copy
+	}
+}
+
+func TestSessionCookieTrackingJarSerializesWithSetCookies(t *testing.T) {
+	underlying := &blockingSessionCookieJar{entered: make(chan struct{}), release: make(chan struct{})}
+	tracker := newSessionCookieTrackingJar(underlying)
+	target, _ := url.Parse("https://appstoreconnect.apple.com/")
+	setDone := make(chan struct{})
+	go func() {
+		tracker.SetCookies(target, []*http.Cookie{{Name: "token", Value: "same", Path: "/", Expires: time.Now().Add(time.Hour)}})
+		close(setDone)
+	}()
+	<-underlying.entered
+
+	serializeDone := make(chan struct{})
+	var serialized persistedSession
+	var updates map[trackedCookieKey]trackedCookieUpdate
+	var serializeErr error
+	go func() {
+		serialized, updates, serializeErr = tracker.serializeWithUpdates("user@example.com")
+		close(serializeDone)
+	}()
+	select {
+	case <-serializeDone:
+		t.Fatal("serializeWithUpdates completed while SetCookies was still in progress")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(underlying.release)
+	<-setDone
+	<-serializeDone
+	if serializeErr != nil {
+		t.Fatalf("serializeWithUpdates() error: %v", serializeErr)
+	}
+	if serialized.UserEmail != "user@example.com" {
+		t.Fatalf("serialized user email = %q, want user@example.com", serialized.UserEmail)
+	}
+	if len(updates) == 0 {
+		t.Fatal("serialized update snapshot lost the completed SetCookies update")
+	}
+}
+
+func TestLoginWithClientTracksFreshMaxAgeForFirstPersistence(t *testing.T) {
+	withFileSessionCache(t)
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar.New() error: %v", err)
+	}
+	var responseAt time.Time
+	client := &http.Client{
+		Jar: jar,
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			responseAt = time.Now().UTC()
+			header := make(http.Header)
+			header.Set("Set-Cookie", "myacinfo=fresh-token; Max-Age=60; Expires=Wed, 01 Jan 2020 00:00:00 GMT; Path=/")
+			return &http.Response{
+				StatusCode: http.StatusServiceUnavailable,
+				Header:     header,
+				Body:       io.NopCloser(strings.NewReader("unavailable")),
+				Request:    req,
+			}, nil
+		}),
+	}
+	if _, err := LoginWithClient(context.Background(), client, LoginCredentials{
+		Username: "user@example.com", Password: "fixture-password",
+	}); err == nil {
+		t.Fatal("LoginWithClient() unexpectedly succeeded")
+	}
+	if _, ok := client.Jar.(*sessionCookieTrackingJar); !ok {
+		t.Fatalf("LoginWithClient() jar type = %T, want tracked jar", client.Jar)
+	}
+
+	if err := PersistSession(&AuthSession{Client: client, UserEmail: "user@example.com"}); err != nil {
+		t.Fatalf("PersistSession() error: %v", err)
+	}
+	stored, ok, err := readSessionFromFile(webSessionCacheKey("user@example.com"))
+	if err != nil || !ok {
+		t.Fatalf("readSessionFromFile() = (%t, %v), want stored session", ok, err)
+	}
+	cookies := stored.Cookies["https://appstoreconnect.apple.com/"]
+	if len(cookies) != 1 {
+		t.Fatalf("stored cookies = %#v, want one cookie", cookies)
+	}
+	if !cookies[0].Expires.After(responseAt.Add(50*time.Second)) || !cookies[0].Expires.Before(responseAt.Add(70*time.Second)) {
+		t.Fatalf("fresh Max-Age deadline = %v, want approximately %v", cookies[0].Expires, responseAt.Add(60*time.Second))
+	}
+}
+
 func TestSerializeCookieJarIncludesDeveloperPortalOrigin(t *testing.T) {
 	jar, err := cookiejar.New(nil)
 	if err != nil {
@@ -1080,6 +1526,141 @@ func TestTryResumeSessionPersistsRefreshedCookies(t *testing.T) {
 
 	if got := persistedMyacinfoCookieValue(stored, "https://appstoreconnect.apple.com/"); got != "refreshed-token" {
 		t.Fatalf("expected refreshed cookie value, got %q", got)
+	}
+}
+
+func TestTryResumeSessionFailedRefreshPreservesNewerReplacementOnCleanup(t *testing.T) {
+	withFileSessionCache(t)
+	key := webSessionCacheKey(webTestSessionEmail)
+	stale := webTestPersistedSession(t, "stale-token", time.Now().UTC().Add(-time.Minute))
+	if err := writeSessionToFile(key, stale); err != nil {
+		t.Fatalf("write stale session: %v", err)
+	}
+
+	previousWrite := sessionFileWrite
+	sessionFileWrite = func(string, []byte, os.FileMode) error {
+		return errors.New("injected refresh persistence failure")
+	}
+	resumed, ok, err := TryResumeSession(context.Background(), webTestSessionEmail)
+	sessionFileWrite = previousWrite
+	if err != nil || !ok || resumed == nil {
+		t.Fatalf("TryResumeSession() = (%v, %t, %v), want resumed session", resumed, ok, err)
+	}
+
+	fresh := webTestPersistedSession(t, "fresh-token", stale.UpdatedAt.Add(2*time.Minute))
+	if err := writeSessionToFile(key, fresh); err != nil {
+		t.Fatalf("write replacement session: %v", err)
+	}
+	deleted, err := DeleteSessionIfMatches(webTestSessionEmail, resumed)
+	if err != nil {
+		t.Fatalf("DeleteSessionIfMatches() error: %v", err)
+	}
+	if deleted {
+		t.Fatal("failed refresh cleanup deleted a newer replacement")
+	}
+	stored, ok, err := readSessionFromFile(key)
+	if err != nil || !ok {
+		t.Fatalf("read replacement session = (%t, %v), want stored session", ok, err)
+	}
+	if got := persistedMyacinfoCookieValue(stored, "https://appstoreconnect.apple.com/"); got != "fresh-token" {
+		t.Fatalf("replacement cookie = %q, want fresh-token", got)
+	}
+}
+
+func TestTryResumeSessionPreservesNormalizedCookieDeadline(t *testing.T) {
+	withArraySessionKeyring(t)
+	t.Setenv(webSessionBackendEnv, "keychain")
+	t.Setenv(webSessionCacheEnabledEnv, "1")
+	t.Setenv(webSessionCacheDirEnv, filepath.Join(t.TempDir(), "web-cache"))
+
+	observedAt := time.Now().UTC().Add(-30 * time.Second)
+	wantExpiry := observedAt.Add(time.Minute)
+	sess := persistedSession{
+		Version:   webSessionCacheVersion,
+		UpdatedAt: observedAt,
+		UserEmail: "user@example.com",
+		Cookies: map[string][]pCookie{
+			"https://appstoreconnect.apple.com/": {{
+				Name: "myacinfo", Value: "token", MaxAge: 60, Expires: observedAt.Add(-time.Hour),
+			}},
+		},
+	}
+	key := webSessionCacheKey(sess.UserEmail)
+	if err := writeSessionToKeychain(key, sess); err != nil {
+		t.Fatalf("writeSessionToKeychain() error: %v", err)
+	}
+
+	previousFetcher := sessionInfoFetcher
+	sessionInfoFetcher = func(context.Context, *http.Client) (*sessionInfo, error) {
+		info := &sessionInfo{}
+		info.User.EmailAddress = sess.UserEmail
+		return info, nil
+	}
+	t.Cleanup(func() { sessionInfoFetcher = previousFetcher })
+
+	if resumed, ok, err := TryResumeSession(context.Background(), sess.UserEmail); err != nil || !ok || resumed == nil {
+		t.Fatalf("TryResumeSession() = (%v, %t, %v), want resumed session", resumed, ok, err)
+	}
+	stored, ok, err := readSessionBySelection(resolveBackendSelection(), key)
+	if err != nil || !ok {
+		t.Fatalf("readSessionBySelection() = (%t, %v), want stored session", ok, err)
+	}
+	cookies := stored.Cookies["https://appstoreconnect.apple.com/"]
+	if len(cookies) != 1 {
+		t.Fatalf("stored cookies = %v, want one cookie", cookies)
+	}
+	if cookies[0].MaxAge != 0 || !cookies[0].Expires.Equal(wantExpiry) {
+		t.Fatalf("stored deadline = Expires %v MaxAge %d, want Expires %v MaxAge 0", cookies[0].Expires, cookies[0].MaxAge, wantExpiry)
+	}
+}
+
+func TestTryResumeSessionPersistsSameValueCookieRenewalDeadline(t *testing.T) {
+	withArraySessionKeyring(t)
+	t.Setenv(webSessionBackendEnv, "keychain")
+	t.Setenv(webSessionCacheEnabledEnv, "1")
+	t.Setenv(webSessionCacheDirEnv, filepath.Join(t.TempDir(), "web-cache"))
+
+	observedAt := time.Now().UTC().Add(-30 * time.Second)
+	refreshedExpiry := observedAt.Add(24 * time.Hour)
+	sess := persistedSession{
+		Version:   webSessionCacheVersion,
+		UpdatedAt: observedAt,
+		UserEmail: "user@example.com",
+		Cookies: map[string][]pCookie{
+			"https://appstoreconnect.apple.com/": {{
+				Name: "myacinfo", Value: "token", MaxAge: 60, Expires: observedAt.Add(-time.Hour),
+			}},
+		},
+	}
+	key := webSessionCacheKey(sess.UserEmail)
+	if err := writeSessionToKeychain(key, sess); err != nil {
+		t.Fatalf("writeSessionToKeychain() error: %v", err)
+	}
+	targetURL, _ := url.Parse("https://appstoreconnect.apple.com/")
+	previousFetcher := sessionInfoFetcher
+	sessionInfoFetcher = func(_ context.Context, client *http.Client) (*sessionInfo, error) {
+		client.Jar.SetCookies(targetURL, []*http.Cookie{{
+			Name: "myacinfo", Value: "token", Path: "/", Expires: refreshedExpiry,
+		}})
+		info := &sessionInfo{}
+		info.User.EmailAddress = sess.UserEmail
+		return info, nil
+	}
+	t.Cleanup(func() { sessionInfoFetcher = previousFetcher })
+
+	if resumed, ok, err := TryResumeSession(context.Background(), sess.UserEmail); err != nil || !ok || resumed == nil {
+		t.Fatalf("TryResumeSession() = (%v, %t, %v), want resumed session", resumed, ok, err)
+	}
+	stored, ok, err := readSessionBySelection(resolveBackendSelection(), key)
+	if err != nil || !ok {
+		t.Fatalf("readSessionBySelection() = (%t, %v), want stored session", ok, err)
+	}
+	cookies := stored.Cookies["https://appstoreconnect.apple.com/"]
+	if len(cookies) != 1 {
+		t.Fatalf("stored cookies = %v, want one cookie", cookies)
+	}
+	if cookies[0].MaxAge != 0 || !cookies[0].Expires.Equal(refreshedExpiry) {
+		t.Fatalf("stored deadline = Expires %v MaxAge %d, want refreshed Expires %v MaxAge 0", cookies[0].Expires, cookies[0].MaxAge, refreshedExpiry)
 	}
 }
 
@@ -1939,6 +2520,29 @@ func webTestPersistedSession(t *testing.T, token string, updatedAt time.Time) pe
 
 // The compare and the delete must happen under one lock: a replacement
 // persisted between them would otherwise be the entry that gets removed.
+func TestDeleteSessionIfMatchesSerializesWithSameSessionPersistenceState(t *testing.T) {
+	t.Setenv(webSessionCacheEnabledEnv, "0")
+	loaded := &AuthSession{cachedGeneration: "generation"}
+	loaded.persistMu.Lock()
+	done := make(chan struct{})
+	go func() {
+		_, _ = DeleteSessionIfMatches(webTestSessionEmail, loaded)
+		close(done)
+	}()
+	select {
+	case <-done:
+		loaded.persistMu.Unlock()
+		t.Fatal("DeleteSessionIfMatches read persistence state without the session lock")
+	case <-time.After(100 * time.Millisecond):
+	}
+	loaded.persistMu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("DeleteSessionIfMatches did not continue after the session lock was released")
+	}
+}
+
 func TestDeleteSessionIfMatchesSerializesWithAConcurrentPersist(t *testing.T) {
 	withArraySessionKeyring(t)
 	t.Setenv(webSessionCacheEnabledEnv, "1")
