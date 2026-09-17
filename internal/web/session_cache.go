@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/99designs/keyring"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/secureopen"
 )
 
 const (
@@ -39,6 +41,7 @@ var (
 	ErrCachedSessionExpired          = errors.New("cached web session expired")
 	ErrCachedSessionValidationFailed = errors.New("cached web session could not be validated")
 	errMalformedSessionFile          = errors.New("web session cache is malformed")
+	errUnsafeSessionCacheFile        = errors.New("web session cache file is unsafe")
 	// errMalformedSessionStore identifies malformed aggregate keychain data.
 	// It is separate from the file-cache sentinel so an explicit keychain
 	// recovery cannot be triggered by an unrelated file-read error.
@@ -1057,7 +1060,7 @@ func readSessionFromFile(key string) (persistedSession, bool, error) {
 	if err != nil {
 		return persistedSession{}, false, err
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := readSessionCacheFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return persistedSession{}, false, nil
@@ -1079,7 +1082,7 @@ func readLastKeyFromFile() (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := readSessionCacheFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", false, nil
@@ -1094,6 +1097,30 @@ func readLastKeyFromFile() (string, bool, error) {
 		return "", false, nil
 	}
 	return strings.TrimSpace(last.Key), true, nil
+}
+
+// readSessionCacheFile reads one cache entry without following a symlink in
+// the cache pathname. Empty regular files are still returned to the JSON
+// decoder so they retain the existing malformed-entry behavior.
+func readSessionCacheFile(path string) ([]byte, error) {
+	file, err := secureopen.OpenExistingNoFollow(path)
+	if err != nil {
+		if info, statErr := os.Lstat(path); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("%w: refusing symlink %q", errUnsafeSessionCacheFile, path)
+		}
+		return nil, err
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat web session cache file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: path is not a regular file: %q", errUnsafeSessionCacheFile, path)
+	}
+
+	return io.ReadAll(file)
 }
 
 func persistSessionBySelection(selection backendSelection, key string, sess persistedSession) error {
