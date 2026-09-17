@@ -2,6 +2,7 @@ package shared
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"unicode"
@@ -10,12 +11,25 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 )
 
-// UpsertBetaBuildLocalization creates or updates a beta build localization.
-func UpsertBetaBuildLocalization(ctx context.Context, client *asc.Client, buildID, locale, notes string) (*asc.BetaBuildLocalizationResponse, error) {
+// UpsertBetaBuildLocalizationOptions carries caller context for a What to Test
+// write.
+type UpsertBetaBuildLocalizationOptions struct {
+	// AppID identifies the build's app. When empty, the app is resolved from
+	// the build so the locale's TestFlight app localization can be ensured.
+	AppID string
+}
+
+// UpsertBetaBuildLocalization creates or updates a beta build localization,
+// first ensuring the app has a TestFlight app localization for the locale.
+func UpsertBetaBuildLocalization(ctx context.Context, client *asc.Client, buildID, locale, notes string, opts UpsertBetaBuildLocalizationOptions) (*asc.BetaBuildLocalizationResponse, error) {
 	localeValue := strings.TrimSpace(locale)
 	notesValue := strings.TrimSpace(notes)
 	if localeValue == "" || notesValue == "" {
 		return nil, fmt.Errorf("locale and notes are required")
+	}
+
+	if err := ensureBetaAppLocalization(ctx, client, buildID, opts.AppID, localeValue); err != nil {
+		return nil, err
 	}
 
 	resp, err := client.GetBetaBuildLocalizations(
@@ -53,6 +67,104 @@ func UpsertBetaBuildLocalization(ctx context.Context, client *asc.Client, buildI
 		WhatsNew: notesValue,
 	}
 	return client.CreateBetaBuildLocalization(ctx, buildID, attrs)
+}
+
+// ensureBetaAppLocalization makes the locale available for TestFlight notes by
+// creating the app's beta app localization when it is missing. Existing
+// records are left untouched, and a concurrent creator that wins the race
+// satisfies the same requirement.
+func ensureBetaAppLocalization(ctx context.Context, client *asc.Client, buildID, appID, locale string) error {
+	resolvedAppID, err := resolveBetaAppLocalizationAppID(ctx, client, buildID, appID)
+	if err != nil {
+		return err
+	}
+
+	exists, err := hasBetaAppLocalization(ctx, client, resolvedAppID, locale)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+
+	// Apple requires only the locale and the app relationship here; every
+	// other attribute belongs to the operator's App Store Connect content.
+	attrs := asc.BetaAppLocalizationAttributes{Locale: locale}
+	if _, err := client.CreateBetaAppLocalization(ctx, resolvedAppID, attrs); err != nil {
+		if errors.Is(err, asc.ErrConflict) {
+			return nil
+		}
+		return fmt.Errorf("failed to create TestFlight app localization for locale %q: %w", locale, err)
+	}
+	return nil
+}
+
+func resolveBetaAppLocalizationAppID(ctx context.Context, client *asc.Client, buildID, appID string) (string, error) {
+	if resolved := strings.TrimSpace(appID); resolved != "" {
+		return resolved, nil
+	}
+
+	buildIDValue := strings.TrimSpace(buildID)
+	appResp, err := client.GetBuildApp(ctx, buildIDValue)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve app for build %q: %w", buildIDValue, err)
+	}
+	resolved := ""
+	if appResp != nil {
+		resolved = strings.TrimSpace(appResp.Data.ID)
+	}
+	if resolved == "" {
+		return "", fmt.Errorf("failed to resolve app for build %q: empty app response", buildIDValue)
+	}
+	return resolved, nil
+}
+
+func hasBetaAppLocalization(ctx context.Context, client *asc.Client, appID, locale string) (bool, error) {
+	firstPage, err := client.GetBetaAppLocalizations(
+		ctx,
+		asc.WithBetaAppLocalizationAppIDs([]string{appID}),
+		asc.WithBetaAppLocalizationsLimit(200),
+	)
+	if err != nil {
+		return false, fmt.Errorf("failed to list TestFlight app localizations for app %q: %w", appID, err)
+	}
+	if firstPage == nil {
+		return false, fmt.Errorf("empty TestFlight app localization response for app %q", appID)
+	}
+	if containsBetaAppLocalizationLocale(firstPage.Data, locale) {
+		return true, nil
+	}
+	if strings.TrimSpace(firstPage.Links.Next) == "" {
+		return false, nil
+	}
+
+	paginated, err := asc.PaginateAll(ctx, firstPage, func(pageCtx context.Context, nextURL string) (asc.PaginatedResponse, error) {
+		nextPage, err := client.GetBetaAppLocalizations(pageCtx, asc.WithBetaAppLocalizationsNextURL(nextURL))
+		if err != nil {
+			return nil, err
+		}
+		if nextPage == nil {
+			return nil, fmt.Errorf("empty TestFlight app localization response for app %q", appID)
+		}
+		return nextPage, nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("failed to list TestFlight app localizations for app %q: %w", appID, err)
+	}
+	allPages, ok := paginated.(*asc.BetaAppLocalizationsResponse)
+	if !ok {
+		return false, fmt.Errorf("unexpected TestFlight app localization pagination response type")
+	}
+	return containsBetaAppLocalizationLocale(allPages.Data, locale), nil
+}
+
+func containsBetaAppLocalizationLocale(localizations []asc.Resource[asc.BetaAppLocalizationAttributes], locale string) bool {
+	for _, localization := range localizations {
+		if strings.EqualFold(strings.TrimSpace(localization.Attributes.Locale), locale) {
+			return true
+		}
+	}
+	return false
 }
 
 // TestNotesRecoveryError preserves a discovered build and the exact retry

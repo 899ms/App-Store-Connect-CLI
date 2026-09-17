@@ -270,7 +270,7 @@ Examples:
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
 			defer cancel()
 
-			resp, err := shared.UpsertBetaBuildLocalization(requestCtx, client, buildResp.Data.ID, localeValue, whatsNewValue)
+			resp, err := shared.UpsertBetaBuildLocalization(requestCtx, client, buildResp.Data.ID, localeValue, whatsNewValue, shared.UpsertBetaBuildLocalizationOptions{})
 			if err != nil {
 				return fmt.Errorf("builds test-notes create: %w", err)
 			}

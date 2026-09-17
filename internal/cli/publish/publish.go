@@ -437,7 +437,8 @@ Examples:
 			}
 
 			if testNotesValue != "" {
-				if _, err := shared.UpsertBetaBuildLocalization(requestCtx, client, buildResp.Data.ID, localeValue, testNotesValue); err != nil {
+				upsertOpts := shared.UpsertBetaBuildLocalizationOptions{AppID: resolvedPublishAppID}
+				if _, err := shared.UpsertBetaBuildLocalization(requestCtx, client, buildResp.Data.ID, localeValue, testNotesValue, upsertOpts); err != nil {
 					recoveryErr := shared.NewTestNotesRecoveryError(buildResp.Data.ID, localeValue, testNotesValue, err)
 					result.Recovery = recoveryErr.Recovery()
 					return reportPartialFailure(publishFailureStageTestNotes, fmt.Errorf("publish testflight: %w", recoveryErr))
