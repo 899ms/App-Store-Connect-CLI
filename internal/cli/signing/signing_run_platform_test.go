@@ -525,6 +525,109 @@ func TestInstallSigningRunProfileRetainsOwnershipAfterJournalFailure(t *testing.
 	}
 }
 
+func TestInstallSigningRunProfilePreservesStagedReplacementAfterJournalFailure(t *testing.T) {
+	installDir := t.TempDir()
+	previous := signingRunProfileInstallDirFn
+	signingRunProfileInstallDirFn = func(context.Context) (string, error) { return installDir, nil }
+	t.Cleanup(func() { signingRunProfileInstallDirFn = previous })
+	const uuid = "A7EFEF21-3432-404F-A488-083800B570FF"
+	data := []byte("signed-profile")
+	replacement := []byte("foreign replacement")
+	digestBytes := sha256.Sum256(data)
+	digest := hex.EncodeToString(digestBytes[:])
+	journalErr := errors.New("journal unavailable")
+	var planned signingRunProfileInstall
+
+	installed, err := installSigningRunProfile(context.Background(), uuid, data, digest, func(candidate signingRunProfileInstall) error {
+		planned = candidate
+		if removeErr := os.Remove(candidate.StagedPath); removeErr != nil {
+			t.Fatalf("remove original staged profile: %v", removeErr)
+		}
+		if writeErr := os.WriteFile(candidate.StagedPath, replacement, 0o600); writeErr != nil {
+			t.Fatalf("write staged replacement: %v", writeErr)
+		}
+		return journalErr
+	})
+
+	if !errors.Is(err, journalErr) || !strings.Contains(err.Error(), "file identity changed") {
+		t.Fatalf("installSigningRunProfile() error = %v, want journal and identity failures", err)
+	}
+	if installed.StagedPath != planned.StagedPath || installed.Device != planned.Device || installed.Inode != planned.Inode {
+		t.Fatalf("retained ownership proof changed: installed=%+v planned=%+v", installed, planned)
+	}
+	if _, statErr := os.Stat(installed.Path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("published profile stat error = %v, want not exist", statErr)
+	}
+	got, readErr := os.ReadFile(planned.StagedPath)
+	if readErr != nil {
+		t.Fatalf("read staged replacement: %v", readErr)
+	}
+	if !bytes.Equal(got, replacement) {
+		t.Fatalf("staged replacement = %q, want %q", got, replacement)
+	}
+}
+
+func TestInstallSigningRunProfileRejectsStagedReplacementBeforePublish(t *testing.T) {
+	installDir := t.TempDir()
+	previous := signingRunProfileInstallDirFn
+	signingRunProfileInstallDirFn = func(context.Context) (string, error) { return installDir, nil }
+	t.Cleanup(func() { signingRunProfileInstallDirFn = previous })
+	const uuid = "A7EFEF21-3432-404F-A488-083800B570FF"
+	data := []byte("signed-profile")
+	replacement := []byte("foreign replacement")
+	digestBytes := sha256.Sum256(data)
+	digest := hex.EncodeToString(digestBytes[:])
+	var planned signingRunProfileInstall
+
+	installed, err := installSigningRunProfile(context.Background(), uuid, data, digest, func(candidate signingRunProfileInstall) error {
+		planned = candidate
+		if removeErr := os.Remove(candidate.StagedPath); removeErr != nil {
+			t.Fatalf("remove original staged profile: %v", removeErr)
+		}
+		if writeErr := os.WriteFile(candidate.StagedPath, replacement, 0o600); writeErr != nil {
+			t.Fatalf("write staged replacement: %v", writeErr)
+		}
+		return nil
+	})
+
+	if err == nil || (!strings.Contains(err.Error(), "identity changed") && !strings.Contains(err.Error(), "content changed")) {
+		t.Fatalf("installSigningRunProfile() error = %v, want replacement rejection", err)
+	}
+	if installed.StagedPath != planned.StagedPath || installed.Device != planned.Device || installed.Inode != planned.Inode {
+		t.Fatalf("retained ownership proof changed: installed=%+v planned=%+v", installed, planned)
+	}
+	if _, statErr := os.Stat(installed.Path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("published profile stat error = %v, want not exist", statErr)
+	}
+	got, readErr := os.ReadFile(installed.StagedPath)
+	if readErr != nil {
+		t.Fatalf("read restored staged replacement: %v", readErr)
+	}
+	if !bytes.Equal(got, replacement) {
+		t.Fatalf("restored staged replacement = %q, want %q", got, replacement)
+	}
+}
+
+func TestRemoveSigningRunStagedProfileRequiresIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".asc-signing-run-profile-unowned")
+	data := []byte("unowned staged profile")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write staged profile: %v", err)
+	}
+
+	err := removeSigningRunStagedProfile(path, 0, 0)
+	if err == nil || !strings.Contains(err.Error(), "identity is unavailable") {
+		t.Fatalf("removeSigningRunStagedProfile() error = %v, want unavailable identity", err)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("read preserved staged profile: %v", readErr)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatalf("preserved staged profile = %q, want %q", got, data)
+	}
+}
+
 func TestInstallSigningRunProfileRejectsOversizedExistingFile(t *testing.T) {
 	installDir := t.TempDir()
 	previous := signingRunProfileInstallDirFn
