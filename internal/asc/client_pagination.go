@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"reflect"
+	"strings"
 )
 
 // PaginateFunc is a function that fetches a page of results
@@ -60,20 +62,21 @@ func PaginateAll(ctx context.Context, firstPage PaginatedResponse, fetchNext Pag
 			}
 		}
 
-		// Check for next page
 		links := firstPage.GetLinks()
 		if links == nil || links.Next == "" {
 			break
 		}
 
-		if _, ok := seenNext[links.Next]; ok {
+		nextURL := links.Next
+		nextIdentity := paginationURLIdentity(nextURL)
+		if _, ok := seenNext[nextIdentity]; ok {
 			return result, fmt.Errorf("page %d: %w", page+1, ErrRepeatedPaginationURL)
 		}
-		seenNext[links.Next] = struct{}{}
+		seenNext[nextIdentity] = struct{}{}
 		page++
 
 		// Fetch next page
-		nextPage, err := fetchNext(ctx, links.Next)
+		nextPage, err := fetchNext(ctx, nextURL)
 		if err != nil {
 			return result, fmt.Errorf("page %d: %w", page, err)
 		}
@@ -120,12 +123,14 @@ func PaginateEach(ctx context.Context, firstPage PaginatedResponse, fetchNext Pa
 		if links == nil || links.Next == "" {
 			return nil
 		}
-		if _, ok := seenNext[links.Next]; ok {
+		nextURL := links.Next
+		nextIdentity := paginationURLIdentity(nextURL)
+		if _, ok := seenNext[nextIdentity]; ok {
 			return fmt.Errorf("page %d: %w", page+1, ErrRepeatedPaginationURL)
 		}
-		seenNext[links.Next] = struct{}{}
+		seenNext[nextIdentity] = struct{}{}
 
-		nextPage, err := fetchNext(ctx, links.Next)
+		nextPage, err := fetchNext(ctx, nextURL)
 		if err != nil {
 			return fmt.Errorf("page %d: %w", page+1, err)
 		}
@@ -136,6 +141,40 @@ func PaginateEach(ctx context.Context, firstPage PaginatedResponse, fetchNext Pa
 		current = nextPage
 		page++
 	}
+}
+
+// paginationURLIdentity returns the request identity used for cycle
+// detection. It intentionally leaves the URL passed to fetchNext untouched:
+// callers may rely on the provider's exact next-link spelling. Only a
+// same-host HTTPS absolute URL is collapsed to its request URI so it compares
+// equal to the equivalent relative link. Invalid, insecure, and untrusted
+// absolute URLs retain their trimmed spelling for the caller's validation and
+// error handling.
+func paginationURLIdentity(nextURL string) string {
+	nextURL = strings.TrimSpace(nextURL)
+	if nextURL == "" {
+		return nextURL
+	}
+
+	parsed, err := url.Parse(nextURL)
+	if err != nil {
+		return nextURL
+	}
+
+	// Match validateNextURL's absolute-URL recognition so this helper cannot
+	// turn a URL that the request path treats as relative into a trusted one.
+	if !strings.HasPrefix(nextURL, "https://") {
+		if !strings.HasPrefix(nextURL, "http://") {
+			return parsed.RequestURI()
+		}
+		return nextURL
+	}
+
+	baseURL, err := url.Parse(BaseURL)
+	if err != nil || parsed.Scheme != baseURL.Scheme || parsed.Host != baseURL.Host || parsed.User != nil {
+		return nextURL
+	}
+	return parsed.RequestURI()
 }
 
 // newEmptyPaginatedResponse creates a new zero-valued instance of the same
