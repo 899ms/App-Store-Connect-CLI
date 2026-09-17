@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/99designs/keyring"
@@ -206,14 +207,250 @@ func sessionCookieURLs() []*url.URL {
 	}
 }
 
+type trackedCookieKey struct {
+	origin string
+	name   string
+	value  string
+}
+
+type trackedCookieUpdate struct {
+	cookie pCookie
+}
+
+// sessionCookieTrackingJar records cookie deadlines supplied by responses
+// after a cached jar has been hydrated. net/http/cookiejar intentionally omits
+// expiry metadata from Cookies, so persistence otherwise cannot distinguish an
+// untouched cached cookie from a same-value renewal.
+type sessionCookieTrackingJar struct {
+	http.CookieJar
+	mu      sync.Mutex
+	updates map[trackedCookieKey]trackedCookieUpdate
+}
+
+func newSessionCookieTrackingJar(jar http.CookieJar) *sessionCookieTrackingJar {
+	return &sessionCookieTrackingJar{
+		CookieJar: jar,
+		updates:   make(map[trackedCookieKey]trackedCookieUpdate),
+	}
+}
+
+func (j *sessionCookieTrackingJar) Cookies(u *url.URL) []*http.Cookie {
+	if j == nil || j.CookieJar == nil {
+		return nil
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.CookieJar.Cookies(u)
+}
+
+func (j *sessionCookieTrackingJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
+	if j == nil || j.CookieJar == nil {
+		return
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+
+	j.CookieJar.SetCookies(u, cookies)
+	now := time.Now().UTC()
+	for _, supplied := range cookies {
+		if supplied == nil || supplied.Name == "" {
+			continue
+		}
+		for _, origin := range sessionCookieUpdateOrigins(u, supplied) {
+			deadline, usable := normalizePersistedCookieDeadline(pCookie{
+				Name: supplied.Name, Value: supplied.Value, Expires: supplied.Expires, MaxAge: supplied.MaxAge,
+			}, now)
+			if !usable || isExpiredCookie(deadline, now) {
+				continue
+			}
+			j.recordUpdate(trackedCookieKey{origin: origin, name: supplied.Name, value: supplied.Value}, deadline)
+		}
+	}
+}
+
+func sessionCookieUpdateOrigins(source *url.URL, supplied *http.Cookie) []string {
+	if source == nil || supplied == nil || supplied.Name == "" {
+		return nil
+	}
+	probe, err := cookiejar.New(nil)
+	if err != nil {
+		return nil
+	}
+	// Use a fresh jar for each response cookie. This applies the actual
+	// source URL's host and path defaults and avoids attributing a path- or
+	// host-only cookie to unrelated cached origins.
+	probe.SetCookies(source, []*http.Cookie{supplied})
+	origins := make([]string, 0, len(sessionCookieURLs()))
+	for _, origin := range sessionCookieURLs() {
+		if cookieListContains(probe.Cookies(origin), supplied.Name, supplied.Value) {
+			origins = append(origins, origin.String())
+		}
+	}
+	return origins
+}
+
+func cookieListContains(cookies []*http.Cookie, name, value string) bool {
+	for _, cookie := range cookies {
+		if cookie != nil && cookie.Name == name && cookie.Value == value {
+			return true
+		}
+	}
+	return false
+}
+
+func (j *sessionCookieTrackingJar) recordUpdate(key trackedCookieKey, cookie pCookie) {
+	if j.updates == nil {
+		j.updates = make(map[trackedCookieKey]trackedCookieUpdate)
+	}
+	j.updates[key] = trackedCookieUpdate{cookie: cookie}
+}
+
+func sameTrackedCookieUpdate(a, b trackedCookieUpdate) bool {
+	return a.cookie.Name == b.cookie.Name &&
+		a.cookie.Value == b.cookie.Value &&
+		a.cookie.Expires.Equal(b.cookie.Expires) &&
+		a.cookie.MaxAge == b.cookie.MaxAge
+}
+
+func isSessionOnlyCookie(c pCookie) bool {
+	return c.MaxAge == 0 && c.Expires.IsZero()
+}
+
+// markPersisted clears only the update snapshot that was actually written.
+// A response racing with the backend write remains in updates for the next
+// persistence attempt instead of being lost.
+func (j *sessionCookieTrackingJar) markPersisted(updates map[trackedCookieKey]trackedCookieUpdate) {
+	if j == nil {
+		return
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	for key, applied := range updates {
+		current, ok := j.updates[key]
+		if ok && !isSessionOnlyCookie(current.cookie) && sameTrackedCookieUpdate(current, applied) {
+			delete(j.updates, key)
+		}
+	}
+}
+
+func (j *sessionCookieTrackingJar) serializeWithUpdates(userEmail string) (persistedSession, map[trackedCookieKey]trackedCookieUpdate, error) {
+	if j == nil || j.CookieJar == nil {
+		return persistedSession{}, nil, errors.New("web session cookie jar is unavailable")
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+
+	serialized, err := serializeCookieJarWithError(j.CookieJar, userEmail)
+	if err != nil {
+		return persistedSession{}, nil, err
+	}
+	updates := make(map[trackedCookieKey]trackedCookieUpdate, len(j.updates))
+	for key, update := range j.updates {
+		updates[key] = update
+	}
+	return serialized, updates, nil
+}
+
 func isExpiredCookie(c pCookie, now time.Time) bool {
 	if c.MaxAge < 0 {
 		return true
 	}
-	if !c.Expires.IsZero() && c.Expires.Before(now) {
-		return true
+	if c.MaxAge > 0 {
+		return false
 	}
-	return false
+	return !c.Expires.IsZero() && !c.Expires.After(now)
+}
+
+func normalizePersistedCookieDeadline(c pCookie, observedAt time.Time) (pCookie, bool) {
+	if c.MaxAge <= 0 {
+		return c, true
+	}
+	if observedAt.IsZero() {
+		return c, false
+	}
+	c.Expires, c.MaxAge = absoluteCookieDeadline(c.Expires, c.MaxAge, observedAt)
+	return c, true
+}
+
+func persistedCookiePath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" || path[0] != '/' {
+		return "/"
+	}
+	return path
+}
+
+// dropAmbiguousPersistedCookies removes same-origin cookies whose name and
+// value are duplicated. cookiejar.Cookies intentionally omits the domain and
+// path scope, so a tracked update cannot prove which of two such cookies it
+// renewed. Persisting either deadline could extend the wrong scope; dropping
+// both is fail-closed and makes the next resume require authentication.
+func dropAmbiguousPersistedCookies(cookies []pCookie) []pCookie {
+	counts := make(map[string]int, len(cookies))
+	for _, cookie := range cookies {
+		counts[cookie.Name]++
+	}
+	filtered := make([]pCookie, 0, len(cookies))
+	for _, cookie := range cookies {
+		if counts[cookie.Name] > 1 {
+			continue
+		}
+		filtered = append(filtered, cookie)
+	}
+	return filtered
+}
+
+func preserveCachedCookieDeadlines(current *persistedSession, cached *persistedSession, updates map[trackedCookieKey]trackedCookieUpdate, now time.Time) {
+	if current == nil {
+		return
+	}
+	for origin, cookies := range current.Cookies {
+		persistable := make([]pCookie, 0, len(cookies))
+		for i := range cookies {
+			if refreshed, ok := updates[trackedCookieKey{origin: origin, name: cookies[i].Name, value: cookies[i].Value}]; ok {
+				if isSessionOnlyCookie(refreshed.cookie) {
+					continue
+				}
+				cookies[i].Expires = refreshed.cookie.Expires
+				cookies[i].MaxAge = refreshed.cookie.MaxAge
+				persistable = append(persistable, cookies[i])
+				continue
+			}
+			if cached == nil {
+				persistable = append(persistable, cookies[i])
+				continue
+			}
+			previous := cached.Cookies[origin]
+			var matched *pCookie
+			ambiguous := false
+			for _, candidate := range previous {
+				candidate, usable := normalizePersistedCookieDeadline(candidate, cached.UpdatedAt)
+				if !usable ||
+					isExpiredCookie(candidate, now) ||
+					candidate.Name != cookies[i].Name ||
+					candidate.Value != cookies[i].Value ||
+					persistedCookiePath(candidate.Path) != persistedCookiePath(cookies[i].Path) {
+					continue
+				}
+				if matched != nil && (!matched.Expires.Equal(candidate.Expires) || matched.MaxAge != candidate.MaxAge) {
+					ambiguous = true
+					break
+				}
+				copy := candidate
+				matched = &copy
+			}
+			if matched != nil && !ambiguous && !matched.Expires.IsZero() {
+				cookies[i].Expires = matched.Expires
+				cookies[i].MaxAge = 0
+			}
+			persistable = append(persistable, cookies[i])
+		}
+		if len(persistable) == 0 {
+			delete(current.Cookies, origin)
+			continue
+		}
+		current.Cookies[origin] = persistable
+	}
 }
 
 func serializeCookieJar(jar http.CookieJar, userEmail string) persistedSession {
@@ -255,12 +492,13 @@ func serializeCookieJarWithError(jar http.CookieJar, userEmail string) (persiste
 				HttpOnly: c.HttpOnly,
 				SameSite: int(c.SameSite),
 			}
+			pc, _ = normalizePersistedCookieDeadline(pc, now)
 			if isExpiredCookie(pc, now) {
 				continue
 			}
 			list = append(list, pc)
 		}
-		if len(list) > 0 {
+		if list = dropAmbiguousPersistedCookies(list); len(list) > 0 {
 			out.Cookies[u.String()] = list
 		}
 	}
@@ -277,6 +515,11 @@ func hydrateCookieJar(jar http.CookieJar, sess persistedSession) int {
 		}
 		cookies := make([]*http.Cookie, 0, len(list))
 		for _, pc := range list {
+			var usable bool
+			pc, usable = normalizePersistedCookieDeadline(pc, sess.UpdatedAt)
+			if !usable {
+				continue
+			}
 			if pc.Name == "" || isExpiredCookie(pc, now) {
 				continue
 			}
@@ -1382,7 +1625,7 @@ func resumeFromPersistedSession(ctx context.Context, sess persistedSession) (*Au
 	if loaded == 0 {
 		return nil, false, nil
 	}
-	client := newWebHTTPClient(jar)
+	client := newWebHTTPClient(newSessionCookieTrackingJar(jar))
 	info, err := sessionInfoFetcher(ctx, client)
 	if err != nil {
 		if isSessionInfoAuthExpired(err) {
@@ -1392,7 +1635,13 @@ func resumeFromPersistedSession(ctx context.Context, sess persistedSession) (*Au
 		}
 		return nil, false, nil
 	}
-	session := &AuthSession{Client: client}
+	cached := sess
+	session := &AuthSession{
+		Client:           client,
+		cachedUpdatedAt:  sess.UpdatedAt,
+		cachedGeneration: sess.Generation,
+		cachedSession:    &cached,
+	}
 	applySessionInfo(session, info)
 	session.DeveloperTeamID = strings.TrimSpace(sess.DeveloperTeamID)
 	return session, true, nil
@@ -1454,11 +1703,12 @@ func loadSessionFromPersistedSession(sess persistedSession) (*AuthSession, bool,
 		return nil, false, nil
 	}
 	return &AuthSession{
-		Client:           newWebHTTPClient(jar),
+		Client:           newWebHTTPClient(newSessionCookieTrackingJar(jar)),
 		UserEmail:        strings.TrimSpace(sess.UserEmail),
 		DeveloperTeamID:  strings.TrimSpace(sess.DeveloperTeamID),
 		cachedUpdatedAt:  sess.UpdatedAt,
 		cachedGeneration: sess.Generation,
+		cachedSession:    &sess,
 	}, true, nil
 }
 
@@ -1467,6 +1717,8 @@ func PersistSession(session *AuthSession) error {
 	if session == nil || session.Client == nil || session.Client.Jar == nil {
 		return nil
 	}
+	session.persistMu.Lock()
+	defer session.persistMu.Unlock()
 	username := strings.TrimSpace(session.UserEmail)
 	if username == "" {
 		return nil
@@ -1478,12 +1730,34 @@ func PersistSession(session *AuthSession) error {
 	}
 
 	key := webSessionCacheKey(username)
-	serialized, err := serializeCookieJarWithError(session.Client.Jar, username)
+	var (
+		serialized persistedSession
+		updates    map[trackedCookieKey]trackedCookieUpdate
+		tracker    *sessionCookieTrackingJar
+		err        error
+	)
+	if tracked, ok := session.Client.Jar.(*sessionCookieTrackingJar); ok {
+		tracker = tracked
+		serialized, updates, err = tracker.serializeWithUpdates(username)
+	} else {
+		serialized, err = serializeCookieJarWithError(session.Client.Jar, username)
+	}
 	if err != nil {
 		return err
 	}
+	preserveCachedCookieDeadlines(&serialized, session.cachedSession, updates, serialized.UpdatedAt)
 	serialized.DeveloperTeamID = strings.TrimSpace(session.DeveloperTeamID)
-	return persistSessionBySelection(selection, key, serialized)
+	if err := persistSessionBySelection(selection, key, serialized); err != nil {
+		return err
+	}
+	if tracker != nil {
+		tracker.markPersisted(updates)
+	}
+	cached := serialized
+	session.cachedSession = &cached
+	session.cachedUpdatedAt = serialized.UpdatedAt
+	session.cachedGeneration = serialized.Generation
+	return nil
 }
 
 // LoadCachedSession loads a cached web session cookie jar without validating it
@@ -1728,6 +2002,10 @@ func DeleteSessionIfMatches(username string, loaded *AuthSession) (bool, error) 
 	username = strings.TrimSpace(username)
 	if username == "" {
 		return false, nil
+	}
+	if loaded != nil {
+		loaded.persistMu.Lock()
+		defer loaded.persistMu.Unlock()
 	}
 	if loaded == nil || (loaded.cachedUpdatedAt.IsZero() && loaded.cachedGeneration == "") {
 		return true, DeleteSession(username)

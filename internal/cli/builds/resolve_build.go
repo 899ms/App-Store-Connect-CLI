@@ -230,11 +230,19 @@ func resolveBuildByNumberSelectionSince(
 	threshold := since.UTC()
 	var selected *asc.Resource[asc.BuildAttributes]
 	pageOpts := append([]asc.BuildsOption{}, buildOpts...)
+	seenNext := make(map[string]struct{})
 
 	for {
 		buildsResp, err := client.GetBuilds(ctx, appID, pageOpts...)
 		if err != nil {
 			return nil, err
+		}
+
+		nextURL := strings.TrimSpace(buildsResp.Links.Next)
+		if nextURL != "" {
+			if _, seen := seenNext[nextURL]; seen {
+				return nil, fmt.Errorf("failed to paginate builds: %w: %s", asc.ErrRepeatedPaginationURL, nextURL)
+			}
 		}
 
 		for _, build := range buildsResp.Data {
@@ -259,7 +267,6 @@ func resolveBuildByNumberSelectionSince(
 			selected = &selectedBuild
 		}
 
-		nextURL := strings.TrimSpace(buildsResp.Links.Next)
 		if nextURL == "" {
 			if selected == nil {
 				if allowEmpty {
@@ -269,6 +276,7 @@ func resolveBuildByNumberSelectionSince(
 			}
 			return &asc.BuildResponse{Data: *selected}, nil
 		}
+		seenNext[nextURL] = struct{}{}
 
 		pageOpts = []asc.BuildsOption{asc.WithBuildsNextURL(nextURL)}
 	}
