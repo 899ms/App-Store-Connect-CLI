@@ -177,6 +177,16 @@ func TestSubmitResolvedVersionFailsClosedWhenReviewSubmissionPreparationFails(t 
 			},
 		},
 		{
+			name: "initial response claims omitted submissions",
+			handler: func(req *http.Request) (*http.Response, error) {
+				return submitJSONResponse(http.StatusOK, `{
+					"data": [],
+					"links": {},
+					"meta": {"paging": {"total": 1, "limit": 200}}
+				}`)
+			},
+		},
+		{
 			name: "later submission page",
 			handler: func(req *http.Request) (*http.Response, error) {
 				if req.URL.Query().Get("cursor") == "" {
@@ -248,6 +258,26 @@ func TestSubmitResolvedVersionFailsClosedWhenReviewSubmissionPreparationFails(t 
 					}`)
 				}
 				return submitJSONResponse(http.StatusOK, `{"data":null}`)
+			},
+		},
+		{
+			name: "submission item response claims omitted items",
+			handler: func(req *http.Request) (*http.Response, error) {
+				if req.URL.Path == "/v1/apps/app-1/reviewSubmissions" {
+					return submitJSONResponse(http.StatusOK, `{
+						"data": [{
+							"type": "reviewSubmissions",
+							"id": "unproven-submission",
+							"attributes": {"state": "READY_FOR_REVIEW", "platform": "IOS"}
+						}],
+						"links": {}
+					}`)
+				}
+				return submitJSONResponse(http.StatusOK, `{
+					"data": [],
+					"links": {},
+					"meta": {"paging": {"total": 1, "limit": 200}}
+				}`)
 			},
 		},
 		{

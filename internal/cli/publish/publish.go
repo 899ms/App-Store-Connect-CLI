@@ -856,11 +856,13 @@ Examples:
 				}
 			}
 
-			attachResult, err := submitcli.EnsureBuildAttached(ctx, client, versionResp.Data.ID, buildResp.Data.ID, false)
-			if err != nil {
-				return fmt.Errorf("publish appstore: %w", err)
+			if !*submit {
+				attachResult, err := submitcli.EnsureBuildAttached(ctx, client, versionResp.Data.ID, buildResp.Data.ID, false)
+				if err != nil {
+					return fmt.Errorf("publish appstore: %w", err)
+				}
+				result.Attached = attachResult.Attached || attachResult.AlreadyAttached
 			}
-			result.Attached = attachResult.Attached || attachResult.AlreadyAttached
 
 			if *submit {
 				if submitRequestTimeout == 0 {
@@ -913,7 +915,7 @@ Examples:
 					BuildID:                  buildResp.Data.ID,
 					Platform:                 normalizedPlatform,
 					RequestTimeout:           submitRequestTimeout,
-					EnsureBuildAttached:      false,
+					EnsureBuildAttached:      true,
 					LookupExistingSubmission: false,
 					DryRun:                   false,
 					Emit: func(message string) {
@@ -922,6 +924,9 @@ Examples:
 				})
 				if err != nil {
 					return fmt.Errorf("publish appstore: %w", err)
+				}
+				if submitResult.BuildAttachment != nil {
+					result.Attached = submitResult.BuildAttachment.Attached || submitResult.BuildAttachment.AlreadyAttached
 				}
 				result.SubmissionID = submitResult.SubmissionID
 				result.Submitted = submitResult.SubmissionID != ""

@@ -160,6 +160,7 @@ func prepareReviewSubmissionForCreate(
 	if existing.Data == nil {
 		return submitCreateReviewSubmissionPreparation{}, fmt.Errorf("query ready review submissions: response data is required")
 	}
+	expectedSubmissions, submissionsTotalKnown := asc.ParsePagingTotalOK(existing.Meta)
 	existing.Links.Next = strings.TrimSpace(existing.Links.Next)
 
 	paginated, err := asc.PaginateAll(ctx, existing, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
@@ -173,6 +174,13 @@ func prepareReviewSubmissionForCreate(
 		if next.Data == nil {
 			return nil, fmt.Errorf("response data is required")
 		}
+		if nextTotal, ok := asc.ParsePagingTotalOK(next.Meta); ok {
+			if submissionsTotalKnown && nextTotal != expectedSubmissions {
+				return nil, fmt.Errorf("paging total changed from %d to %d", expectedSubmissions, nextTotal)
+			}
+			expectedSubmissions = nextTotal
+			submissionsTotalKnown = true
+		}
 		next.Links.Next = strings.TrimSpace(next.Links.Next)
 		return next, nil
 	})
@@ -184,6 +192,13 @@ func prepareReviewSubmissionForCreate(
 		return submitCreateReviewSubmissionPreparation{}, fmt.Errorf("query ready review submissions: unexpected response type %T", paginated)
 	}
 	submissions := all.Data
+	if submissionsTotalKnown && len(submissions) != expectedSubmissions {
+		return submitCreateReviewSubmissionPreparation{}, fmt.Errorf(
+			"query ready review submissions: incomplete response: received %d of %d submissions",
+			len(submissions),
+			expectedSubmissions,
+		)
+	}
 
 	if len(submissions) == 0 {
 		return submitCreateReviewSubmissionPreparation{}, nil
@@ -348,12 +363,22 @@ func summarizeReviewSubmissionItems(
 	}
 
 	page := 1
+	itemsSeen := 0
+	expectedItems, itemsTotalKnown := asc.ParsePagingTotalOK(resp.Meta)
 	seenNext := make(map[string]struct{})
 	for {
 		accumulateReviewSubmissionItemSummary(&summary, resp.Data, targetVersionID)
+		itemsSeen += len(resp.Data)
 
 		nextURL := strings.TrimSpace(resp.Links.Next)
 		if nextURL == "" {
+			if itemsTotalKnown && itemsSeen != expectedItems {
+				return summary, fmt.Errorf(
+					"review submission items response is incomplete: received %d of %d items",
+					itemsSeen,
+					expectedItems,
+				)
+			}
 			return summary, nil
 		}
 		if _, ok := seenNext[nextURL]; ok {
@@ -370,6 +395,18 @@ func summarizeReviewSubmissionItems(
 		}
 		if resp.Data == nil {
 			return summary, fmt.Errorf("review submission items page %d: response data is required", page+1)
+		}
+		if nextTotal, ok := asc.ParsePagingTotalOK(resp.Meta); ok {
+			if itemsTotalKnown && nextTotal != expectedItems {
+				return summary, fmt.Errorf(
+					"review submission items page %d: paging total changed from %d to %d",
+					page+1,
+					expectedItems,
+					nextTotal,
+				)
+			}
+			expectedItems = nextTotal
+			itemsTotalKnown = true
 		}
 		page++
 	}
