@@ -578,7 +578,7 @@ func TestCaptureFileLimitedAllowsExplicitBoundAboveDefault(t *testing.T) {
 	dir := t.TempDir()
 	root := mustRoot(t, dir)
 	t.Cleanup(func() { _ = root.Close() })
-	data := bytes.Repeat([]byte("x"), int(fileIdentityDefaultDataLimit)+1)
+	data := bytes.Repeat([]byte("x"), int(fileIdentityDataLimit)+1)
 	if err := os.WriteFile(filepath.Join(dir, "large"), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -592,6 +592,17 @@ func TestCaptureFileLimitedAllowsExplicitBoundAboveDefault(t *testing.T) {
 	}
 	if got := len(identity.Data()); got != len(data) {
 		t.Fatalf("captured %d bytes, want %d", got, len(data))
+	}
+}
+
+func TestCaptureFileLimitedRejectsBoundAboveExplicitCaptureLimit(t *testing.T) {
+	requireStrictIdentityPlatform(t)
+	dir := t.TempDir()
+	root := mustRoot(t, dir)
+	t.Cleanup(func() { _ = root.Close() })
+
+	if _, err := root.CaptureFileLimited("large", fileIdentityCaptureLimit+1); !errors.Is(err, ErrFileIdentityDataTooLarge) {
+		t.Fatalf("CaptureFileLimited() error = %v, want ErrFileIdentityDataTooLarge", err)
 	}
 }
 
