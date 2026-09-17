@@ -211,14 +211,28 @@ func sessionCookieURLs() []*url.URL {
 	}
 }
 
+// sessionCookieProbeURLs includes request paths that can carry cookies which
+// are intentionally absent from the root-origin probes above. Keep the root
+// origins as the persisted cache keys; the extra endpoint is only a safe
+// observation point for path-scoped cookies.
+func sessionCookieProbeURLs() []*url.URL {
+	urls := sessionCookieURLs()
+	endpoint, _ := url.Parse(olympusSessionURL)
+	return append(urls, endpoint)
+}
+
 type trackedCookieKey struct {
 	origin string
 	name   string
 	value  string
+	path   string
+	domain string
 }
 
 type trackedCookieUpdate struct {
-	cookie pCookie
+	cookie                 pCookie
+	deleted                bool
+	sessionOnlyReplacement bool
 }
 
 // sessionCookieTrackingJar records cookie deadlines supplied by responses
@@ -229,12 +243,18 @@ type sessionCookieTrackingJar struct {
 	http.CookieJar
 	mu      sync.Mutex
 	updates map[trackedCookieKey]trackedCookieUpdate
+	cached  *persistedSession
 }
 
 func newSessionCookieTrackingJar(jar http.CookieJar) *sessionCookieTrackingJar {
+	return newSessionCookieTrackingJarWithCached(jar, nil)
+}
+
+func newSessionCookieTrackingJarWithCached(jar http.CookieJar, cached *persistedSession) *sessionCookieTrackingJar {
 	return &sessionCookieTrackingJar{
 		CookieJar: jar,
 		updates:   make(map[trackedCookieKey]trackedCookieUpdate),
+		cached:    cached,
 	}
 }
 
@@ -260,19 +280,33 @@ func (j *sessionCookieTrackingJar) SetCookies(u *url.URL, cookies []*http.Cookie
 		if supplied == nil || supplied.Name == "" {
 			continue
 		}
-		for _, origin := range sessionCookieUpdateOrigins(u, supplied) {
-			deadline, usable := normalizePersistedCookieDeadline(pCookie{
-				Name: supplied.Name, Value: supplied.Value, Expires: supplied.Expires, MaxAge: supplied.MaxAge,
-			}, now)
+		updated := pCookie{
+			Name:     supplied.Name,
+			Value:    supplied.Value,
+			Path:     effectiveCookiePath(u, supplied),
+			Domain:   supplied.Domain,
+			Expires:  supplied.Expires,
+			MaxAge:   supplied.MaxAge,
+			Secure:   supplied.Secure,
+			HttpOnly: supplied.HttpOnly,
+			SameSite: int(supplied.SameSite),
+		}
+		deleting := isCookieDeletion(updated, now)
+		for _, origin := range sessionCookieUpdateOrigins(u, supplied, deleting) {
+			deadline, usable := normalizePersistedCookieDeadline(updated, now)
+			if deleting {
+				j.recordUpdate(trackedCookieKeyForCookie(origin, deadline), deadline, true)
+				continue
+			}
 			if !usable || isExpiredCookie(deadline, now) {
 				continue
 			}
-			j.recordUpdate(trackedCookieKey{origin: origin, name: supplied.Name, value: supplied.Value}, deadline)
+			j.recordUpdate(trackedCookieKeyForCookie(origin, deadline), deadline, false)
 		}
 	}
 }
 
-func sessionCookieUpdateOrigins(source *url.URL, supplied *http.Cookie) []string {
+func sessionCookieUpdateOrigins(source *url.URL, supplied *http.Cookie, deleting bool) []string {
 	if source == nil || supplied == nil || supplied.Name == "" {
 		return nil
 	}
@@ -282,11 +316,20 @@ func sessionCookieUpdateOrigins(source *url.URL, supplied *http.Cookie) []string
 	}
 	// Use a fresh jar for each response cookie. This applies the actual
 	// source URL's host and path defaults and avoids attributing a path- or
-	// host-only cookie to unrelated cached origins.
-	probe.SetCookies(source, []*http.Cookie{supplied})
-	origins := make([]string, 0, len(sessionCookieURLs()))
-	for _, origin := range sessionCookieURLs() {
-		if cookieListContains(probe.Cookies(origin), supplied.Name, supplied.Value) {
+	// host-only cookie to unrelated cached origins. A deletion Set-Cookie is
+	// not returned by Cookies, so probe its scope with a temporary live value.
+	probeCookie := *supplied
+	probeValue := supplied.Value
+	if deleting {
+		probeValue = "__asc_cookie_deletion_probe__"
+		probeCookie.Value = probeValue
+		probeCookie.Expires = time.Time{}
+		probeCookie.MaxAge = 0
+	}
+	probe.SetCookies(source, []*http.Cookie{&probeCookie})
+	origins := make([]string, 0, len(sessionCookieProbeURLs()))
+	for _, origin := range sessionCookieProbeURLs() {
+		if cookieListContains(probe.Cookies(origin), supplied.Name, probeValue) {
 			origins = append(origins, origin.String())
 		}
 	}
@@ -302,28 +345,119 @@ func cookieListContains(cookies []*http.Cookie, name, value string) bool {
 	return false
 }
 
-func (j *sessionCookieTrackingJar) recordUpdate(key trackedCookieKey, cookie pCookie) {
+func (j *sessionCookieTrackingJar) recordUpdate(key trackedCookieKey, cookie pCookie, deleted bool) {
 	if j.updates == nil {
 		j.updates = make(map[trackedCookieKey]trackedCookieUpdate)
 	}
-	j.updates[key] = trackedCookieUpdate{cookie: cookie}
+	update := trackedCookieUpdate{cookie: cookie, deleted: deleted}
+	if isSessionOnlyCookie(cookie) && cachedCookieHasActiveScope(j.cached, key.origin, cookie, time.Now().UTC()) {
+		update.sessionOnlyReplacement = true
+	}
+	j.updates[key] = update
+}
+
+func trackedCookieKeyForCookie(origin string, cookie pCookie) trackedCookieKey {
+	key := trackedCookieKey{origin: origin, name: cookie.Name, value: cookie.Value}
+	if persistedCookiePath(cookie.Path) != "/" {
+		key.path = persistedCookiePath(cookie.Path)
+	}
+	if parsed, err := url.Parse(origin); err == nil && parsed != nil {
+		domain := normalizedCookieDomain(cookie.Domain)
+		// Keep an explicit host Domain distinct from a host-only cookie. Both
+		// are sent to this origin, but RFC 6265 gives them different storage
+		// scopes and a parent-domain tombstone must not delete either one.
+		if domain != "" {
+			key.domain = domain
+		}
+	}
+	return key
 }
 
 func sameTrackedCookieUpdate(a, b trackedCookieUpdate) bool {
 	return a.cookie.Name == b.cookie.Name &&
 		a.cookie.Value == b.cookie.Value &&
+		a.deleted == b.deleted &&
+		persistedCookiePath(a.cookie.Path) == persistedCookiePath(b.cookie.Path) &&
+		normalizedCookieDomain(a.cookie.Domain) == normalizedCookieDomain(b.cookie.Domain) &&
 		a.cookie.Expires.Equal(b.cookie.Expires) &&
-		a.cookie.MaxAge == b.cookie.MaxAge
+		a.cookie.MaxAge == b.cookie.MaxAge &&
+		a.cookie.Secure == b.cookie.Secure &&
+		a.cookie.HttpOnly == b.cookie.HttpOnly &&
+		a.cookie.SameSite == b.cookie.SameSite &&
+		a.sessionOnlyReplacement == b.sessionOnlyReplacement
+}
+
+// trackedCookieUpdateForPersistedCookie also considers a path-scoped update
+// observed at the Olympus endpoint. The persisted cache keeps the app root as
+// its origin key, while the response was observed at a deeper request path.
+func trackedCookieUpdateForPersistedCookie(updates map[trackedCookieKey]trackedCookieUpdate, origin string, cookie pCookie) (trackedCookieUpdate, bool) {
+	var (
+		matched trackedCookieUpdate
+		found   bool
+	)
+	for key, update := range updates {
+		if key.name != cookie.Name || key.value != cookie.Value {
+			continue
+		}
+		if key.origin != origin && (key.origin != olympusSessionURL || !isAppStoreConnectRootOrigin(origin)) {
+			continue
+		}
+		if !cookieScopesMatchForOrigin(origin, update.cookie, cookie) {
+			continue
+		}
+		if found && !sameTrackedCookieUpdate(matched, update) {
+			return trackedCookieUpdate{}, false
+		}
+		matched = update
+		found = true
+	}
+	return matched, found
+}
+
+func trackedCookieUpdatesForOrigin(updates map[trackedCookieKey]trackedCookieUpdate, origin, name, value string) []trackedCookieUpdate {
+	matched := make([]trackedCookieUpdate, 0, len(updates))
+	for key, update := range updates {
+		if key.origin == origin && key.name == name && key.value == value {
+			matched = append(matched, update)
+		}
+	}
+	return matched
+}
+
+// trackedCookieScopeUpdatedForOrigin reports any response update for a cookie
+// scope, regardless of value. A root-origin probe can still expose the old
+// value after a deeper cookie was deleted or rotated; that observation must
+// not resurrect the cached cookie from the deeper scope.
+func trackedCookieScopeUpdatedForOrigin(updates map[trackedCookieKey]trackedCookieUpdate, origin string, cookie pCookie) bool {
+	for key, update := range updates {
+		if key.name != cookie.Name {
+			continue
+		}
+		if key.origin != origin && (key.origin != olympusSessionURL || !isAppStoreConnectRootOrigin(origin)) {
+			continue
+		}
+		if cookieScopesMatchForOrigin(origin, update.cookie, cookie) {
+			return true
+		}
+	}
+	return false
 }
 
 func isSessionOnlyCookie(c pCookie) bool {
 	return c.MaxAge == 0 && c.Expires.IsZero()
 }
 
+func isCookieDeletion(c pCookie, now time.Time) bool {
+	if c.MaxAge != 0 {
+		return c.MaxAge < 0
+	}
+	return !c.Expires.IsZero() && !c.Expires.After(now)
+}
+
 // markPersisted clears only the update snapshot that was actually written.
 // A response racing with the backend write remains in updates for the next
 // persistence attempt instead of being lost.
-func (j *sessionCookieTrackingJar) markPersisted(updates map[trackedCookieKey]trackedCookieUpdate) {
+func (j *sessionCookieTrackingJar) markPersisted(updates map[trackedCookieKey]trackedCookieUpdate, persisted *persistedSession) {
 	if j == nil {
 		return
 	}
@@ -331,10 +465,37 @@ func (j *sessionCookieTrackingJar) markPersisted(updates map[trackedCookieKey]tr
 	defer j.mu.Unlock()
 	for key, applied := range updates {
 		current, ok := j.updates[key]
-		if ok && !isSessionOnlyCookie(current.cookie) && sameTrackedCookieUpdate(current, applied) {
+		if ok && sameTrackedCookieUpdate(current, applied) &&
+			(!isSessionOnlyCookie(current.cookie) || persistedSessionContainsCookieScope(persisted, key.origin, current.cookie)) {
 			delete(j.updates, key)
 		}
 	}
+}
+
+func persistedSessionContainsCookieScope(persisted *persistedSession, origin string, cookie pCookie) bool {
+	if persisted == nil {
+		return false
+	}
+	base, err := url.Parse(origin)
+	if err != nil || base == nil {
+		return false
+	}
+	cookie = narrowCookieDomainForOrigin(base, cookie)
+	for cachedOrigin, list := range persisted.Cookies {
+		cachedBase, err := url.Parse(cachedOrigin)
+		if err != nil || cachedBase == nil ||
+			!strings.EqualFold(cachedBase.Scheme, base.Scheme) ||
+			!strings.EqualFold(cachedBase.Host, base.Host) {
+			continue
+		}
+		for _, candidate := range list {
+			if candidate.Name == cookie.Name && candidate.Value == cookie.Value &&
+				cookieScopesMatchForOrigin(origin, candidate, cookie) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (j *sessionCookieTrackingJar) serializeWithUpdates(userEmail string) (persistedSession, map[trackedCookieKey]trackedCookieUpdate, error) {
@@ -352,7 +513,256 @@ func (j *sessionCookieTrackingJar) serializeWithUpdates(userEmail string) (persi
 	for key, update := range j.updates {
 		updates[key] = update
 	}
+	preserveTrackedCookieScopes(&serialized, j.CookieJar, j.cached, updates)
 	return serialized, updates, nil
+}
+
+// preserveTrackedCookieScopes adds cookies visible only at a known request
+// path to the root-origin cache record. It never invents scope metadata: a
+// path cookie must come from a tracked Set-Cookie response or an existing
+// persisted record, otherwise it is dropped rather than broadened.
+func preserveTrackedCookieScopes(serialized *persistedSession, jar http.CookieJar, cached *persistedSession, updates map[trackedCookieKey]trackedCookieUpdate) {
+	if serialized == nil || jar == nil {
+		return
+	}
+	rootOrigin := sessionCookieURLs()[0].String()
+	rootURL := sessionCookieURLs()[0]
+	rootCookies := serialized.Cookies[rootOrigin]
+	rootCookies = patchTrackedCookieScopes(rootOrigin, rootURL, rootCookies, cached, updates)
+	serialized.Cookies[rootOrigin] = rootCookies
+	now := time.Now().UTC()
+	addCookie := func(cookie pCookie) {
+		if isExpiredCookie(cookie, now) {
+			return
+		}
+		if !cookieDomainStorableForOrigin(rootURL, cookie) {
+			return
+		}
+		// A root-origin entry with the same name and value but unknown scope
+		// is ambiguous with this path-scoped cookie. Fail closed instead of
+		// persisting a duplicate that could be hydrated too broadly.
+		if persistedCookieListHasUnknownIdentity(rootCookies, cookie) {
+			return
+		}
+		rootCookies = append(rootCookies, cookie)
+	}
+
+	for _, probe := range sessionCookieProbeURLs()[len(sessionCookieURLs()):] {
+		observedCookies := jar.Cookies(probe)
+		for _, observed := range observedCookies {
+			if observed == nil || observed.Name == "" {
+				continue
+			}
+			trackedUpdates := trackedCookieUpdatesForOrigin(updates, probe.String(), observed.Name, observed.Value)
+			cachedCookies := cachedCookieScopesForProbe(cached, probe, observed.Name, observed.Value)
+			for _, update := range trackedUpdates {
+				if persistedCookiePath(update.cookie.Path) == "/" {
+					continue
+				}
+				if update.deleted {
+					continue
+				}
+				if isSessionOnlyCookie(update.cookie) && (update.sessionOnlyReplacement || cachedCookieHasActiveScope(cached, probe.String(), update.cookie, now)) {
+					continue
+				}
+				addCookie(update.cookie)
+			}
+			for _, cachedCookie := range cachedCookies {
+				if persistedCookiePath(cachedCookie.Path) == "/" {
+					continue
+				}
+				updated := trackedCookieScopeUpdatedForOrigin(updates, probe.String(), cachedCookie)
+				for _, update := range trackedUpdates {
+					if cookieScopesMatchForOrigin(probe.String(), update.cookie, cachedCookie) {
+						updated = true
+						break
+					}
+				}
+				if !updated {
+					addCookie(cachedCookie)
+				}
+			}
+			if len(trackedUpdates) > 0 || len(cachedCookies) > 0 {
+				continue
+			}
+			// An untracked cookie with duplicate visibility has no trustworthy
+			// path/domain metadata and must not be persisted.
+			if observedCookieNameCount(observedCookies, observed.Name) > 1 {
+				continue
+			}
+		}
+	}
+	if rootCookies = dropAmbiguousPersistedCookies(rootCookies); len(rootCookies) > 0 {
+		serialized.Cookies[rootOrigin] = rootCookies
+	} else {
+		delete(serialized.Cookies, rootOrigin)
+	}
+}
+
+func observedCookieNameCount(cookies []*http.Cookie, name string) int {
+	count := 0
+	for _, cookie := range cookies {
+		if cookie != nil && cookie.Name == name {
+			count++
+		}
+	}
+	return count
+}
+
+func patchTrackedCookieScopes(origin string, probe *url.URL, cookies []pCookie, cached *persistedSession, updates map[trackedCookieKey]trackedCookieUpdate) []pCookie {
+	patched := make([]pCookie, 0, len(cookies))
+	now := time.Now().UTC()
+	for _, cookie := range cookies {
+		if update, ok := trackedCookieUpdateForPersistedCookie(updates, origin, cookie); ok {
+			if isSessionOnlyCookie(update.cookie) && (update.sessionOnlyReplacement || cachedCookieHasActiveScope(cached, origin, update.cookie, now)) {
+				continue
+			}
+			cookie = update.cookie
+		} else if scope, ok := cachedCookieForProbe(cached, probe, cookie.Name, cookie.Value); ok {
+			cookie = scope
+		}
+		if !isExpiredCookie(cookie, now) && cookieDomainStorableForOrigin(probe, cookie) {
+			patched = append(patched, cookie)
+		}
+	}
+	return patched
+}
+
+func cookieScopesMatchForOrigin(origin string, a, b pCookie) bool {
+	if persistedCookiePath(a.Path) != persistedCookiePath(b.Path) {
+		return false
+	}
+	base, err := url.Parse(origin)
+	if err != nil || base == nil {
+		return normalizedCookieDomain(a.Domain) == normalizedCookieDomain(b.Domain)
+	}
+	return cookieDomainsMatchForOrigin(base, a.Domain, b.Domain)
+}
+
+func cookieDomainsMatchForOrigin(_ *url.URL, a, b string) bool {
+	// Do not map an empty host-only Domain to the request host here. An
+	// explicit host Domain and a parent Domain are separate RFC 6265 storage
+	// scopes even though all may be sent to this origin. The cache may narrow a
+	// valid parent Domain when hydrating, but update/tombstone matching must
+	// still compare the source scope exactly.
+	return normalizedCookieDomain(a) == normalizedCookieDomain(b)
+}
+
+func cachedCookieHasActiveScope(cached *persistedSession, origin string, cookie pCookie, now time.Time) bool {
+	if cached == nil {
+		return false
+	}
+	base, err := url.Parse(origin)
+	if err != nil || base == nil {
+		return false
+	}
+	for cachedOrigin, list := range cached.Cookies {
+		cachedBase, err := url.Parse(cachedOrigin)
+		if err != nil || cachedBase == nil ||
+			!strings.EqualFold(cachedBase.Scheme, base.Scheme) ||
+			!strings.EqualFold(cachedBase.Host, base.Host) {
+			continue
+		}
+		for _, candidate := range list {
+			candidate, usable := normalizePersistedCookieDeadline(candidate, cached.UpdatedAt)
+			if !usable || isExpiredCookie(candidate, now) ||
+				candidate.Name != cookie.Name ||
+				!cookieScopesMatchForOrigin(origin, candidate, cookie) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func cachedCookieForProbe(cached *persistedSession, probe *url.URL, name, value string) (pCookie, bool) {
+	matches := cachedCookieScopesForProbe(cached, probe, name, value)
+	if len(matches) != 1 {
+		return pCookie{}, false
+	}
+	return matches[0], true
+}
+
+func cachedCookieScopesForProbe(cached *persistedSession, probe *url.URL, name, value string) []pCookie {
+	if cached == nil || probe == nil {
+		return nil
+	}
+	matches := make([]pCookie, 0)
+	ambiguous := make([]bool, 0)
+	for origin, list := range cached.Cookies {
+		base, err := url.Parse(origin)
+		if err != nil || base == nil || !strings.EqualFold(base.Scheme, probe.Scheme) || !strings.EqualFold(base.Host, probe.Host) {
+			continue
+		}
+		for _, candidate := range list {
+			if candidate.Name != name || candidate.Value != value ||
+				!persistedCookiePathMatches(candidate.Path, probe.Path) ||
+				!cookieDomainMatchesHost(cookieDomainForOrigin(base, candidate.Domain), probe.Hostname()) {
+				continue
+			}
+			candidate, usable := normalizePersistedCookieDeadline(candidate, cached.UpdatedAt)
+			if !usable || isExpiredCookie(candidate, time.Now().UTC()) {
+				continue
+			}
+			duplicate := false
+			for index := range matches {
+				if !samePersistedCookieStorageScope(base, matches[index], candidate) {
+					continue
+				}
+				duplicate = true
+				if !matches[index].Expires.Equal(candidate.Expires) || matches[index].MaxAge != candidate.MaxAge {
+					ambiguous[index] = true
+				}
+				break
+			}
+			if !duplicate {
+				matches = append(matches, candidate)
+				ambiguous = append(ambiguous, false)
+			}
+		}
+	}
+	filtered := matches[:0]
+	for index, candidate := range matches {
+		if !ambiguous[index] {
+			filtered = append(filtered, candidate)
+		}
+	}
+	return filtered
+}
+
+func samePersistedCookieScope(a, b pCookie) bool {
+	return a.Name == b.Name && a.Value == b.Value &&
+		persistedCookiePath(a.Path) == persistedCookiePath(b.Path) &&
+		normalizedCookieDomain(a.Domain) == normalizedCookieDomain(b.Domain) &&
+		a.Secure == b.Secure && a.HttpOnly == b.HttpOnly && a.SameSite == b.SameSite
+}
+
+func samePersistedCookieStorageScope(origin *url.URL, a, b pCookie) bool {
+	if origin != nil {
+		a = narrowCookieDomainForOrigin(origin, a)
+		b = narrowCookieDomainForOrigin(origin, b)
+	}
+	return samePersistedCookieScope(a, b)
+}
+
+func persistedCookieListHasScope(cookies []pCookie, cookie pCookie) bool {
+	for _, existing := range cookies {
+		if samePersistedCookieScope(existing, cookie) {
+			return true
+		}
+	}
+	return false
+}
+
+func persistedCookieListHasUnknownIdentity(cookies []pCookie, cookie pCookie) bool {
+	for _, existing := range cookies {
+		if existing.Name == cookie.Name && existing.Value == cookie.Value &&
+			strings.TrimSpace(existing.Path) == "" && strings.TrimSpace(existing.Domain) == "" {
+			return true
+		}
+	}
+	return false
 }
 
 func isExpiredCookie(c pCookie, now time.Time) bool {
@@ -384,24 +794,133 @@ func persistedCookiePath(path string) string {
 	return path
 }
 
-// dropAmbiguousPersistedCookies removes same-origin cookies whose name and
-// value are duplicated. cookiejar.Cookies intentionally omits the domain and
-// path scope, so a tracked update cannot prove which of two such cookies it
-// renewed. Persisting either deadline could extend the wrong scope; dropping
-// both is fail-closed and makes the next resume require authentication.
-func dropAmbiguousPersistedCookies(cookies []pCookie) []pCookie {
-	counts := make(map[string]int, len(cookies))
-	for _, cookie := range cookies {
-		counts[cookie.Name]++
+// effectiveCookiePath applies the same default-path rule as net/http/cookiejar
+// before a response cookie is recorded. The jar does not expose that inferred
+// path through Cookies, but dropping it would turn a path-scoped cookie into a
+// root cookie on the next cache hydration.
+func effectiveCookiePath(source *url.URL, cookie *http.Cookie) string {
+	if cookie != nil && strings.HasPrefix(cookie.Path, "/") {
+		return cookie.Path
 	}
-	filtered := make([]pCookie, 0, len(cookies))
+	if source == nil || source.Path == "" || !strings.HasPrefix(source.Path, "/") {
+		return "/"
+	}
+	path := source.Path
+	if index := strings.LastIndex(path, "/"); index > 0 {
+		return path[:index]
+	}
+	return "/"
+}
+
+func cookieDomainForOrigin(origin *url.URL, domain string) string {
+	domain = normalizedCookieDomain(domain)
+	if domain != "" {
+		return domain
+	}
+	if origin == nil {
+		return ""
+	}
+	return normalizedCookieDomain(origin.Hostname())
+}
+
+func normalizedCookieDomain(domain string) string {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	domain = strings.TrimPrefix(domain, ".")
+	return strings.TrimSuffix(domain, ".")
+}
+
+func cookieDomainMatchesHost(domain, host string) bool {
+	domain = normalizedCookieDomain(domain)
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	return domain != "" && (host == domain || strings.HasSuffix(host, "."+domain))
+}
+
+func isAppStoreConnectRootOrigin(raw string) bool {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed == nil {
+		return false
+	}
+	root := sessionCookieURLs()[0]
+	return strings.EqualFold(parsed.Scheme, root.Scheme) &&
+		strings.EqualFold(parsed.Host, root.Host) &&
+		persistedCookiePath(parsed.Path) == "/"
+}
+
+func narrowCookieDomainForOrigin(origin *url.URL, cookie pCookie) pCookie {
+	if origin == nil || normalizedCookieDomain(cookie.Domain) == "" {
+		return cookie
+	}
+	if cookieDomainMatchesHost(cookie.Domain, origin.Hostname()) {
+		// The old cache representation narrowed domain cookies to the host that
+		// was being serialized. Keep that compatibility behavior instead of
+		// producing a bundle that the transfer validator must reject.
+		cookie.Domain = ""
+	}
+	return cookie
+}
+
+func cookieDomainStorableForOrigin(origin *url.URL, cookie pCookie) bool {
+	if origin == nil {
+		return false
+	}
+	domain := normalizedCookieDomain(cookie.Domain)
+	return domain == "" || cookieDomainMatchesHost(domain, origin.Hostname())
+}
+
+func persistedCookiePathMatches(path, requestPath string) bool {
+	path = persistedCookiePath(path)
+	if requestPath == "" || requestPath[0] != '/' {
+		requestPath = "/"
+	}
+	if path == "/" || requestPath == path {
+		return true
+	}
+	return strings.HasPrefix(requestPath, path) && (strings.HasSuffix(path, "/") || requestPath[len(path)] == '/')
+}
+
+// dropAmbiguousPersistedCookies resolves duplicate storage identities. The
+// cookie jar intentionally omits the domain and path scope from Cookies, so a
+// tracked update cannot prove which of two aliases it renewed. Equivalent
+// records can be collapsed; conflicting records are dropped fail-closed so a
+// resume cannot extend or send the wrong credential.
+func dropAmbiguousPersistedCookies(cookies []pCookie) []pCookie {
+	type cookieGroup struct {
+		first      pCookie
+		consistent bool
+	}
+	groups := make(map[string]*cookieGroup, len(cookies))
+	order := make([]string, 0, len(cookies))
 	for _, cookie := range cookies {
-		if counts[cookie.Name] > 1 {
+		identity := strings.Join([]string{cookie.Name, normalizedCookieDomain(cookie.Domain), persistedCookiePath(cookie.Path)}, "\x00")
+		group, ok := groups[identity]
+		if !ok {
+			groups[identity] = &cookieGroup{first: cookie, consistent: true}
+			order = append(order, identity)
 			continue
 		}
-		filtered = append(filtered, cookie)
+		if !samePersistedCookieRecord(group.first, cookie) {
+			group.consistent = false
+		}
+	}
+
+	// A narrowed parent-domain cookie can alias a host-only record in the
+	// persisted representation. Equivalent records are safe to collapse; any
+	// disagreement in value, flags, or deadline is unsafe to resolve by input
+	// order, so drop the whole identity and require a fresh login.
+	filtered := make([]pCookie, 0, len(groups))
+	for _, identity := range order {
+		group := groups[identity]
+		if group.consistent {
+			filtered = append(filtered, group.first)
+		}
 	}
 	return filtered
+}
+
+func samePersistedCookieRecord(a, b pCookie) bool {
+	return samePersistedCookieScope(a, b) &&
+		a.Expires.Equal(b.Expires) &&
+		a.MaxAge == b.MaxAge
 }
 
 func preserveCachedCookieDeadlines(current *persistedSession, cached *persistedSession, updates map[trackedCookieKey]trackedCookieUpdate, now time.Time) {
@@ -411,8 +930,8 @@ func preserveCachedCookieDeadlines(current *persistedSession, cached *persistedS
 	for origin, cookies := range current.Cookies {
 		persistable := make([]pCookie, 0, len(cookies))
 		for i := range cookies {
-			if refreshed, ok := updates[trackedCookieKey{origin: origin, name: cookies[i].Name, value: cookies[i].Value}]; ok {
-				if isSessionOnlyCookie(refreshed.cookie) {
+			if refreshed, ok := trackedCookieUpdateForPersistedCookie(updates, origin, cookies[i]); ok {
+				if isSessionOnlyCookie(refreshed.cookie) && (refreshed.sessionOnlyReplacement || cachedCookieHasActiveScope(cached, origin, refreshed.cookie, now)) {
 					continue
 				}
 				cookies[i].Expires = refreshed.cookie.Expires
@@ -433,7 +952,7 @@ func preserveCachedCookieDeadlines(current *persistedSession, cached *persistedS
 					isExpiredCookie(candidate, now) ||
 					candidate.Name != cookies[i].Name ||
 					candidate.Value != cookies[i].Value ||
-					persistedCookiePath(candidate.Path) != persistedCookiePath(cookies[i].Path) {
+					!cookieScopesMatchForOrigin(origin, candidate, cookies[i]) {
 					continue
 				}
 				if matched != nil && (!matched.Expires.Equal(candidate.Expires) || matched.MaxAge != candidate.MaxAge) {
@@ -454,6 +973,31 @@ func preserveCachedCookieDeadlines(current *persistedSession, cached *persistedS
 			continue
 		}
 		current.Cookies[origin] = persistable
+	}
+}
+
+func narrowPersistedCookieDomains(current *persistedSession) {
+	if current == nil {
+		return
+	}
+	for origin, cookies := range current.Cookies {
+		base, err := url.Parse(origin)
+		if err != nil || base == nil {
+			delete(current.Cookies, origin)
+			continue
+		}
+		narrowed := make([]pCookie, 0, len(cookies))
+		for _, cookie := range cookies {
+			if !cookieDomainStorableForOrigin(base, cookie) {
+				continue
+			}
+			narrowed = append(narrowed, narrowCookieDomainForOrigin(base, cookie))
+		}
+		if narrowed = dropAmbiguousPersistedCookies(narrowed); len(narrowed) > 0 {
+			current.Cookies[origin] = narrowed
+		} else {
+			delete(current.Cookies, origin)
+		}
 	}
 }
 
@@ -496,6 +1040,10 @@ func serializeCookieJarWithError(jar http.CookieJar, userEmail string) (persiste
 				HttpOnly: c.HttpOnly,
 				SameSite: int(c.SameSite),
 			}
+			if !cookieDomainStorableForOrigin(u, pc) {
+				continue
+			}
+			pc = narrowCookieDomainForOrigin(u, pc)
 			pc, _ = normalizePersistedCookieDeadline(pc, now)
 			if isExpiredCookie(pc, now) {
 				continue
@@ -517,16 +1065,25 @@ func hydrateCookieJar(jar http.CookieJar, sess persistedSession) int {
 		if err != nil {
 			continue
 		}
-		cookies := make([]*http.Cookie, 0, len(list))
+		persisted := make([]pCookie, 0, len(list))
 		for _, pc := range list {
 			var usable bool
 			pc, usable = normalizePersistedCookieDeadline(pc, sess.UpdatedAt)
 			if !usable {
 				continue
 			}
+			if !cookieDomainStorableForOrigin(u, pc) {
+				continue
+			}
+			pc = narrowCookieDomainForOrigin(u, pc)
 			if pc.Name == "" || isExpiredCookie(pc, now) {
 				continue
 			}
+			persisted = append(persisted, pc)
+		}
+		persisted = dropAmbiguousPersistedCookies(persisted)
+		cookies := make([]*http.Cookie, 0, len(persisted))
+		for _, pc := range persisted {
 			cookies = append(cookies, &http.Cookie{
 				Name:     pc.Name,
 				Value:    pc.Value,
@@ -1865,7 +2422,7 @@ func resumeFromPersistedSession(ctx context.Context, sess persistedSession) (*Au
 	if loaded == 0 {
 		return nil, false, nil
 	}
-	client := newWebHTTPClient(newSessionCookieTrackingJar(jar))
+	client := newWebHTTPClient(newSessionCookieTrackingJarWithCached(jar, &sess))
 	info, err := sessionInfoFetcher(ctx, client)
 	if err != nil {
 		if isSessionInfoAuthExpired(err) {
@@ -1943,7 +2500,7 @@ func loadSessionFromPersistedSession(sess persistedSession) (*AuthSession, bool,
 		return nil, false, nil
 	}
 	return &AuthSession{
-		Client:           newWebHTTPClient(newSessionCookieTrackingJar(jar)),
+		Client:           newWebHTTPClient(newSessionCookieTrackingJarWithCached(jar, &sess)),
 		UserEmail:        strings.TrimSpace(sess.UserEmail),
 		DeveloperTeamID:  strings.TrimSpace(sess.DeveloperTeamID),
 		cachedUpdatedAt:  sess.UpdatedAt,
@@ -1986,17 +2543,27 @@ func PersistSession(session *AuthSession) error {
 		return err
 	}
 	preserveCachedCookieDeadlines(&serialized, session.cachedSession, updates, serialized.UpdatedAt)
+	// CookieJar.Cookies omits Domain, so scope-aware patching above may retain
+	// the source domain temporarily to match its exact renewal/tombstone scope.
+	// Persist only the safe host-narrowed representation and resolve aliases
+	// after narrowing, before the cache is made visible to the next load.
+	narrowPersistedCookieDomains(&serialized)
 	serialized.DeveloperTeamID = strings.TrimSpace(session.DeveloperTeamID)
 	if err := persistSessionBySelection(selection, key, serialized); err != nil {
 		return err
 	}
 	if tracker != nil {
-		tracker.markPersisted(updates)
+		tracker.markPersisted(updates, &serialized)
 	}
 	cached := serialized
 	session.cachedSession = &cached
 	session.cachedUpdatedAt = serialized.UpdatedAt
 	session.cachedGeneration = serialized.Generation
+	if tracker != nil {
+		tracker.mu.Lock()
+		tracker.cached = &cached
+		tracker.mu.Unlock()
+	}
 	return nil
 }
 
