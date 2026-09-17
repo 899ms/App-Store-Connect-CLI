@@ -116,6 +116,17 @@ type ReviewSubmissionUpdateRequest struct {
 
 // GetReviewSubmissions retrieves review submissions for an app.
 func (c *Client) GetReviewSubmissions(ctx context.Context, appID string, opts ...ReviewSubmissionsOption) (*ReviewSubmissionsResponse, error) {
+	return c.getReviewSubmissions(ctx, appID, false, opts...)
+}
+
+// GetReviewSubmissionsStrict retrieves review submissions and validates the
+// complete JSON:API collection envelope before callers use it as mutation
+// preflight evidence.
+func (c *Client) GetReviewSubmissionsStrict(ctx context.Context, appID string, opts ...ReviewSubmissionsOption) (*ReviewSubmissionsResponse, error) {
+	return c.getReviewSubmissions(ctx, appID, true, opts...)
+}
+
+func (c *Client) getReviewSubmissions(ctx context.Context, appID string, strict bool, opts ...ReviewSubmissionsOption) (*ReviewSubmissionsResponse, error) {
 	query := &reviewSubmissionsQuery{}
 	for _, opt := range opts {
 		opt(query)
@@ -146,6 +157,11 @@ func (c *Client) GetReviewSubmissions(ctx context.Context, appID string, opts ..
 	var response ReviewSubmissionsResponse
 	if err := json.Unmarshal(data, &response); err != nil {
 		return nil, fmt.Errorf("failed to parse review submissions response: %w", err)
+	}
+	if strict {
+		if err := validateReviewSubmissionCollectionEnvelope(data, "review submissions", reviewSubmissionCollectionResourceSpec); err != nil {
+			return nil, err
+		}
 	}
 
 	return &response, nil
@@ -178,12 +194,21 @@ func (c *Client) ListReviewSubmissions(ctx context.Context, opts ...ReviewSubmis
 	if err := json.Unmarshal(data, &response); err != nil {
 		return nil, fmt.Errorf("failed to parse review submissions response: %w", err)
 	}
-
 	return &response, nil
 }
 
 // GetReviewSubmission retrieves a review submission by ID.
 func (c *Client) GetReviewSubmission(ctx context.Context, submissionID string, opts ...ReviewSubmissionOption) (*ReviewSubmissionResponse, error) {
+	return c.getReviewSubmission(ctx, submissionID, false, opts...)
+}
+
+// GetReviewSubmissionStrict retrieves a review submission and rejects a mixed
+// data-and-errors document before callers use it as mutation preflight evidence.
+func (c *Client) GetReviewSubmissionStrict(ctx context.Context, submissionID string, opts ...ReviewSubmissionOption) (*ReviewSubmissionResponse, error) {
+	return c.getReviewSubmission(ctx, submissionID, true, opts...)
+}
+
+func (c *Client) getReviewSubmission(ctx context.Context, submissionID string, strict bool, opts ...ReviewSubmissionOption) (*ReviewSubmissionResponse, error) {
 	submissionID = strings.TrimSpace(submissionID)
 	if submissionID == "" {
 		return nil, fmt.Errorf("submissionID is required")
@@ -205,6 +230,11 @@ func (c *Client) GetReviewSubmission(ctx context.Context, submissionID string, o
 	var response ReviewSubmissionResponse
 	if err := json.Unmarshal(data, &response); err != nil {
 		return nil, fmt.Errorf("failed to parse review submission response: %w", err)
+	}
+	if strict {
+		if err := rejectReviewSubmissionTopLevelErrorsInDocument(data, "review submission"); err != nil {
+			return nil, err
+		}
 	}
 
 	return &response, nil
@@ -242,6 +272,9 @@ func (c *Client) GetReviewSubmissionItemsRelationships(ctx context.Context, subm
 	var response ReviewSubmissionItemsLinkagesResponse
 	if err := json.Unmarshal(data, &response); err != nil {
 		return nil, fmt.Errorf("failed to parse review submission items relationships response: %w", err)
+	}
+	if err := rejectReviewSubmissionTopLevelErrorsInDocument(data, "review submission items relationships"); err != nil {
+		return nil, err
 	}
 
 	return &response, nil
@@ -286,6 +319,9 @@ func (c *Client) CreateReviewSubmission(ctx context.Context, appID string, platf
 	if err := json.Unmarshal(data, &response); err != nil {
 		return nil, fmt.Errorf("failed to parse review submission response: %w", err)
 	}
+	if err := rejectReviewSubmissionTopLevelErrorsInDocument(data, "review submission"); err != nil {
+		return nil, err
+	}
 
 	return &response, nil
 }
@@ -318,6 +354,9 @@ func (c *Client) UpdateReviewSubmission(ctx context.Context, submissionID string
 	var response ReviewSubmissionResponse
 	if err := json.Unmarshal(data, &response); err != nil {
 		return nil, fmt.Errorf("failed to parse review submission response: %w", err)
+	}
+	if err := rejectReviewSubmissionTopLevelErrorsInDocument(data, "review submission"); err != nil {
+		return nil, err
 	}
 
 	return &response, nil
