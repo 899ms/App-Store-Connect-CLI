@@ -958,7 +958,20 @@ func removeSigningRunStagedProfileEntry(installRoot rootfs.Root, name string, de
 func removeSigningRunStagedProfileEntryWithHook(installRoot rootfs.Root, name string, device, inode uint64, digest string, afterCapture func() error) error {
 	identity, err := installRoot.CaptureFileLimited(name, signingRunInputLimit)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
 		if errors.Is(err, rootfs.ErrFileIdentityChanged) || errors.Is(err, rootfs.ErrFileIdentityDataTooLarge) {
+			return fmt.Errorf("%w: refusing to remove changed staged profile: %w", errSigningRunStagedProfileChanged, err)
+		}
+		matches, inspectErr := signingRunStagedProfileEntryMatches(installRoot, name, device, inode)
+		if inspectErr != nil {
+			if errors.Is(inspectErr, os.ErrNotExist) {
+				return nil
+			}
+			return errors.Join(err, fmt.Errorf("inspect staged profile after capture failure: %w", inspectErr))
+		}
+		if !matches {
 			return fmt.Errorf("%w: refusing to remove changed staged profile: %w", errSigningRunStagedProfileChanged, err)
 		}
 		return err
@@ -1008,20 +1021,63 @@ func signingRunStagedProfileIdentityConflictOnly(err error) bool {
 		errors.Is(err, rootfs.ErrFileIdentityRemoved) || errors.Is(err, os.ErrNotExist)
 }
 
+func signingRunStagedProfileEntryMatches(installRoot rootfs.Root, name string, device, inode uint64) (bool, error) {
+	rooted, err := installRoot.OpenRoot()
+	if err != nil {
+		return false, err
+	}
+	defer rooted.Close()
+	info, err := rooted.Lstat(name)
+	if err != nil {
+		return false, err
+	}
+	return signingRunStagedProfileInfoMatches(info, device, inode), nil
+}
+
+func signingRunStagedProfileInfoMatches(info os.FileInfo, device, inode uint64) bool {
+	if info == nil || !info.Mode().IsRegular() {
+		return false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && uint64(stat.Dev) == device && uint64(stat.Ino) == inode
+}
+
 func verifySigningRunStagedProfileEntry(rooted *os.Root, name string, device, inode uint64, digest string) error {
-	file, err := secureopen.OpenExistingNoFollowInRoot(rooted, name)
+	rootedInfo, err := rooted.Lstat(name)
 	if err != nil {
 		return err
 	}
+	if !signingRunStagedProfileInfoMatches(rootedInfo, device, inode) {
+		return fmt.Errorf("%w: refusing to remove staged profile because its file identity changed", errSigningRunStagedProfileChanged)
+	}
+	file, err := secureopen.OpenExistingNoFollowInRoot(rooted, name)
+	if err != nil {
+		latestInfo, inspectErr := rooted.Lstat(name)
+		if inspectErr == nil && !signingRunStagedProfileInfoMatches(latestInfo, device, inode) {
+			return fmt.Errorf("%w: refusing to remove changed staged profile: %w", errSigningRunStagedProfileChanged, err)
+		}
+		if inspectErr != nil {
+			if errors.Is(inspectErr, os.ErrNotExist) {
+				return inspectErr
+			}
+			return errors.Join(err, fmt.Errorf("inspect staged profile after open failure: %w", inspectErr))
+		}
+		return err
+	}
 	info, statErr := file.Stat()
+	if statErr != nil {
+		return errors.Join(statErr, file.Close())
+	}
+	if !signingRunStagedProfileInfoMatches(info, device, inode) {
+		return errors.Join(
+			fmt.Errorf("%w: refusing to remove staged profile because its file identity changed", errSigningRunStagedProfileChanged),
+			file.Close(),
+		)
+	}
 	data, readErr := io.ReadAll(io.LimitReader(file, signingRunInputLimit+1))
 	closeErr := file.Close()
-	if statErr != nil || readErr != nil || closeErr != nil {
-		return errors.Join(statErr, readErr, closeErr)
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.Mode().IsRegular() || uint64(stat.Dev) != device || uint64(stat.Ino) != inode {
-		return fmt.Errorf("%w: refusing to remove staged profile because its file identity changed", errSigningRunStagedProfileChanged)
+	if readErr != nil || closeErr != nil {
+		return errors.Join(readErr, closeErr)
 	}
 	if len(data) > signingRunInputLimit {
 		return fmt.Errorf("%w: refusing to remove staged profile because it exceeds the size limit", errSigningRunStagedProfileChanged)

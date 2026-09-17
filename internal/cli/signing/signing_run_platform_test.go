@@ -952,6 +952,92 @@ func TestRemoveSigningRunStagedProfileClassifiesRemovalRaceAsChanged(t *testing.
 	}
 }
 
+func TestRemoveSigningRunStagedProfileClassifiesSpecialFileReplacementsAsChanged(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		create func(t *testing.T, path string)
+		mode   os.FileMode
+	}{
+		{
+			name: "symlink",
+			create: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Symlink("foreign-target", path); err != nil {
+					t.Fatalf("create staged symlink replacement: %v", err)
+				}
+			},
+			mode: os.ModeSymlink,
+		},
+		{
+			name: "directory",
+			create: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatalf("create staged directory replacement: %v", err)
+				}
+			},
+			mode: os.ModeDir,
+		},
+		{
+			name: "fifo",
+			create: func(t *testing.T, path string) {
+				t.Helper()
+				if err := syscall.Mkfifo(path, 0o600); err != nil {
+					t.Fatalf("create staged FIFO replacement: %v", err)
+				}
+			},
+			mode: os.ModeNamedPipe,
+		},
+	} {
+		for _, phase := range []string{"initial verification", "identity capture"} {
+			t.Run(test.name+"/"+phase, func(t *testing.T) {
+				installDir := t.TempDir()
+				name := ".asc-signing-run-profile-staged"
+				path := filepath.Join(installDir, name)
+				original := []byte("staged-profile")
+				if err := os.WriteFile(path, original, 0o600); err != nil {
+					t.Fatalf("write staged profile: %v", err)
+				}
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatalf("stat staged profile: %v", err)
+				}
+				stat, ok := info.Sys().(*syscall.Stat_t)
+				if !ok {
+					t.Fatal("staged profile has no platform file identity")
+				}
+				if err := os.Remove(path); err != nil {
+					t.Fatalf("remove staged profile: %v", err)
+				}
+				test.create(t, path)
+				digest := sha256.Sum256(original)
+
+				switch phase {
+				case "initial verification":
+					err = removeSigningRunStagedProfile(path, uint64(stat.Dev), uint64(stat.Ino), hex.EncodeToString(digest[:]))
+				case "identity capture":
+					installRoot, rootErr := rootfs.New(installDir)
+					if rootErr != nil {
+						t.Fatalf("open install root: %v", rootErr)
+					}
+					t.Cleanup(func() { _ = installRoot.Close() })
+					err = removeSigningRunStagedProfileEntry(installRoot, name, uint64(stat.Dev), uint64(stat.Ino), hex.EncodeToString(digest[:]))
+				}
+				if !errors.Is(err, errSigningRunStagedProfileChanged) {
+					t.Fatalf("remove staged profile error = %v, want staged-profile-changed sentinel", err)
+				}
+				replacementInfo, lstatErr := os.Lstat(path)
+				if lstatErr != nil {
+					t.Fatalf("lstat preserved special-file replacement: %v", lstatErr)
+				}
+				if replacementInfo.Mode()&test.mode == 0 {
+					t.Fatalf("preserved replacement mode = %v, want %v", replacementInfo.Mode(), test.mode)
+				}
+			})
+		}
+	}
+}
+
 func TestClassifySigningRunStagedProfileRemovalErrorPreservesOperationalFailures(t *testing.T) {
 	for _, test := range []struct {
 		name string
