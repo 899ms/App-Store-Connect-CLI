@@ -114,6 +114,13 @@ Examples:
 			}
 			defer clear(password)
 			if options.IdentitySHA256 != "" {
+				unlock, err := unlockKeychainCommand(resolved, password)
+				if err != nil {
+					return err
+				}
+				if _, _, err := runKeychainSecurity(ctx, []byte(unlock), "-i"); err != nil {
+					return fmt.Errorf("signing keychain set-partition-list: %w", err)
+				}
 				if err := requireKeychainIdentity(ctx, resolved, options.IdentitySHA256); err != nil {
 					return err
 				}
@@ -344,6 +351,18 @@ func keychainPasswordScript(action, path string, password []byte, options signin
 	return strings.Join(lines, "\n") + "\n", nil
 }
 
+func unlockKeychainCommand(path string, password []byte) (string, error) {
+	quotedPath, err := securityToken(path)
+	if err != nil {
+		return "", shared.UsageErrorf("signing keychain set-partition-list: %s", err.Error())
+	}
+	quotedPassword, err := securityToken(string(password))
+	if err != nil {
+		return "", shared.UsageErrorf("signing keychain set-partition-list: keychain password %s", err.Error())
+	}
+	return fmt.Sprintf("unlock-keychain -p %s %s\n", quotedPassword, quotedPath), nil
+}
+
 func partitionListCommand(path string, password []byte, partition string) (string, error) {
 	quotedPath, err := securityToken(path)
 	if err != nil {
@@ -437,7 +456,7 @@ func listSigningKeychains(ctx context.Context) (*asc.SigningKeychainListResult, 
 		text := string(append(detail, detailErr...))
 		info.Locked = strings.Contains(strings.ToLower(text), "locked")
 		if infoErr == nil && !info.Locked {
-			identities, err := listKeychainIdentities(ctx, path)
+			identities, err := listKeychainIdentities(ctx, path, true)
 			if err != nil {
 				return nil, err
 			}
@@ -448,10 +467,10 @@ func listSigningKeychains(ctx context.Context) (*asc.SigningKeychainListResult, 
 	return result, nil
 }
 
-func listKeychainIdentities(ctx context.Context, path string) ([]asc.SigningKeychainIdentity, error) {
+func listKeychainIdentities(ctx context.Context, path string, lockedIsEmpty bool) ([]asc.SigningKeychainIdentity, error) {
 	stdout, stderr, err := runKeychainSecurity(ctx, nil, "find-certificate", "-a", "-p", "-Z", path)
 	if err != nil {
-		if strings.Contains(strings.ToLower(string(stderr)), "locked") {
+		if lockedIsEmpty && strings.Contains(strings.ToLower(string(stderr)), "locked") {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("signing keychain list: identities for %s: %w", path, err)
@@ -464,12 +483,18 @@ func listKeychainIdentities(ctx context.Context, path string) ([]asc.SigningKeyc
 }
 
 func requireKeychainIdentity(ctx context.Context, path, sha256 string) error {
-	identities, err := listKeychainIdentities(ctx, path)
+	stdout, stderr, err := runKeychainSecurity(ctx, nil, "find-certificate", "-a", "-p", "-Z", path)
 	if err != nil {
-		return err
+		return fmt.Errorf("signing keychain set-partition-list: identities for %s: %w: %s", path, err, sanitizeSecurityOutput(stderr))
 	}
-	for _, identity := range identities {
+	for _, identity := range parseCertificateDump(stdout) {
 		if strings.EqualFold(identity.SHA256, sha256) {
+			return nil
+		}
+	}
+	for _, line := range strings.Split(string(stdout), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "SHA-256 hash:") && strings.EqualFold(strings.TrimSpace(strings.TrimPrefix(line, "SHA-256 hash:")), sha256) {
 			return nil
 		}
 	}

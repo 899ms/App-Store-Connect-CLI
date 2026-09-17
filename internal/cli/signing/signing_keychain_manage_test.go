@@ -95,6 +95,42 @@ func TestSigningKeychainListParsesIdentities(t *testing.T) {
 	}
 }
 
+func TestSigningKeychainSetPartitionListUnlocksBeforeIdentityLookup(t *testing.T) {
+	passwordFile := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(passwordFile, []byte("s3cret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keychain := filepath.Join(t.TempDir(), "release.keychain-db")
+	sha := strings.Repeat("ab", 32)
+	var order []string
+	unlocked := false
+	restore := setKeychainRunner(t, func(_ context.Context, input []byte, args ...string) ([]byte, []byte, error) {
+		order = append(order, args[0])
+		if args[0] == "-i" && strings.Contains(string(input), "unlock-keychain") && !strings.Contains(string(input), "set-key-partition-list") {
+			unlocked = true
+			return nil, nil, nil
+		}
+		if args[0] == "find-certificate" {
+			if !unlocked {
+				t.Fatal("identity lookup ran before unlock")
+			}
+			return []byte("SHA-256 hash: " + sha + "\n"), nil, nil
+		}
+		return nil, nil, nil
+	})
+	defer restore()
+	cmd := SigningKeychainSetPartitionListCommand()
+	if err := cmd.Parse([]string{"--keychain", keychain, "--keychain-password-file", passwordFile, "--identity-sha256", sha, "--output", "json"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(order) < 2 || order[0] != "-i" || order[1] != "find-certificate" {
+		t.Fatalf("order = %#v", order)
+	}
+}
+
 func TestSigningKeychainRefusesNonDarwin(t *testing.T) {
 	previous := keychainHostGOOS
 	keychainHostGOOS = "linux"
