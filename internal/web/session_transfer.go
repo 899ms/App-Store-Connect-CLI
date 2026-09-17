@@ -272,6 +272,11 @@ func exportBundleCookies(sess persistedSession, now time.Time) []SessionBundleCo
 			continue
 		}
 		for _, cookie := range list {
+			var usable bool
+			cookie, usable = normalizePersistedCookieDeadline(cookie, sess.UpdatedAt)
+			if !usable {
+				continue
+			}
 			if strings.TrimSpace(cookie.Name) == "" || isExpiredCookie(cookie, now) {
 				continue
 			}
