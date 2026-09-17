@@ -956,12 +956,34 @@ func removeSigningRunStagedProfileEntry(installRoot rootfs.Root, name string, de
 }
 
 func removeSigningRunStagedProfileEntryWithHook(installRoot rootfs.Root, name string, device, inode uint64, digest string, afterCapture func() error) error {
-	identity, err := installRoot.CaptureFileLimited(name, signingRunInputLimit)
+	return removeSigningRunStagedProfileEntryWithCaptureHook(
+		installRoot,
+		name,
+		device,
+		inode,
+		digest,
+		func() (*rootfs.FileIdentity, error) {
+			return installRoot.CaptureFileLimited(name, signingRunInputLimit)
+		},
+		afterCapture,
+	)
+}
+
+func removeSigningRunStagedProfileEntryWithCaptureHook(
+	installRoot rootfs.Root,
+	name string,
+	device, inode uint64,
+	digest string,
+	capture func() (*rootfs.FileIdentity, error),
+	afterCapture func() error,
+) error {
+	identity, err := capture()
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
-		if errors.Is(err, rootfs.ErrFileIdentityChanged) || errors.Is(err, rootfs.ErrFileIdentityDataTooLarge) {
+		if (errors.Is(err, rootfs.ErrFileIdentityChanged) && signingRunStagedProfileIdentityConflictOnly(err)) ||
+			errors.Is(err, rootfs.ErrFileIdentityDataTooLarge) {
 			return fmt.Errorf("%w: refusing to remove changed staged profile: %w", errSigningRunStagedProfileChanged, err)
 		}
 		matches, inspectErr := signingRunStagedProfileEntryMatches(installRoot, name, device, inode)
