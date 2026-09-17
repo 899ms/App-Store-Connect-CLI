@@ -952,6 +952,10 @@ func removeSigningRunStagedProfile(path string, device, inode uint64, digest str
 }
 
 func removeSigningRunStagedProfileEntry(installRoot rootfs.Root, name string, device, inode uint64, digest string) error {
+	return removeSigningRunStagedProfileEntryWithHook(installRoot, name, device, inode, digest, nil)
+}
+
+func removeSigningRunStagedProfileEntryWithHook(installRoot rootfs.Root, name string, device, inode uint64, digest string, afterCapture func() error) error {
 	identity, err := installRoot.CaptureFileLimited(name, signingRunInputLimit)
 	if err != nil {
 		if errors.Is(err, rootfs.ErrFileIdentityChanged) || errors.Is(err, rootfs.ErrFileIdentityDataTooLarge) {
@@ -967,7 +971,41 @@ func removeSigningRunStagedProfileEntry(installRoot rootfs.Root, name string, de
 	if err := signingRunStagedProfileContentMatches(identity.Data(), digest); err != nil {
 		return err
 	}
-	return installRoot.RemoveFileIfSameIdentity(name, identity)
+	if afterCapture != nil {
+		if err := afterCapture(); err != nil {
+			return err
+		}
+	}
+	if err := installRoot.RemoveFileIfSameIdentity(name, identity); err != nil {
+		return classifySigningRunStagedProfileRemovalError(err)
+	}
+	return nil
+}
+
+func classifySigningRunStagedProfileRemovalError(err error) error {
+	if errors.Is(err, rootfs.ErrFileIdentityChanged) && signingRunStagedProfileIdentityConflictOnly(err) {
+		return fmt.Errorf("%w: refusing to remove replaced staged profile: %w", errSigningRunStagedProfileChanged, err)
+	}
+	return err
+}
+
+func signingRunStagedProfileIdentityConflictOnly(err error) bool {
+	if err == nil {
+		return true
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, child := range joined.Unwrap() {
+			if !signingRunStagedProfileIdentityConflictOnly(child) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return signingRunStagedProfileIdentityConflictOnly(wrapped.Unwrap())
+	}
+	return errors.Is(err, rootfs.ErrFileIdentityChanged) ||
+		errors.Is(err, rootfs.ErrFileIdentityRemoved) || errors.Is(err, os.ErrNotExist)
 }
 
 func verifySigningRunStagedProfileEntry(rooted *os.Root, name string, device, inode uint64, digest string) error {

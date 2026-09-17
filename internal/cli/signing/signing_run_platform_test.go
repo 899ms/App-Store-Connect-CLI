@@ -907,6 +907,77 @@ func TestRemoveSigningRunStagedProfilePreservesSameInodeReplacement(t *testing.T
 	}
 }
 
+func TestRemoveSigningRunStagedProfileClassifiesRemovalRaceAsChanged(t *testing.T) {
+	installDir := t.TempDir()
+	name := ".asc-signing-run-profile-staged"
+	path := filepath.Join(installDir, name)
+	original := []byte("staged-profile")
+	replacement := []byte("foreign replacement")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatalf("write staged profile: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat staged profile: %v", err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatal("staged profile has no platform file identity")
+	}
+	digest := sha256.Sum256(original)
+	installRoot, err := rootfs.New(installDir)
+	if err != nil {
+		t.Fatalf("open install root: %v", err)
+	}
+	t.Cleanup(func() { _ = installRoot.Close() })
+
+	err = removeSigningRunStagedProfileEntryWithHook(
+		installRoot, name, uint64(stat.Dev), uint64(stat.Ino), hex.EncodeToString(digest[:]),
+		func() error {
+			if err := os.Remove(path); err != nil {
+				return err
+			}
+			return os.WriteFile(path, replacement, 0o600)
+		},
+	)
+	if !errors.Is(err, errSigningRunStagedProfileChanged) || !errors.Is(err, rootfs.ErrFileIdentityChanged) {
+		t.Fatalf("remove staged profile error = %v, want staged and rootfs identity-change sentinels", err)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("read preserved replacement: %v", readErr)
+	}
+	if !bytes.Equal(got, replacement) {
+		t.Fatalf("preserved replacement = %q, want %q", got, replacement)
+	}
+}
+
+func TestClassifySigningRunStagedProfileRemovalErrorPreservesOperationalFailures(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "quarantine cleanup uncertainty",
+			err:  errors.Join(rootfs.ErrFileIdentityChanged, rootfs.ErrQuarantineCleanupUncertain),
+		},
+		{
+			name: "directory sync failure",
+			err:  errors.Join(rootfs.ErrFileIdentityChanged, errors.New("sync parent directory")),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := classifySigningRunStagedProfileRemovalError(test.err)
+			if errors.Is(got, errSigningRunStagedProfileChanged) {
+				t.Fatalf("classified operational failure as staged change: %v", got)
+			}
+			if !errors.Is(got, rootfs.ErrFileIdentityChanged) {
+				t.Fatalf("lost identity-change evidence: %v", got)
+			}
+		})
+	}
+}
+
 func TestRemoveSigningRunProfilePreservesReplacementDuringCleanup(t *testing.T) {
 	installDir := t.TempDir()
 	previous := signingRunProfileInstallDirFn
