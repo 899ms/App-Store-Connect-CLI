@@ -41,6 +41,7 @@ var (
 	ErrCachedSessionExpired          = errors.New("cached web session expired")
 	ErrCachedSessionValidationFailed = errors.New("cached web session could not be validated")
 	errMalformedSessionFile          = errors.New("web session cache is malformed")
+	errUnsafeSessionCacheFile        = errors.New("web session cache file is unsafe")
 	// errMalformedSessionStore identifies malformed aggregate keychain data.
 	// It is separate from the file-cache sentinel so an explicit keychain
 	// recovery cannot be triggered by an unrelated file-read error.
@@ -1104,6 +1105,9 @@ func readLastKeyFromFile() (string, bool, error) {
 func readSessionCacheFile(path string) ([]byte, error) {
 	file, err := secureopen.OpenExistingNoFollow(path)
 	if err != nil {
+		if info, statErr := os.Lstat(path); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("%w: refusing symlink %q", errUnsafeSessionCacheFile, path)
+		}
 		return nil, err
 	}
 	defer file.Close()
@@ -1113,7 +1117,7 @@ func readSessionCacheFile(path string) ([]byte, error) {
 		return nil, fmt.Errorf("failed to stat web session cache file: %w", err)
 	}
 	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("web session cache path is not a regular file: %q", path)
+		return nil, fmt.Errorf("%w: path is not a regular file: %q", errUnsafeSessionCacheFile, path)
 	}
 
 	return io.ReadAll(file)

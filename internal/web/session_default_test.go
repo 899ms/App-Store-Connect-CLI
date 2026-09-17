@@ -181,6 +181,77 @@ func TestDefaultCachedAppleIDRejectsSymlinkedSessionFile(t *testing.T) {
 	}
 }
 
+func TestDefaultCachedAppleIDAutoBackendSkipsSymlinkedSessionFile(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	t.Setenv(webSessionBackendEnv, "auto")
+	t.Setenv(webSessionCacheDirEnv, dir)
+
+	writeDefaultTestSessionFile(t, outside, "outside@example.com", webSessionCacheVersion)
+	key := webSessionCacheKey("outside@example.com")
+	cachePath := filepath.Join(dir, "session-"+key+".json")
+	targetPath := filepath.Join(outside, "session-"+key+".json")
+	if err := os.Symlink(targetPath, cachePath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	kr := withArraySessionKeyring(t)
+	store := newPersistedSessionStore()
+	store.Sessions[webSessionCacheKey("kc@example.com")] = persistedSession{
+		Version:   webSessionCacheVersion,
+		UpdatedAt: time.Now(),
+		UserEmail: "kc@example.com",
+		Cookies: map[string][]pCookie{
+			"https://appstoreconnect.apple.com": {{Name: "myacinfo", Value: "keychain-cookie"}},
+		},
+	}
+	raw, err := json.Marshal(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := kr.Set(keyring.Item{Key: webSessionStoreItem, Data: raw}); err != nil {
+		t.Fatal(err)
+	}
+
+	appleID, err := DefaultCachedAppleID()
+	if err != nil {
+		t.Fatalf("DefaultCachedAppleID() error = %v", err)
+	}
+	if appleID != "kc@example.com" {
+		t.Fatalf("appleID = %q, want kc@example.com", appleID)
+	}
+}
+
+func TestDefaultCachedAppleIDAutoBackendKeepsRegularSessionAlongsideSymlink(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	t.Setenv(webSessionBackendEnv, "auto")
+	t.Setenv(webSessionCacheDirEnv, dir)
+	kr := withArraySessionKeyring(t)
+
+	writeDefaultTestSessionFile(t, dir, "file@example.com", webSessionCacheVersion)
+	writeDefaultTestSessionFile(t, outside, "outside@example.com", webSessionCacheVersion)
+	key := webSessionCacheKey("outside@example.com")
+	if err := os.Symlink(
+		filepath.Join(outside, "session-"+key+".json"),
+		filepath.Join(dir, "session-"+key+".json"),
+	); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	kr.ResetCounts()
+
+	appleID, err := DefaultCachedAppleID()
+	if err != nil {
+		t.Fatalf("DefaultCachedAppleID() error = %v", err)
+	}
+	if appleID != "file@example.com" {
+		t.Fatalf("appleID = %q, want file@example.com", appleID)
+	}
+	if got := kr.GetCount(webSessionStoreItem); got != 0 {
+		t.Fatalf("keychain store read %d times, want 0", got)
+	}
+}
+
 func TestDefaultCachedAppleIDKeychainBackend(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv(webSessionBackendEnv, "keychain")
