@@ -1770,6 +1770,37 @@ func TestReadLastSessionBySelectionKeychainBackendIgnoresBrokenFileMirror(t *tes
 	}
 }
 
+func TestReadLastKeyFromFileRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	t.Setenv(webSessionCacheDirEnv, dir)
+
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir cache dir: %v", err)
+	}
+	last := persistedLastSession{Version: webSessionCacheVersion, Key: webSessionCacheKey("outside@example.com")}
+	raw, err := json.Marshal(last)
+	if err != nil {
+		t.Fatalf("marshal last marker: %v", err)
+	}
+	targetPath := filepath.Join(outside, "last.json")
+	if err := os.WriteFile(targetPath, raw, 0o600); err != nil {
+		t.Fatalf("write target last marker: %v", err)
+	}
+	cachePath := filepath.Join(dir, "last.json")
+	if err := os.Symlink(targetPath, cachePath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	key, ok, err := readLastKeyFromFile()
+	if err == nil {
+		t.Fatalf("readLastKeyFromFile() = (%q, %t, nil); want symlink rejection", key, ok)
+	}
+	if key != "" || ok {
+		t.Fatalf("readLastKeyFromFile() = (%q, %t, %v), want no key", key, ok, err)
+	}
+}
+
 func TestTryResumeSessionReturnsExpiredErrorForUnauthorizedCache(t *testing.T) {
 	withArraySessionKeyring(t)
 	t.Setenv(webSessionBackendEnv, "keychain")

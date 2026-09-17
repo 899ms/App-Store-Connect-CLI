@@ -154,6 +154,33 @@ func TestDefaultCachedAppleIDFileBackend(t *testing.T) {
 	})
 }
 
+func TestDefaultCachedAppleIDRejectsSymlinkedSessionFile(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	t.Setenv(webSessionBackendEnv, "file")
+	t.Setenv(webSessionCacheDirEnv, dir)
+
+	keyEmail := "outside@example.com"
+	writeDefaultTestSessionFile(t, outside, keyEmail, webSessionCacheVersion)
+	key := webSessionCacheKey(keyEmail)
+	cachePath := filepath.Join(dir, "session-"+key+".json")
+	targetPath := filepath.Join(outside, "session-"+key+".json")
+	if err := os.Symlink(targetPath, cachePath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	appleID, err := DefaultCachedAppleID()
+	if err == nil {
+		t.Fatalf("DefaultCachedAppleID() = %q, nil; want symlink rejection", appleID)
+	}
+	if appleID != "" {
+		t.Fatalf("appleID = %q, want empty", appleID)
+	}
+	if !strings.Contains(err.Error(), cachePath) {
+		t.Fatalf("error = %q, want cache path", err)
+	}
+}
+
 func TestDefaultCachedAppleIDKeychainBackend(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv(webSessionBackendEnv, "keychain")
