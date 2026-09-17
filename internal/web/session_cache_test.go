@@ -999,7 +999,7 @@ func TestHydrateCookieJarDropsConflictingHostParentAliases(t *testing.T) {
 	}
 }
 
-func TestHydrateCookieJarDeduplicatesEquivalentHostParentAliases(t *testing.T) {
+func TestHydrateCookieJarRejectsEquivalentHostParentAliases(t *testing.T) {
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		t.Fatalf("cookiejar.New() error: %v", err)
@@ -1016,12 +1016,8 @@ func TestHydrateCookieJarDeduplicatesEquivalentHostParentAliases(t *testing.T) {
 		},
 	}
 
-	if loaded := hydrateCookieJar(jar, sess); loaded != 1 {
-		t.Fatalf("hydrateCookieJar() = %d, want one deterministic cookie after alias deduplication", loaded)
-	}
-	endpoint, _ := url.Parse(olympusSessionURL)
-	if got := cookieValue(jar.Cookies(endpoint), "token"); got != "same" {
-		t.Fatalf("hydrated token = %q, want same", got)
+	if loaded := hydrateCookieJar(jar, sess); loaded != 0 {
+		t.Fatalf("hydrateCookieJar() = %d, want aliases with different RFC scopes rejected", loaded)
 	}
 }
 
@@ -1974,8 +1970,9 @@ func TestPersistSessionPreservesUntouchedOlympusParentDomainCookie(t *testing.T)
 		t.Fatalf("readSessionFromFile() = (%t, %v), want cached session", ok, err)
 	}
 	cookies := stored.Cookies["https://appstoreconnect.apple.com/"]
-	if len(cookies) != 1 || cookies[0].Value != "parent-token" || cookies[0].Path != "/olympus" || cookies[0].Domain != "" {
-		t.Fatalf("persisted parent-domain cookie = %#v, want a narrowed host-only scope", cookies)
+	if len(cookies) != 1 || cookies[0].Value != "parent-token" || cookies[0].Path != "/olympus" ||
+		cookies[0].Domain != "" || cookies[0].ScopeDomain != "apple.com" {
+		t.Fatalf("persisted parent-domain cookie = %#v, want a narrowed host-only Domain with apple.com scope provenance", cookies)
 	}
 	bundle, ok, err := ExportSessionBundle(webTestSessionEmail)
 	if err != nil || !ok || bundle == nil {
@@ -1983,6 +1980,94 @@ func TestPersistSessionPreservesUntouchedOlympusParentDomainCookie(t *testing.T)
 	}
 	if err := bundle.Validate(); err != nil {
 		t.Fatalf("narrowed exported bundle failed validation: %v", err)
+	}
+}
+
+func TestPersistSessionDoesNotResurrectParentDomainCookieDeletedAfterNarrowing(t *testing.T) {
+	withFileSessionCache(t)
+	key := webSessionCacheKey(webTestSessionEmail)
+	if err := writeSessionToFile(key, persistedSession{
+		Version:   webSessionCacheVersion,
+		UpdatedAt: time.Now().UTC(),
+		UserEmail: webTestSessionEmail,
+		Cookies: map[string][]pCookie{
+			"https://appstoreconnect.apple.com/": {{
+				Name: "myacinfo", Value: "parent-token", Path: "/olympus",
+				Domain: ".apple.com", Expires: time.Now().UTC().Add(24 * time.Hour),
+			}},
+		},
+	}); err != nil {
+		t.Fatalf("writeSessionToFile() error: %v", err)
+	}
+
+	loaded, ok, err := LoadCachedSession(webTestSessionEmail)
+	if err != nil || !ok || loaded == nil {
+		t.Fatalf("LoadCachedSession() = (%+v, %t, %v), want cached session", loaded, ok, err)
+	}
+	if err := PersistSession(loaded); err != nil {
+		t.Fatalf("PersistSession(first) error: %v", err)
+	}
+
+	endpoint, _ := url.Parse(olympusSessionURL)
+	loaded.Client.Jar.SetCookies(endpoint, []*http.Cookie{{
+		Name: "myacinfo", Path: "/olympus", Domain: ".apple.com", MaxAge: -1,
+	}})
+	if err := PersistSession(loaded); err != nil {
+		t.Fatalf("PersistSession(second) error: %v", err)
+	}
+
+	stored, ok, err := readSessionFromFile(key)
+	if err != nil || !ok {
+		t.Fatalf("readSessionFromFile() = (%t, %v), want stored session", ok, err)
+	}
+	for _, cookie := range stored.Cookies["https://appstoreconnect.apple.com/"] {
+		if cookie.Name == "myacinfo" && persistedCookiePath(cookie.Path) == "/olympus" {
+			t.Fatalf("deleted parent-domain cookie was resurrected after narrowing: %#v", stored.Cookies)
+		}
+	}
+}
+
+func TestPersistSessionDropsSessionOnlyParentDomainReplacementAfterNarrowing(t *testing.T) {
+	withFileSessionCache(t)
+	key := webSessionCacheKey(webTestSessionEmail)
+	if err := writeSessionToFile(key, persistedSession{
+		Version:   webSessionCacheVersion,
+		UpdatedAt: time.Now().UTC(),
+		UserEmail: webTestSessionEmail,
+		Cookies: map[string][]pCookie{
+			"https://appstoreconnect.apple.com/": {{
+				Name: "myacinfo", Value: "parent-token", Path: "/olympus",
+				Domain: ".apple.com", Expires: time.Now().UTC().Add(24 * time.Hour),
+			}},
+		},
+	}); err != nil {
+		t.Fatalf("writeSessionToFile() error: %v", err)
+	}
+
+	loaded, ok, err := LoadCachedSession(webTestSessionEmail)
+	if err != nil || !ok || loaded == nil {
+		t.Fatalf("LoadCachedSession() = (%+v, %t, %v), want cached session", loaded, ok, err)
+	}
+	if err := PersistSession(loaded); err != nil {
+		t.Fatalf("PersistSession(first) error: %v", err)
+	}
+
+	endpoint, _ := url.Parse(olympusSessionURL)
+	loaded.Client.Jar.SetCookies(endpoint, []*http.Cookie{{
+		Name: "myacinfo", Value: "rotated-token", Path: "/olympus", Domain: ".apple.com",
+	}})
+	if err := PersistSession(loaded); err != nil {
+		t.Fatalf("PersistSession(second) error: %v", err)
+	}
+
+	stored, ok, err := readSessionFromFile(key)
+	if err != nil || !ok {
+		t.Fatalf("readSessionFromFile() = (%t, %v), want stored session", ok, err)
+	}
+	for _, cookie := range stored.Cookies["https://appstoreconnect.apple.com/"] {
+		if cookie.Name == "myacinfo" && persistedCookiePath(cookie.Path) == "/olympus" {
+			t.Fatalf("session-only parent-domain replacement persisted after narrowing: %#v", stored.Cookies)
+		}
 	}
 }
 
@@ -2019,8 +2104,8 @@ func TestPersistSessionAppliesParentDomainRenewalAfterNarrowing(t *testing.T) {
 		t.Fatalf("readSessionFromFile() = (%t, %v), want stored session", ok, err)
 	}
 	cookies := stored.Cookies["https://appstoreconnect.apple.com/"]
-	if len(cookies) != 1 || cookies[0].Domain != "" || !cookies[0].Expires.Equal(newExpiry) {
-		t.Fatalf("renewed parent-domain cookie = %#v, want narrowed host-only cookie with expiry %v", cookies, newExpiry)
+	if len(cookies) != 1 || cookies[0].Domain != "" || cookies[0].ScopeDomain != "apple.com" || !cookies[0].Expires.Equal(newExpiry) {
+		t.Fatalf("renewed parent-domain cookie = %#v, want narrowed cookie with apple.com scope provenance and expiry %v", cookies, newExpiry)
 	}
 }
 
@@ -2189,6 +2274,24 @@ func TestCachedCookieForProbeRejectsConflictingHostParentAliases(t *testing.T) {
 	}
 }
 
+func TestCachedCookieForProbeRejectsEquivalentHostParentAliases(t *testing.T) {
+	now := time.Now().UTC()
+	expires := now.Add(time.Hour)
+	cached := persistedSession{
+		UpdatedAt: now,
+		Cookies: map[string][]pCookie{
+			"https://appstoreconnect.apple.com/": {
+				{Name: "token", Value: "same", Path: "/olympus", Expires: expires},
+				{Name: "token", Value: "same", Path: "/olympus", Domain: ".apple.com", Expires: expires},
+			},
+		},
+	}
+	endpoint, _ := url.Parse(olympusSessionURL)
+	if _, ok := cachedCookieForProbe(&cached, endpoint, "token", "same"); ok {
+		t.Fatal("equivalent host-only and parent-domain aliases were resolved by input order")
+	}
+}
+
 func TestCookieScopeMatchingKeepsHostOnlyAndParentDomainDistinct(t *testing.T) {
 	endpoint, _ := url.Parse(olympusSessionURL)
 	hostOnly := pCookie{Name: "token", Value: "same", Path: "/olympus"}
@@ -2208,7 +2311,7 @@ func TestCookieScopeMatchingKeepsHostOnlyAndParentDomainDistinct(t *testing.T) {
 	}
 }
 
-func TestDropAmbiguousPersistedCookiesDeduplicatesEquivalentRecords(t *testing.T) {
+func TestDropAmbiguousPersistedCookiesRejectsEquivalentRecordsWithDifferentScopeProvenance(t *testing.T) {
 	origin, _ := url.Parse("https://appstoreconnect.apple.com/")
 	now := time.Now().UTC()
 	hostOnly := pCookie{Name: "token", Value: "same", Path: "/olympus", Expires: now.Add(time.Hour)}
@@ -2218,8 +2321,8 @@ func TestDropAmbiguousPersistedCookiesDeduplicatesEquivalentRecords(t *testing.T
 		hostOnly,
 		narrowCookieDomainForOrigin(origin, parent),
 	})
-	if len(got) != 1 || !samePersistedCookieRecord(got[0], hostOnly) {
-		t.Fatalf("equivalent narrowed aliases = %#v, want one record", got)
+	if len(got) != 0 {
+		t.Fatalf("equivalent narrowed aliases = %#v, want differing RFC scopes rejected", got)
 	}
 }
 
