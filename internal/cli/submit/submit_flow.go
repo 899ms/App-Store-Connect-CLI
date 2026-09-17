@@ -208,13 +208,26 @@ func SubmitResolvedVersion(ctx context.Context, client *asc.Client, opts SubmitR
 		}
 	}
 
+	var (
+		preparedSubmission submitCreateReviewSubmissionPreparation
+		err                error
+	)
+	if !opts.DryRun {
+		preparationCtx, preparationCancel := submitResolvedVersionPhaseContext(ctx, opts.RequestTimeout)
+		preparedSubmission, err = prepareReviewSubmissionForCreate(preparationCtx, client, appID, platform, versionID, emit)
+		preparationCancel()
+		if err != nil {
+			return result, fmt.Errorf("submit review: prepare review submission: %w", err)
+		}
+	}
+
 	if opts.EnsureBuildAttached {
 		attachmentCtx, attachmentCancel := submitResolvedVersionPhaseContext(ctx, opts.RequestTimeout)
-		attachment, err := EnsureBuildAttached(attachmentCtx, client, versionID, opts.BuildID, opts.DryRun)
+		attachment, attachmentErr := EnsureBuildAttached(attachmentCtx, client, versionID, opts.BuildID, opts.DryRun)
 		attachmentCancel()
 		result.BuildAttachment = &attachment
-		if err != nil {
-			return result, err
+		if attachmentErr != nil {
+			return result, attachmentErr
 		}
 	}
 
@@ -223,16 +236,11 @@ func SubmitResolvedVersion(ctx context.Context, client *asc.Client, opts SubmitR
 		return result, nil
 	}
 
-	preparationCtx, preparationCancel := submitResolvedVersionPhaseContext(ctx, opts.RequestTimeout)
-	preparedSubmission := prepareReviewSubmissionForCreate(preparationCtx, client, appID, platform, versionID, emit)
-	preparationCancel()
-
 	submitCtx, submitCancel := submitResolvedVersionPhaseContext(ctx, opts.RequestTimeout)
 	defer submitCancel()
 
 	submissionIDToSubmit := strings.TrimSpace(preparedSubmission.reuseSubmissionID)
 	createdSubmissionID := ""
-	var err error
 	if submissionIDToSubmit == "" {
 		reviewSubmission, createErr := client.CreateReviewSubmission(submitCtx, appID, asc.Platform(platform))
 		if createErr != nil {
