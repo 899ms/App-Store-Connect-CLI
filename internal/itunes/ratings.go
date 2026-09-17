@@ -183,15 +183,27 @@ func (c *Client) GetAllRatings(
 			ratings, err := c.GetRatings(countryCtx, appID, country)
 			countryErr := countryCtx.Err()
 			countryCancel()
-			if err != nil && (errors.Is(err, context.DeadlineExceeded) || errors.Is(countryErr, context.DeadlineExceeded)) {
-				deadlineOnce.Do(func() {
-					countryDeadlineErr = context.DeadlineExceeded
-					cancelWork()
-				})
-				return
-			}
 			if err != nil {
+				// A preserved retryable storefront status may arrive after the child
+				// deadline; keep it instead of misclassifying it as a deadline failure.
 				var statusError interface{ HTTPStatusCode() int }
+				if errors.As(err, &statusError) && isRetryablePublicStatus(statusError.HTTPStatusCode()) {
+					mu.Lock()
+					httpFailureCount++
+					status := statusError.HTTPStatusCode()
+					if _, exists := httpFailures[status]; !exists {
+						httpFailures[status] = err
+					}
+					mu.Unlock()
+					return
+				}
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(countryErr, context.DeadlineExceeded) {
+					deadlineOnce.Do(func() {
+						countryDeadlineErr = context.DeadlineExceeded
+						cancelWork()
+					})
+					return
+				}
 				if errors.As(err, &statusError) {
 					mu.Lock()
 					httpFailureCount++
