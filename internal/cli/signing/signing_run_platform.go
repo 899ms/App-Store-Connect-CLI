@@ -952,7 +952,7 @@ func removeSigningRunStagedProfile(path string, device, inode uint64, digest str
 }
 
 func removeSigningRunStagedProfileEntry(installRoot rootfs.Root, name string, device, inode uint64, digest string) error {
-	identity, err := installRoot.CaptureFile(name)
+	identity, err := installRoot.CaptureFileLimited(name, signingRunInputLimit)
 	if err != nil {
 		return err
 	}

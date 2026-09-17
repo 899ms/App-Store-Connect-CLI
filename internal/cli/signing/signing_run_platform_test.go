@@ -840,6 +840,30 @@ func TestRemoveSigningRunStagedProfileQuarantinesBeforeRemoval(t *testing.T) {
 	}
 }
 
+func TestRemoveSigningRunStagedProfileSupportsFullInputLimit(t *testing.T) {
+	installDir := t.TempDir()
+	path := filepath.Join(installDir, ".asc-signing-run-profile-large")
+	data := bytes.Repeat([]byte("p"), (8<<20)+1)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write staged profile: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat staged profile: %v", err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatal("staged profile has no platform file identity")
+	}
+	digest := sha256.Sum256(data)
+	if err := removeSigningRunStagedProfile(path, uint64(stat.Dev), uint64(stat.Ino), hex.EncodeToString(digest[:])); err != nil {
+		t.Fatalf("removeSigningRunStagedProfile() error: %v", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("staged profile stat error = %v, want not exist", err)
+	}
+}
+
 func TestRemoveSigningRunStagedProfilePreservesSameInodeReplacement(t *testing.T) {
 	installDir := t.TempDir()
 	path := filepath.Join(installDir, ".asc-signing-run-profile-staged")

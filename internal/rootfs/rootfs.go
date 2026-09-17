@@ -73,10 +73,11 @@ var (
 )
 
 const (
-	temporaryFilePattern        = ".asc-tmp-*"
-	backupFilePattern           = ".asc-tmp-backup-*"
-	rollbackFilePattern         = ".asc-tmp-rollback-*"
-	fileIdentityDataLimit int64 = 8 << 20
+	temporaryFilePattern               = ".asc-tmp-*"
+	backupFilePattern                  = ".asc-tmp-backup-*"
+	rollbackFilePattern                = ".asc-tmp-rollback-*"
+	fileIdentityDefaultDataLimit int64 = 8 << 20
+	fileIdentityDataLimit        int64 = 16 << 20
 )
 
 // Root is a trusted directory anchor for rooted filesystem operations.
@@ -1310,13 +1311,14 @@ func (r Root) chmodFile(name string, expected os.FileInfo, mode os.FileMode) err
 // Root.Close. Callers must use the token for subsequent identity-checked
 // mutations instead of retaining an os.FileInfo snapshot returned by os.Stat.
 func (r Root) CaptureFile(name string) (*FileIdentity, error) {
-	return r.CaptureFileLimited(name, fileIdentityDataLimit)
+	return r.CaptureFileLimited(name, fileIdentityDefaultDataLimit)
 }
 
 // CaptureFileLimited is CaptureFile with an explicit maximum byte count for
 // the retained data snapshot. It refuses, rather than truncates, a regular
-// file larger than limit. The limit cannot exceed the identity memory bound so
-// every retained token remains bounded until Root.Close.
+// file larger than limit. The explicit limit cannot exceed the identity memory
+// bound, and callers should request only the smallest bound their input
+// contract requires so every retained token remains bounded until Root.Close.
 func (r Root) CaptureFileLimited(name string, limit int64) (*FileIdentity, error) {
 	if err := r.selectedIdentity.begin(); err != nil {
 		return nil, err
