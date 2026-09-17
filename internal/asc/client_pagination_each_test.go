@@ -64,3 +64,51 @@ func TestPaginateEach_ConsumerErrorIncludesPage(t *testing.T) {
 		t.Fatalf("expected page 2 context in error, got %q", got)
 	}
 }
+
+func TestPaginateEach_NonPointerResponse(t *testing.T) {
+	firstPage := valuePaginatedResponse{links: Links{Next: "next"}, data: []string{"first"}}
+	consumed := 0
+
+	err := PaginateEach(context.Background(), firstPage, func(context.Context, string) (PaginatedResponse, error) {
+		return valuePaginatedResponse{data: []string{"second"}}, nil
+	}, func(PaginatedResponse) error {
+		consumed++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("PaginateEach() error: %v", err)
+	}
+	if consumed != 2 {
+		t.Fatalf("consumed %d pages, want 2", consumed)
+	}
+}
+
+func TestPaginateEach_NilFetcherWithNextLink(t *testing.T) {
+	firstPage := makeAppsPage(1, 1, 2)
+	consumed := 0
+
+	err := PaginateEach(context.Background(), firstPage, nil, func(PaginatedResponse) error {
+		consumed++
+		return nil
+	})
+	if !errors.Is(err, ErrMissingPaginationFetcher) {
+		t.Fatalf("expected ErrMissingPaginationFetcher, got %v", err)
+	}
+	if consumed != 0 {
+		t.Fatalf("consumed %d pages before rejecting missing fetcher, want 0", consumed)
+	}
+}
+
+func TestPaginateEach_TypedNilNextPage(t *testing.T) {
+	firstPage := makeAppsPage(1, 1, 2)
+
+	err := PaginateEach(context.Background(), firstPage, func(context.Context, string) (PaginatedResponse, error) {
+		var nextPage *AppsResponse
+		return nextPage, nil
+	}, func(PaginatedResponse) error {
+		return nil
+	})
+	if !errors.Is(err, ErrNilPaginationPage) {
+		t.Fatalf("expected ErrNilPaginationPage, got %v", err)
+	}
+}
