@@ -30,7 +30,7 @@ require (
 	golang.org/x/mod v0.41.0
 	golang.org/x/sys v0.48.0
 	golang.org/x/term v0.46.0
-	golang.org/x/text v0.41.0
+	golang.org/x/text v0.42.0
 	gopkg.in/yaml.v3 v3.0.1
 	howett.net/plist v1.0.2-0.20250314012144-ee69052608d9
 	software.sslmate.com/src/go-pkcs12 v0.7.3
