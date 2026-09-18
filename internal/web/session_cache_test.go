@@ -1029,7 +1029,7 @@ func TestSessionCookieTrackingJarScopesUpdatesByOriginAndPath(t *testing.T) {
 	appURL, _ := url.Parse("https://appstoreconnect.apple.com/olympus/v1/session")
 	appRoot, _ := url.Parse("https://appstoreconnect.apple.com/")
 	developerRoot, _ := url.Parse("https://developer.apple.com/")
-	oldExpiry := time.Date(2026, time.September, 18, 3, 0, 0, 0, time.UTC)
+	oldExpiry := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
 	appExpiry := oldExpiry.Add(time.Hour)
 	pathExpiry := oldExpiry.Add(2 * time.Hour)
 	for _, target := range []*url.URL{appRoot, developerRoot} {
@@ -1147,7 +1147,7 @@ func TestSerializeCookieJarDropsHostOnlyDomainScopeAmbiguity(t *testing.T) {
 		t.Fatalf("cookiejar.New() error: %v", err)
 	}
 	target, _ := url.Parse("https://appstoreconnect.apple.com/")
-	oldExpiry := time.Date(2026, time.September, 18, 3, 0, 0, 0, time.UTC)
+	oldExpiry := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
 	jar.SetCookies(target, []*http.Cookie{
 		{Name: "token", Value: "host", Path: "/", Expires: oldExpiry},
 		{Name: "token", Value: "domain", Domain: ".apple.com", Path: "/", Expires: oldExpiry},
@@ -1172,7 +1172,7 @@ func TestPersistSessionKeepsSessionOnlyUpdateNonPersistable(t *testing.T) {
 		t.Fatalf("cookiejar.New() error: %v", err)
 	}
 	target, _ := url.Parse("https://appstoreconnect.apple.com/")
-	oldExpiry := time.Date(2026, time.September, 18, 3, 0, 0, 0, time.UTC)
+	oldExpiry := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
 	firstExpiry := oldExpiry.Add(time.Hour)
 	jar.SetCookies(target, []*http.Cookie{{Name: "token", Value: "same", Path: "/", Expires: oldExpiry}})
 	tracker := newSessionCookieTrackingJar(jar)
@@ -1223,7 +1223,7 @@ func TestPersistSessionDoesNotAdvanceBaselineWhenPersistenceFails(t *testing.T) 
 		t.Fatalf("cookiejar.New() error: %v", err)
 	}
 	target, _ := url.Parse("https://appstoreconnect.apple.com/")
-	oldExpiry := time.Date(2026, time.September, 18, 3, 0, 0, 0, time.UTC)
+	oldExpiry := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
 	newExpiry := oldExpiry.Add(time.Hour)
 	jar.SetCookies(target, []*http.Cookie{{Name: "token", Value: "same", Path: "/", Expires: oldExpiry}})
 	tracker := newSessionCookieTrackingJar(jar)
