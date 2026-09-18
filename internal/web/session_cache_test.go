@@ -1073,7 +1073,7 @@ func TestPreserveCachedCookieDeadlineDropsSessionOnlySameValueUpdate(t *testing.
 		t.Fatalf("cookiejar.New() error: %v", err)
 	}
 	target, _ := url.Parse("https://appstoreconnect.apple.com/")
-	oldExpiry := time.Date(2026, time.September, 18, 3, 0, 0, 0, time.UTC)
+	oldExpiry := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
 	jar.SetCookies(target, []*http.Cookie{{Name: "token", Value: "same", Path: "/", Expires: oldExpiry}})
 	tracker := newSessionCookieTrackingJar(jar)
 	tracker.SetCookies(target, []*http.Cookie{{Name: "token", Value: "same", Path: "/"}})
@@ -1082,7 +1082,7 @@ func TestPreserveCachedCookieDeadlineDropsSessionOnlySameValueUpdate(t *testing.
 		t.Fatalf("serializeWithUpdates() error: %v", err)
 	}
 	cached := persistedSession{
-		UpdatedAt: time.Date(2026, time.September, 17, 3, 0, 0, 0, time.UTC),
+		UpdatedAt: oldExpiry.Add(-24 * time.Hour),
 		Cookies:   map[string][]pCookie{target.String(): {{Name: "token", Value: "same", Expires: oldExpiry}}},
 	}
 	preserveCachedCookieDeadlines(&serialized, &cached, updates, oldExpiry.Add(-time.Hour))
@@ -1097,7 +1097,7 @@ func TestPreserveCachedCookieDeadlineUsesLatestPersistentUpdate(t *testing.T) {
 		t.Fatalf("cookiejar.New() error: %v", err)
 	}
 	target, _ := url.Parse("https://appstoreconnect.apple.com/")
-	oldExpiry := time.Date(2026, time.September, 18, 3, 0, 0, 0, time.UTC)
+	oldExpiry := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
 	firstExpiry := oldExpiry.Add(time.Hour)
 	latestExpiry := oldExpiry.Add(2 * time.Hour)
 	jar.SetCookies(target, []*http.Cookie{{Name: "token", Value: "same", Path: "/", Expires: oldExpiry}})
@@ -1111,7 +1111,7 @@ func TestPreserveCachedCookieDeadlineUsesLatestPersistentUpdate(t *testing.T) {
 		t.Fatalf("serializeWithUpdates() error: %v", err)
 	}
 	cached := persistedSession{
-		UpdatedAt: time.Date(2026, time.September, 17, 3, 0, 0, 0, time.UTC),
+		UpdatedAt: oldExpiry.Add(-24 * time.Hour),
 		Cookies:   map[string][]pCookie{target.String(): {{Name: "token", Value: "same", Expires: oldExpiry}}},
 	}
 	preserveCachedCookieDeadlines(&serialized, &cached, updates, oldExpiry.Add(-time.Hour))
