@@ -1029,7 +1029,7 @@ func TestSessionCookieTrackingJarScopesUpdatesByOriginAndPath(t *testing.T) {
 	appURL, _ := url.Parse("https://appstoreconnect.apple.com/olympus/v1/session")
 	appRoot, _ := url.Parse("https://appstoreconnect.apple.com/")
 	developerRoot, _ := url.Parse("https://developer.apple.com/")
-	oldExpiry := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
+	oldExpiry := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second)
 	appExpiry := oldExpiry.Add(time.Hour)
 	pathExpiry := oldExpiry.Add(2 * time.Hour)
 	for _, target := range []*url.URL{appRoot, developerRoot} {
@@ -1073,7 +1073,7 @@ func TestPreserveCachedCookieDeadlineDropsSessionOnlySameValueUpdate(t *testing.
 		t.Fatalf("cookiejar.New() error: %v", err)
 	}
 	target, _ := url.Parse("https://appstoreconnect.apple.com/")
-	oldExpiry := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
+	oldExpiry := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second)
 	jar.SetCookies(target, []*http.Cookie{{Name: "token", Value: "same", Path: "/", Expires: oldExpiry}})
 	tracker := newSessionCookieTrackingJar(jar)
 	tracker.SetCookies(target, []*http.Cookie{{Name: "token", Value: "same", Path: "/"}})
@@ -1097,7 +1097,7 @@ func TestPreserveCachedCookieDeadlineUsesLatestPersistentUpdate(t *testing.T) {
 		t.Fatalf("cookiejar.New() error: %v", err)
 	}
 	target, _ := url.Parse("https://appstoreconnect.apple.com/")
-	oldExpiry := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
+	oldExpiry := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second)
 	firstExpiry := oldExpiry.Add(time.Hour)
 	latestExpiry := oldExpiry.Add(2 * time.Hour)
 	jar.SetCookies(target, []*http.Cookie{{Name: "token", Value: "same", Path: "/", Expires: oldExpiry}})
@@ -1147,7 +1147,7 @@ func TestSerializeCookieJarDropsHostOnlyDomainScopeAmbiguity(t *testing.T) {
 		t.Fatalf("cookiejar.New() error: %v", err)
 	}
 	target, _ := url.Parse("https://appstoreconnect.apple.com/")
-	oldExpiry := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
+	oldExpiry := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second)
 	jar.SetCookies(target, []*http.Cookie{
 		{Name: "token", Value: "host", Path: "/", Expires: oldExpiry},
 		{Name: "token", Value: "domain", Domain: ".apple.com", Path: "/", Expires: oldExpiry},
@@ -1172,7 +1172,7 @@ func TestPersistSessionKeepsSessionOnlyUpdateNonPersistable(t *testing.T) {
 		t.Fatalf("cookiejar.New() error: %v", err)
 	}
 	target, _ := url.Parse("https://appstoreconnect.apple.com/")
-	oldExpiry := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
+	oldExpiry := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second)
 	firstExpiry := oldExpiry.Add(time.Hour)
 	jar.SetCookies(target, []*http.Cookie{{Name: "token", Value: "same", Path: "/", Expires: oldExpiry}})
 	tracker := newSessionCookieTrackingJar(jar)
@@ -1223,7 +1223,7 @@ func TestPersistSessionDoesNotAdvanceBaselineWhenPersistenceFails(t *testing.T) 
 		t.Fatalf("cookiejar.New() error: %v", err)
 	}
 	target, _ := url.Parse("https://appstoreconnect.apple.com/")
-	oldExpiry := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
+	oldExpiry := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second)
 	newExpiry := oldExpiry.Add(time.Hour)
 	jar.SetCookies(target, []*http.Cookie{{Name: "token", Value: "same", Path: "/", Expires: oldExpiry}})
 	tracker := newSessionCookieTrackingJar(jar)
