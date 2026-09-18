@@ -195,7 +195,7 @@ Examples:
   asc apps view --id "APP_ID"
   asc apps view --id "APP_ID" --app-info-fields kidsAgeBand --iap-fields versions --subscription-group-fields versions
   asc apps view --id "APP_ID" --output table
-  asc apps view --id "APP_ID" --fields "subscriptionStatusUrl,subscriptionStatusUrlVersion,subscriptionStatusUrlForSandbox,subscriptionStatusUrlVersionForSandbox"`,
+  asc apps view --id "APP_ID" --fields "subscriptionStatusUrl,subscriptionStatusUrlVersion,subscriptionStatusUrlForSandbox,subscriptionStatusUrlVersionForSandbox" --output json`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
