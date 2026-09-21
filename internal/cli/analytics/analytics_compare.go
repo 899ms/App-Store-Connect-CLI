@@ -149,7 +149,7 @@ Examples:
 				return fmt.Errorf("analytics compare: %w", err)
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			requestCtx, cancel := shared.ContextWithUploadTimeout(ctx)
 			defer cancel()
 
 			appResp, err := client.GetApp(requestCtx, resolvedAppID)

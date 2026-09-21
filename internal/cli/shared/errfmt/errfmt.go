@@ -92,7 +92,12 @@ func isUploadTimeoutError(err error) bool {
 	return strings.Contains(msg, "upload failed") ||
 		strings.Contains(msg, "upload operation") ||
 		strings.Contains(msg, "multipart upload") ||
-		strings.Contains(msg, "s3 upload")
+		strings.Contains(msg, "s3 upload") ||
+		strings.Contains(msg, "analytics sales:") ||
+		strings.Contains(msg, "analytics compare:") ||
+		strings.Contains(msg, "failed to download report") ||
+		strings.Contains(msg, "finance reports:") ||
+		strings.Contains(msg, "performance download:")
 }
 
 // containsPrivacyError checks whether the error references app data usage /

@@ -2,6 +2,7 @@ package asc
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -50,8 +51,8 @@ func TestDoStreamNoAuthStillHonorsCallerContext(t *testing.T) {
 	t.Cleanup(cancel)
 
 	_, err := client.doStreamNoAuth(ctx, server.URL, "")
-	if err == nil {
-		t.Fatal("expected caller context to cancel the stream")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("doStreamNoAuth() error = %v, want context deadline exceeded", err)
 	}
 }
 
@@ -67,6 +68,33 @@ func TestDoStreamNoAuthBoundsResponseHeadersByClientTimeout(t *testing.T) {
 	_, err := client.doStreamNoAuth(context.Background(), server.URL, "")
 	if err == nil {
 		t.Fatal("expected the client timeout to bound response headers without a caller deadline")
+	}
+}
+
+func TestDoStreamingRequestClientTimeoutBoundsBodyWithoutEarlierCallerDeadline(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("arti"))
+		w.(http.Flusher).Flush()
+		time.Sleep(300 * time.Millisecond)
+		_, _ = w.Write([]byte("fact"))
+	}))
+	t.Cleanup(server.Close)
+
+	client := &http.Client{Timeout: 40 * time.Millisecond}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, server.URL, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	resp, err := doStreamingRequest(client, req)
+	if err != nil {
+		t.Fatalf("doStreamingRequest() error = %v", err)
+	}
+	defer resp.Body.Close()
+	_, err = io.ReadAll(resp.Body)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("read body error = %v, want context deadline exceeded", err)
 	}
 }
 
@@ -97,6 +125,44 @@ func TestDoStreamingRequestBoundsCustomTransportBeforeHeaders(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed >= 300*time.Millisecond {
 		t.Fatalf("custom transport was not bounded before headers: elapsed = %s", elapsed)
+	}
+}
+
+func TestDoStreamingRequestHeaderTimeoutWrapsDeadlineExceeded(t *testing.T) {
+	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})
+	client := &http.Client{Timeout: 40 * time.Millisecond, Transport: transport}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	t.Cleanup(cancel)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.com/artifact", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	_, err = doStreamingRequest(client, req)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("doStreamingRequest() error = %v, want context deadline exceeded", err)
+	}
+}
+
+func TestDoStreamingRequestCallerCancellationWins(t *testing.T) {
+	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})
+	client := &http.Client{Timeout: time.Second, Transport: transport}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.com/artifact", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	_, err = doStreamingRequest(client, req)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("doStreamingRequest() error = %v, want context canceled", err)
 	}
 }
 

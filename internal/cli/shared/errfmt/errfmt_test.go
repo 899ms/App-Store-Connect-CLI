@@ -72,6 +72,24 @@ func TestClassify_TimeoutBuildsUploadsListKeepsRequestHint(t *testing.T) {
 	}
 }
 
+func TestClassify_TimeoutStreamingDownloads(t *testing.T) {
+	tests := []string{
+		"analytics sales: failed to download report: context deadline exceeded",
+		"analytics compare: baseline period: download report 2026-01: context deadline exceeded",
+		"failed to download report: context deadline exceeded",
+		"finance reports: failed to download report: context deadline exceeded",
+		"performance download: context deadline exceeded",
+	}
+	for _, message := range tests {
+		t.Run(message, func(t *testing.T) {
+			ce := Classify(fmt.Errorf("%s: %w", message, context.DeadlineExceeded))
+			if ce.Hint != uploadTimeoutHint {
+				t.Fatalf("expected upload timeout hint, got %q", ce.Hint)
+			}
+		})
+	}
+}
+
 func TestClassify_ServerErrorSuggestsSystemStatus(t *testing.T) {
 	err := fmt.Errorf("apps list: %w", &asc.APIError{Code: "INTERNAL_ERROR", Title: "Unavailable", StatusCode: 503})
 
