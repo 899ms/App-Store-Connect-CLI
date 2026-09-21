@@ -165,6 +165,33 @@ func TestListDeveloperAppGroupsPaginates(t *testing.T) {
 	}
 }
 
+func TestListDeveloperAppGroupsPaginateRejectsMissingTotalRecords(t *testing.T) {
+	requests := 0
+	client := newDeveloperAppGroupsTestClient(t, func(requestNumber int, request *http.Request) (*http.Response, error) {
+		requests = requestNumber
+		switch requestNumber {
+		case 1:
+			return assertDeveloperPortalBootstrap(t, request), nil
+		case 2:
+			return developerPortalTestResponse(http.StatusOK, `{
+				"resultCode":0,"pageNumber":1,"pageSize":500,
+				"applicationGroupList":[{"name":"Shared","identifier":"group.com.example.shared","applicationGroup":"GROUP1"}]
+			}`, nil), nil
+		default:
+			t.Fatalf("unexpected request %d", requestNumber)
+			return nil, nil
+		}
+	})
+
+	_, err := client.ListDeveloperAppGroups(context.Background(), DeveloperAppGroupsListOptions{Paginate: true})
+	if err == nil || !strings.Contains(err.Error(), "no totalRecords count") {
+		t.Fatalf("ListDeveloperAppGroups() error = %v, want missing-total rejection", err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want no page after malformed first page", requests)
+	}
+}
+
 func TestListDeveloperAppGroupsStopsAfterFirstPageByDefault(t *testing.T) {
 	client := newDeveloperAppGroupsTestClient(t, func(requestNumber int, request *http.Request) (*http.Response, error) {
 		switch requestNumber {

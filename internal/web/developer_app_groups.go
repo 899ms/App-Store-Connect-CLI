@@ -300,7 +300,7 @@ func (c *Client) ListDeveloperAppGroups(ctx context.Context, options DeveloperAp
 	if teamID == "" {
 		return nil, fmt.Errorf("%w; %s", ErrDeveloperPortalTeamNotSelected, developerPortalAuthHint)
 	}
-	result, err := c.listDeveloperAppGroupPages(ctx, teamID, options.Paginate, false)
+	result, err := c.listDeveloperAppGroupPages(ctx, teamID, options.Paginate, options.Paginate)
 	if err != nil {
 		return nil, developerAppGroupResponseError(err)
 	}
@@ -311,8 +311,9 @@ func (c *Client) ListDeveloperAppGroups(ctx context.Context, options DeveloperAp
 // set, a success envelope whose applicationGroupList is absent or null, or whose
 // totalRecords or pageNumber is absent, null, or inconsistent with the request
 // and the records returned, is an error instead of a short team; the delete path
-// needs that to stay fail-closed while the list command keeps tolerating a
-// sparse envelope.
+// needs that to stay fail-closed while the default one-page list command keeps
+// tolerating a sparse envelope. Explicit pagination requires complete page
+// metadata so it cannot report a truncated team as complete.
 func (c *Client) listDeveloperAppGroupPages(ctx context.Context, teamID string, paginate bool, requireCollection bool) (*DeveloperAppGroupsListResult, error) {
 	result := &DeveloperAppGroupsListResult{Data: []DeveloperAppGroup{}}
 	seenGroupIDs := make(map[string]struct{})
