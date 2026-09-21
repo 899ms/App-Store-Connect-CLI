@@ -216,7 +216,7 @@ func findPreReleaseVersionIDForBuildWait(ctx context.Context, client *asc.Client
 	}
 
 	for _, variant := range variants {
-		ids, _, err := findPreReleaseVersionIDsForVersions(ctx, client, appID, []string{variant}, platform)
+		ids, _, err := findPreReleaseVersionIDsForVersions(ctx, client, appID, []string{variant}, platform, 0)
 		if err != nil {
 			return "", err
 		}
