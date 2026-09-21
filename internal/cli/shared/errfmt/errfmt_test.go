@@ -74,10 +74,10 @@ func TestClassify_TimeoutBuildsUploadsListKeepsRequestHint(t *testing.T) {
 
 func TestClassify_TimeoutStreamingDownloads(t *testing.T) {
 	tests := []string{
-		"analytics sales: failed to download report: context deadline exceeded",
-		"analytics compare: baseline period: download report 2026-01: context deadline exceeded",
-		"failed to download report: context deadline exceeded",
-		"finance reports: failed to download report: context deadline exceeded",
+		"analytics sales: failed to write report: context deadline exceeded",
+		"analytics compare: baseline period: parse report 2026-01: context deadline exceeded",
+		"failed to write report: context deadline exceeded",
+		"finance reports: failed to write report: context deadline exceeded",
 		"performance download: context deadline exceeded",
 	}
 	for _, message := range tests {
@@ -85,6 +85,23 @@ func TestClassify_TimeoutStreamingDownloads(t *testing.T) {
 			ce := Classify(fmt.Errorf("%s: %w", message, context.DeadlineExceeded))
 			if ce.Hint != uploadTimeoutHint {
 				t.Fatalf("expected upload timeout hint, got %q", ce.Hint)
+			}
+		})
+	}
+}
+
+func TestClassify_StreamingHeaderTimeoutKeepsRequestHint(t *testing.T) {
+	tests := []string{
+		"analytics sales: failed to download report: request failed: timed out after 30s awaiting response headers",
+		"analytics compare: Get https://api.appstoreconnect.apple.com/v1/apps/123: context deadline exceeded (Client.Timeout exceeded while awaiting headers)",
+		"finance reports: failed to download report: timed out after 30s awaiting response headers",
+		"performance download: timed out after 30s awaiting response headers",
+	}
+	for _, message := range tests {
+		t.Run(message, func(t *testing.T) {
+			ce := Classify(fmt.Errorf("%s: %w", message, context.DeadlineExceeded))
+			if ce.Hint != requestTimeoutHint {
+				t.Fatalf("expected request timeout hint, got %q", ce.Hint)
 			}
 		})
 	}
