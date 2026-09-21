@@ -256,6 +256,89 @@ func TestCollectAnalyticsMetricsFiltersDatesAndFollowsNextPage(t *testing.T) {
 	}
 }
 
+func TestCollectAnalyticsMetricsFollowsRequestAndReportPages(t *testing.T) {
+	thisWeek := weekWindowFromStart(time.Date(2026, 2, 16, 0, 0, 0, 0, time.UTC))
+	previousWeek := weekWindowFromStart(time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC))
+
+	var requestPages, reportPages int
+	client := newInsightsTestClient(t, func(req *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(req.URL.Path, "/analyticsReportRequests"):
+			requestPages++
+			if req.URL.Query().Get("cursor") == "REQUESTS2" {
+				return jsonInsightsResponse(req, `{"data":[{"type":"analyticsReportRequests","id":"request-2","attributes":{}}],"links":{}}`), nil
+			}
+			if got := req.URL.Query().Get("limit"); got != "200" {
+				t.Errorf("requests limit = %q, want 200", got)
+			}
+			return jsonInsightsResponse(req, `{
+				"data":[{"type":"analyticsReportRequests","id":"request-1","attributes":{}}],
+				"links":{"next":"https://api.appstoreconnect.apple.com/v1/apps/123/analyticsReportRequests?cursor=REQUESTS2"}
+			}`), nil
+		case strings.HasSuffix(req.URL.Path, "/request-1/reports"):
+			reportPages++
+			if req.URL.Query().Get("cursor") == "REPORTS2" {
+				return jsonInsightsResponse(req, `{
+					"data":[{"type":"analyticsReports","id":"report-2","attributes":{}}],
+					"links":{}
+				}`), nil
+			}
+			if got := req.URL.Query().Get("limit"); got != "200" {
+				t.Errorf("reports limit = %q, want 200", got)
+			}
+			return jsonInsightsResponse(req, `{
+				"data":[{"type":"analyticsReports","id":"report-1","attributes":{}}],
+				"links":{"next":"https://api.appstoreconnect.apple.com/v1/analyticsReportRequests/request-1/reports?cursor=REPORTS2"}
+			}`), nil
+		case strings.HasSuffix(req.URL.Path, "/request-2/reports"):
+			return jsonInsightsResponse(req, `{"data":[],"links":{}}`), nil
+		case strings.HasSuffix(req.URL.Path, "/report-1/instances"):
+			return jsonInsightsResponse(req, `{
+				"data":[{"type":"analyticsReportInstances","id":"instance-1","attributes":{"granularity":"DAILY","processingDate":"2026-02-17"}}],
+				"links":{}
+			}`), nil
+		case strings.HasSuffix(req.URL.Path, "/report-2/instances"):
+			return jsonInsightsResponse(req, `{
+				"data":[{"type":"analyticsReportInstances","id":"instance-2","attributes":{"granularity":"DAILY","processingDate":"2026-02-10"}}],
+				"links":{}
+			}`), nil
+		default:
+			t.Errorf("unexpected request path %q", req.URL.Path)
+			return jsonInsightsResponse(req, `{"data":[],"links":{}}`), nil
+		}
+	})
+
+	metrics, requestCount, err := collectAnalyticsMetrics(context.Background(), client, "123", thisWeek, previousWeek)
+	if err != nil {
+		t.Fatalf("collectAnalyticsMetrics error: %v", err)
+	}
+	if requestPages != 2 {
+		t.Fatalf("request page requests = %d, want 2", requestPages)
+	}
+	if reportPages != 2 {
+		t.Fatalf("report page requests = %d, want 2", reportPages)
+	}
+	if requestCount != 2 {
+		t.Fatalf("active request count = %d, want 2", requestCount)
+	}
+
+	reportsMetric := findWeeklyMetric(t, metrics, "reports_available")
+	if reportsMetric.ThisWeek == nil || *reportsMetric.ThisWeek != 1 {
+		t.Fatalf("unexpected this-week reports: %+v", reportsMetric)
+	}
+	if reportsMetric.LastWeek == nil || *reportsMetric.LastWeek != 1 {
+		t.Fatalf("unexpected last-week reports from second page: %+v", reportsMetric)
+	}
+
+	instancesMetric := findWeeklyMetric(t, metrics, "instances_available")
+	if instancesMetric.ThisWeek == nil || *instancesMetric.ThisWeek != 1 {
+		t.Fatalf("unexpected this-week instances: %+v", instancesMetric)
+	}
+	if instancesMetric.LastWeek == nil || *instancesMetric.LastWeek != 1 {
+		t.Fatalf("unexpected last-week instances from second-page report: %+v", instancesMetric)
+	}
+}
+
 func TestFetchAnalyticsReportInstancesRejectsEquivalentRepeatedNext(t *testing.T) {
 	const instancesPath = "/v1/analyticsReports/report-1/instances"
 

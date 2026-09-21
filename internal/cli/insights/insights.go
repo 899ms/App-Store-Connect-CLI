@@ -764,11 +764,7 @@ func isRenewalSubscriptionState(value string) bool {
 }
 
 func collectAnalyticsMetrics(ctx context.Context, client *asc.Client, appID string, thisWeek, previousWeek reportWeekWindow) ([]weeklyMetric, int, error) {
-	requestsResp, err := client.GetAnalyticsReportRequests(
-		ctx,
-		appID,
-		asc.WithAnalyticsReportRequestsLimit(200),
-	)
+	requestsResp, err := fetchAllAnalyticsReportRequests(ctx, client, appID)
 	if err != nil {
 		if isLikelyForbidden(err) {
 			return analyticsUnavailableMetrics("analytics source is not permitted for the current API key"), 0, nil
@@ -800,11 +796,7 @@ func collectAnalyticsMetrics(ctx context.Context, client *asc.Client, appID stri
 	processingDates := weekWindowProcessingDates(thisWeek, previousWeek)
 
 	for _, request := range activeRequests {
-		reportsResp, reportsErr := client.GetAnalyticsReports(
-			ctx,
-			request.ID,
-			asc.WithAnalyticsReportsLimit(200),
-		)
+		reportsResp, reportsErr := fetchAllAnalyticsReports(ctx, client, request.ID)
 		if reportsErr != nil {
 			if isLikelyForbidden(reportsErr) {
 				return analyticsUnavailableMetrics("analytics report metadata endpoints are not permitted for the current API key"), requestCount, nil
@@ -857,6 +849,44 @@ func collectAnalyticsMetrics(ctx context.Context, client *asc.Client, appID stri
 		unavailableMetric("business_conversion_rate", "percent", "not derivable from analytics metadata alone"),
 	}
 	return metrics, requestCount, nil
+}
+
+func fetchAllAnalyticsReportRequests(ctx context.Context, client *asc.Client, appID string) (*asc.AnalyticsReportRequestsResponse, error) {
+	first, err := client.GetAnalyticsReportRequests(ctx, appID, asc.WithAnalyticsReportRequestsLimit(200))
+	if err != nil {
+		return nil, err
+	}
+
+	paginated, err := asc.PaginateAll(ctx, first, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
+		return client.GetAnalyticsReportRequests(ctx, appID, asc.WithAnalyticsReportRequestsNextURL(nextURL))
+	})
+	if err != nil {
+		return nil, err
+	}
+	requests, ok := paginated.(*asc.AnalyticsReportRequestsResponse)
+	if !ok || requests == nil {
+		return nil, fmt.Errorf("insights: unexpected analytics report requests pagination response %T", paginated)
+	}
+	return requests, nil
+}
+
+func fetchAllAnalyticsReports(ctx context.Context, client *asc.Client, requestID string) (*asc.AnalyticsReportsResponse, error) {
+	first, err := client.GetAnalyticsReports(ctx, requestID, asc.WithAnalyticsReportsLimit(200))
+	if err != nil {
+		return nil, err
+	}
+
+	paginated, err := asc.PaginateAll(ctx, first, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
+		return client.GetAnalyticsReports(ctx, requestID, asc.WithAnalyticsReportsNextURL(nextURL))
+	})
+	if err != nil {
+		return nil, err
+	}
+	reports, ok := paginated.(*asc.AnalyticsReportsResponse)
+	if !ok || reports == nil {
+		return nil, fmt.Errorf("insights: unexpected analytics reports pagination response %T", paginated)
+	}
+	return reports, nil
 }
 
 // weekWindowProcessingDates lists every processing date covered by the given
