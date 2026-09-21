@@ -902,10 +902,11 @@ func fetchAnalyticsReportInstances(
 			pageOpts = append(pageOpts, opts...)
 			resp, err = client.GetAnalyticsReportInstances(ctx, reportID, pageOpts...)
 		} else {
-			if _, repeated := seen[next]; repeated {
+			identity := asc.PaginationURLIdentity(next)
+			if _, repeated := seen[identity]; repeated {
 				return nil, fmt.Errorf("insights: detected repeated analytics report instance pagination URL")
 			}
-			seen[next] = struct{}{}
+			seen[identity] = struct{}{}
 			resp, err = client.GetAnalyticsReportInstances(ctx, reportID, asc.WithAnalyticsReportInstancesNextURL(next))
 		}
 		if err != nil {

@@ -256,6 +256,65 @@ func TestCollectAnalyticsMetricsFiltersDatesAndFollowsNextPage(t *testing.T) {
 	}
 }
 
+func TestFetchAnalyticsReportInstancesRejectsEquivalentRepeatedNext(t *testing.T) {
+	const instancesPath = "/v1/analyticsReports/report-1/instances"
+
+	tests := []struct {
+		name      string
+		firstNext string
+		pageNext  string
+	}{
+		{
+			name:      "whitespace",
+			firstNext: instancesPath + "?cursor=abc",
+			pageNext:  "  " + instancesPath + "?cursor=abc  ",
+		},
+		{
+			name:      "relative and same-host absolute",
+			firstNext: instancesPath + "?cursor=abc",
+			pageNext:  asc.BaseURL + instancesPath + "?cursor=abc",
+		},
+		{
+			name:      "reordered query parameters",
+			firstNext: instancesPath + "?cursor=abc&limit=200",
+			pageNext:  instancesPath + "?limit=200&cursor=abc",
+		},
+		{
+			name:      "combined absolute whitespace and reordered query parameters",
+			firstNext: instancesPath + "?cursor=abc&limit=200",
+			pageNext:  " " + asc.BaseURL + instancesPath + "?limit=200&cursor=abc ",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			instancePages := 0
+			client := newInsightsTestClient(t, func(req *http.Request) (*http.Response, error) {
+				if req.URL.Path != instancesPath {
+					t.Errorf("request path = %q, want %q", req.URL.Path, instancesPath)
+				}
+				instancePages++
+				switch instancePages {
+				case 1:
+					return jsonInsightsResponse(req, `{"data":[{"type":"analyticsReportInstances","id":"instance-1"}],"links":{"next":"`+tt.firstNext+`"}}`), nil
+				case 2:
+					return jsonInsightsResponse(req, `{"data":[{"type":"analyticsReportInstances","id":"instance-2"}],"links":{"next":"`+tt.pageNext+`"}}`), nil
+				default:
+					return jsonInsightsResponse(req, `{"data":[],"links":{}}`), nil
+				}
+			})
+
+			_, err := fetchAnalyticsReportInstances(context.Background(), client, "report-1")
+			if err == nil || !strings.Contains(err.Error(), "detected repeated analytics report instance pagination URL") {
+				t.Fatalf("fetchAnalyticsReportInstances() error = %v, want repeated-pagination error", err)
+			}
+			if instancePages != 2 {
+				t.Fatalf("instance page requests = %d, want 2 without a third fetch", instancePages)
+			}
+		})
+	}
+}
+
 func findWeeklyMetric(t *testing.T, metrics []weeklyMetric, name string) weeklyMetric {
 	t.Helper()
 
