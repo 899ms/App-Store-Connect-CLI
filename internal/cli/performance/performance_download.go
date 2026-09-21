@@ -93,7 +93,7 @@ Examples:
 				return fmt.Errorf("performance download: %w", err)
 			}
 
-			requestCtx, cancel := shared.ContextWithUploadTimeout(ctx)
+			requestCtx, cancel := shared.ContextWithTimeout(ctx)
 			defer cancel()
 
 			switch {

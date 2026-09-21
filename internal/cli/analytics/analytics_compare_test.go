@@ -121,21 +121,6 @@ func TestAnalyticsCompareValidationErrors(t *testing.T) {
 	}
 }
 
-func TestJoinCompareErrorsPreservesTimeoutCause(t *testing.T) {
-	baselineErr := fmt.Errorf("download baseline: %w", context.DeadlineExceeded)
-	comparisonErr := errors.New("comparison unavailable")
-
-	err := fmt.Errorf("analytics compare: %w", joinCompareErrors(baselineErr, comparisonErr))
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("error = %v, want context deadline exceeded in the error chain", err)
-	}
-	for _, want := range []string{"baseline period: download baseline", "comparison period: comparison unavailable"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error = %q, want %q", err, want)
-		}
-	}
-}
-
 func TestGenerateReportDates_Daily(t *testing.T) {
 	dates, err := generateReportDates("2026-01-01", "2026-01-03", asc.SalesReportFrequencyDaily)
 	if err != nil {

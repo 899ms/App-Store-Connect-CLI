@@ -35,7 +35,7 @@ func Classify(err error) ClassifiedError {
 
 	if errors.Is(err, context.DeadlineExceeded) {
 		hint := requestTimeoutHint
-		if isUploadTimeoutError(err) && !isResponseHeaderTimeoutError(err) {
+		if isUploadTimeoutError(err) {
 			hint = uploadTimeoutHint
 		}
 		return ClassifiedError{
@@ -92,19 +92,7 @@ func isUploadTimeoutError(err error) bool {
 	return strings.Contains(msg, "upload failed") ||
 		strings.Contains(msg, "upload operation") ||
 		strings.Contains(msg, "multipart upload") ||
-		strings.Contains(msg, "s3 upload") ||
-		strings.Contains(msg, "analytics sales:") ||
-		strings.Contains(msg, "analytics compare:") ||
-		strings.Contains(msg, "failed to download report") ||
-		strings.Contains(msg, "failed to write report") ||
-		strings.Contains(msg, "finance reports:") ||
-		strings.Contains(msg, "performance download:")
-}
-
-func isResponseHeaderTimeoutError(err error) bool {
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "awaiting response headers") ||
-		strings.Contains(msg, "awaiting headers")
+		strings.Contains(msg, "s3 upload")
 }
 
 // containsPrivacyError checks whether the error references app data usage /

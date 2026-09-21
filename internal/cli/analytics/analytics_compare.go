@@ -149,7 +149,7 @@ Examples:
 				return fmt.Errorf("analytics compare: %w", err)
 			}
 
-			requestCtx, cancel := shared.ContextWithUploadTimeout(ctx)
+			requestCtx, cancel := shared.ContextWithTimeout(ctx)
 			defer cancel()
 
 			appResp, err := client.GetApp(requestCtx, resolvedAppID)
@@ -173,7 +173,7 @@ Examples:
 			baselineMetrics, baselineCount, baselineErr := fetchAndAggregate(requestCtx, client, resolvedVendor, scope, baselineDates, salesType, subType, freq)
 			compMetrics, compCount, compErr := fetchAndAggregate(requestCtx, client, resolvedVendor, scope, compDates, salesType, subType, freq)
 			if baselineErr != nil || compErr != nil {
-				return fmt.Errorf("analytics compare: %w", joinCompareErrors(baselineErr, compErr))
+				return fmt.Errorf("analytics compare: %s", joinCompareErrors(baselineErr, compErr))
 			}
 
 			resp := &compareResponse{
@@ -282,35 +282,15 @@ func fetchAndAggregate(ctx context.Context, client *asc.Client, vendor string, s
 	return aggregate, found, nil
 }
 
-type comparePeriodErrors struct {
-	baselineErr error
-	compErr     error
-}
-
-func (e comparePeriodErrors) Error() string {
+func joinCompareErrors(baselineErr, compErr error) string {
 	switch {
-	case e.baselineErr != nil && e.compErr != nil:
-		return fmt.Sprintf("baseline period: %v; comparison period: %v", e.baselineErr, e.compErr)
-	case e.baselineErr != nil:
-		return fmt.Sprintf("baseline period: %v", e.baselineErr)
+	case baselineErr != nil && compErr != nil:
+		return fmt.Sprintf("baseline period: %v; comparison period: %v", baselineErr, compErr)
+	case baselineErr != nil:
+		return fmt.Sprintf("baseline period: %v", baselineErr)
 	default:
-		return fmt.Sprintf("comparison period: %v", e.compErr)
+		return fmt.Sprintf("comparison period: %v", compErr)
 	}
-}
-
-func (e comparePeriodErrors) Unwrap() []error {
-	errs := make([]error, 0, 2)
-	if e.baselineErr != nil {
-		errs = append(errs, e.baselineErr)
-	}
-	if e.compErr != nil {
-		errs = append(errs, e.compErr)
-	}
-	return errs
-}
-
-func joinCompareErrors(baselineErr, compErr error) error {
-	return comparePeriodErrors{baselineErr: baselineErr, compErr: compErr}
 }
 
 func summarizeMissingReportDates(dates []string) string {
