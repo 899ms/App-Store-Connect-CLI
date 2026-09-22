@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -276,5 +277,218 @@ func TestWaitForBuildDiscoveryFailsAfterConsecutiveTransientLimit(t *testing.T) 
 	}
 	if calls != asc.DefaultMaxConsecutivePollFailures+1 {
 		t.Fatalf("expected %d lookups, got %d", asc.DefaultMaxConsecutivePollFailures+1, calls)
+	}
+}
+
+// The --since build-number path stops as soon as ambiguity is proven, so the
+// error must describe retained candidates as a sample instead of a total.
+func TestResolveBuildByNumberSelectionSinceReportsCandidatesWithoutClaimingLaterPages(t *testing.T) {
+	calls := 0
+	client := newBuildsWaitTestClient(t, func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/v1/builds" {
+			return nil, fmt.Errorf("unexpected path: %s", req.URL.Path)
+		}
+		calls++
+		return buildsWaitJSONResponse(http.StatusOK, `{"data":[
+			{"type":"builds","id":"build-ios","attributes":{"version":"42","uploadedDate":"2026-03-02T18:01:00Z","processingState":"VALID"}},
+			{"type":"builds","id":"build-macos","attributes":{"version":"42","uploadedDate":"2026-03-02T18:00:30Z","processingState":"VALID"}},
+			{"type":"builds","id":"build-third","attributes":{"version":"42","uploadedDate":"2026-03-02T18:00:00Z","processingState":"VALID"}}
+		],"links":{}}`)
+	})
+
+	since := time.Date(2026, 3, 2, 17, 0, 0, 0, time.UTC)
+	_, err := resolveBuildByNumberSelectionSince(
+		context.Background(),
+		client,
+		"123456789",
+		"42",
+		"",
+		"IOS",
+		[]asc.BuildsOption{asc.WithBuildsVersion("42")},
+		&since,
+		false,
+	)
+	if err == nil {
+		t.Fatal("expected an ambiguity error for two matching builds")
+	}
+	message := err.Error()
+	for _, want := range []string{"multiple builds match", "pass --build-id with one of these sample matches:", "build-ios", "build-macos", "listed builds are a sample"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("expected %q in %q", want, message)
+		}
+	}
+	if strings.Contains(message, "later pages") {
+		t.Fatalf("no later pages exist for this response: %q", message)
+	}
+	if strings.Contains(message, "build-third") {
+		t.Fatalf("resolver should stop after proving ambiguity: %q", message)
+	}
+	if calls != 1 {
+		t.Fatalf("requests = %d, want 1", calls)
+	}
+}
+
+func TestResolveBuildByNumberSelectionSinceDoesNotClaimUninspectedNextPageMatches(t *testing.T) {
+	calls := 0
+	client := newBuildsWaitTestClient(t, func(req *http.Request) (*http.Response, error) {
+		calls++
+		if req.URL.Path != "/v1/builds" {
+			return nil, fmt.Errorf("unexpected path: %s", req.URL.Path)
+		}
+		return buildsWaitJSONResponse(http.StatusOK, `{"data":[
+			{"type":"builds","id":"build-ios","attributes":{"version":"42","uploadedDate":"2026-03-02T18:01:00Z","processingState":"VALID"}},
+			{"type":"builds","id":"build-macos","attributes":{"version":"42","uploadedDate":"2026-03-02T18:00:30Z","processingState":"VALID"}}
+		],"links":{"next":"https://api.appstoreconnect.apple.com/v1/builds?cursor=older"}}`)
+	})
+
+	since := time.Date(2026, 3, 2, 17, 0, 0, 0, time.UTC)
+	_, err := resolveBuildByNumberSelectionSince(
+		context.Background(), client, "123456789", "42", "", "IOS",
+		[]asc.BuildsOption{asc.WithBuildsVersion("42")}, &since, false,
+	)
+	if err == nil {
+		t.Fatal("expected ambiguity error")
+	}
+	message := err.Error()
+	if strings.Contains(message, "matching builds exist on later pages") || !strings.Contains(message, "additional matches may exist") {
+		t.Fatalf("must not classify uninspected next-page rows: %q", message)
+	}
+	if calls != 1 {
+		t.Fatalf("requests = %d, want 1", calls)
+	}
+}
+
+func TestResolveBuildByNumberSelectionSinceRejectsRepeatedNextURL(t *testing.T) {
+	calls := 0
+	const repeatedNext = "https://api.appstoreconnect.apple.com/v1/builds?cursor=older"
+	client := newBuildsWaitTestClient(t, func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/v1/builds" {
+			return nil, fmt.Errorf("unexpected path: %s", req.URL.Path)
+		}
+		calls++
+		switch calls {
+		case 1:
+			return buildsWaitJSONResponse(http.StatusOK, fmt.Sprintf(`{"data":[
+				{"type":"builds","id":"build-1","attributes":{"version":"42","uploadedDate":"2026-03-02T18:01:00Z","processingState":"VALID"}}
+			],"links":{"next":%q}}`, repeatedNext))
+		case 2:
+			// The repeated page must be rejected before this duplicate row can
+			// be interpreted as an ambiguity.
+			return buildsWaitJSONResponse(http.StatusOK, fmt.Sprintf(`{"data":[
+				{"type":"builds","id":"build-1","attributes":{"version":"42","uploadedDate":"2026-03-02T18:01:00Z","processingState":"VALID"}}
+			],"links":{"next":%q}}`, repeatedNext))
+		default:
+			return nil, context.Canceled
+		}
+	})
+
+	since := time.Date(2026, 3, 2, 17, 0, 0, 0, time.UTC)
+	_, err := resolveBuildByNumberSelectionSince(
+		context.Background(), client, "123456789", "42", "", "IOS",
+		[]asc.BuildsOption{asc.WithBuildsVersion("42")}, &since, false,
+	)
+	if !errors.Is(err, asc.ErrRepeatedPaginationURL) {
+		t.Fatalf("expected repeated pagination URL error, got %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("requests = %d, want 2 before repeated-link rejection", calls)
+	}
+}
+
+func TestResolveBuildByNumberSelectionSinceRejectsEquivalentReorderedNextURL(t *testing.T) {
+	calls := 0
+	firstNext := "/v1/builds?cursor=older&filter%5Bapp%5D=123456789"
+	secondNext := "https://api.appstoreconnect.apple.com/v1/builds?filter%5Bapp%5D=123456789&cursor=older"
+	client := newBuildsWaitTestClient(t, func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/v1/builds" {
+			return nil, fmt.Errorf("unexpected path: %s", req.URL.Path)
+		}
+		calls++
+		switch calls {
+		case 1:
+			return buildsWaitJSONResponse(http.StatusOK, fmt.Sprintf(`{"data":[
+				{"type":"builds","id":"build-new","attributes":{"version":"42","uploadedDate":"2026-03-02T18:01:00Z","processingState":"VALID"}}
+			],"links":{"next":%q}}`, firstNext))
+		case 2:
+			// The reordered query string and absolute spelling are the same
+			// request as the provider-relative firstNext.
+			return buildsWaitJSONResponse(http.StatusOK, fmt.Sprintf(`{"data":[
+				{"type":"builds","id":"build-old","attributes":{"version":"42","uploadedDate":"2026-03-02T16:59:00Z","processingState":"VALID"}}
+			],"links":{"next":%q}}`, secondNext))
+		default:
+			return nil, context.Canceled
+		}
+	})
+
+	since := time.Date(2026, 3, 2, 17, 0, 0, 0, time.UTC)
+	_, err := resolveBuildByNumberSelectionSince(
+		context.Background(), client, "123456789", "42", "", "IOS",
+		[]asc.BuildsOption{asc.WithBuildsVersion("42")}, &since, false,
+	)
+	if !errors.Is(err, asc.ErrRepeatedPaginationURL) {
+		t.Fatalf("expected equivalent repeated pagination URL error, got %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("requests = %d, want 2 before reordered-link rejection", calls)
+	}
+}
+
+func TestResolveBuildByNumberSelectionSinceStopsAtPageSafetyLimit(t *testing.T) {
+	calls := 0
+	client := newBuildsWaitTestClient(t, func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/v1/builds" {
+			return nil, fmt.Errorf("unexpected path: %s", req.URL.Path)
+		}
+		calls++
+		return buildsWaitJSONResponse(http.StatusOK, fmt.Sprintf(
+			`{"data":[],"links":{"next":"/v1/builds?cursor=%d"}}`,
+			calls,
+		))
+	})
+
+	since := time.Date(2026, 3, 2, 17, 0, 0, 0, time.UTC)
+	_, err := resolveBuildByNumberSelectionSince(
+		context.Background(), client, "123456789", "42", "", "IOS",
+		[]asc.BuildsOption{asc.WithBuildsVersion("42")}, &since, false,
+	)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("%d-page safety limit", resolveBuildSinceMaxPages)) {
+		t.Fatalf("expected page safety limit error, got %v", err)
+	}
+	if calls != resolveBuildSinceMaxPages {
+		t.Fatalf("requests = %d, want %d before page-limit rejection", calls, resolveBuildSinceMaxPages)
+	}
+}
+
+func TestResolveBuildByNumberSelectionSinceBoundsPreReleaseVersionPagination(t *testing.T) {
+	preReleaseCalls := 0
+	client := newBuildsWaitTestClient(t, func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/v1/preReleaseVersions" {
+			return nil, fmt.Errorf("unexpected path: %s", req.URL.Path)
+		}
+		preReleaseCalls++
+		return buildsWaitJSONResponse(http.StatusOK, fmt.Sprintf(
+			`{"data":[],"links":{"next":"/v1/preReleaseVersions?cursor=%d"}}`,
+			preReleaseCalls,
+		))
+	})
+
+	since := time.Date(2026, 3, 2, 17, 0, 0, 0, time.UTC)
+	_, err := resolveBuildByNumberSelection(
+		context.Background(),
+		client,
+		buildNumberSelectionOptions{
+			AppID:       "123456789",
+			Version:     "1.2.3",
+			BuildNumber: "42",
+			Platform:    "IOS",
+			Since:       &since,
+		},
+		false,
+	)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("%d-page safety limit", resolveBuildSinceMaxPages)) {
+		t.Fatalf("expected pre-release pagination safety-limit error, got %v", err)
+	}
+	if preReleaseCalls != resolveBuildSinceMaxPages {
+		t.Fatalf("pre-release requests = %d, want %d before page-limit rejection", preReleaseCalls, resolveBuildSinceMaxPages)
 	}
 }
