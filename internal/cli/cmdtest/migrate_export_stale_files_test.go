@@ -3,7 +3,6 @@ package cmdtest
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,8 +10,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
-
-	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/rootfs"
 )
 
 func TestMigrateExportRemovesStaleKnownMetadataFiles(t *testing.T) {
@@ -67,10 +64,23 @@ func TestMigrateExportRemovesStaleKnownMetadataFiles(t *testing.T) {
 		}
 		runErr = rootCmd.Run(context.Background())
 	})
+	if runErr != nil {
+		t.Fatalf("migrate export error: %v", runErr)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want empty", stderr)
+	}
+	var result struct {
+		TotalFiles int `json:"totalFiles"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("decode export result: %v", err)
+	}
+	if result.TotalFiles != 0 {
+		t.Fatalf("totalFiles = %d, want 0", result.TotalFiles)
+	}
+
 	if runtime.GOOS == "windows" {
-		if !errors.Is(runErr, rootfs.ErrFileIdentityMutationUnsupported) {
-			t.Fatalf("migrate export error = %v, want ErrFileIdentityMutationUnsupported", runErr)
-		}
 		for name, want := range staleFiles {
 			got, err := os.ReadFile(filepath.Join(localeDir, name))
 			if err != nil {
@@ -86,21 +96,6 @@ func TestMigrateExportRemovesStaleKnownMetadataFiles(t *testing.T) {
 			t.Fatalf("unrelated file = %q, want unchanged", got)
 		}
 		return
-	}
-	if runErr != nil {
-		t.Fatalf("migrate export error: %v", runErr)
-	}
-	if stderr != "" {
-		t.Fatalf("stderr = %q, want empty", stderr)
-	}
-	var result struct {
-		TotalFiles int `json:"totalFiles"`
-	}
-	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
-		t.Fatalf("decode export result: %v", err)
-	}
-	if result.TotalFiles != 0 {
-		t.Fatalf("totalFiles = %d, want 0", result.TotalFiles)
 	}
 
 	for _, name := range []string{"description.txt", "keywords.txt", "name.txt"} {

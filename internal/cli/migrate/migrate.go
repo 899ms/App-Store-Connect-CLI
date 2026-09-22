@@ -784,7 +784,14 @@ func removeEmptyExportFile(root rootfs.Root, name string) error {
 	if err != nil {
 		return err
 	}
-	return root.RemoveFileIfSameIdentity(name, identity)
+	err = root.RemoveFileIfSameIdentity(name, identity)
+	if errors.Is(err, rootfs.ErrFileIdentityMutationUnsupported) {
+		// Preserve the historical Windows behavior until rootfs can provide an
+		// identity-safe deletion primitive there. Empty values remain skipped,
+		// rather than turning a repeat export into a command failure.
+		return nil
+	}
+	return err
 }
 
 // printMigrateOutput handles output for migrate-specific result types.
