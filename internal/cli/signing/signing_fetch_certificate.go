@@ -11,14 +11,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	modernpkcs12 "software.sslmate.com/src/go-pkcs12"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/rootfs"
 )
 
 type createdSigningIdentity struct {
@@ -33,6 +36,7 @@ type createdSigningIdentity struct {
 
 type signingCertificateCreateRequest struct {
 	CertificateType string
+	Outputs         *signingCertificateOutputs
 	KeyPath         string
 	CSRPath         string
 	P12Path         string
@@ -50,14 +54,21 @@ func createMissingSigningCertificate(ctx context.Context, client *asc.Client, re
 			return asc.Resource[asc.CertificateAttributes]{}, createdSigningIdentity{}, fmt.Errorf("certificate output path is required")
 		}
 	}
-	outputPaths := []string{request.KeyPath, request.CSRPath, request.P12Path}
-	if err := validateOutputPathStructure(outputPaths); err != nil {
-		return asc.Resource[asc.CertificateAttributes]{}, createdSigningIdentity{}, err
+	if len(request.Password) == 0 {
+		return asc.Resource[asc.CertificateAttributes]{}, createdSigningIdentity{}, fmt.Errorf("identity password is empty")
 	}
-	if !request.Force {
-		if err := ensureOutputPathsAreFree(outputPaths); err != nil {
-			return asc.Resource[asc.CertificateAttributes]{}, createdSigningIdentity{}, err
-		}
+	outputPaths := []string{request.KeyPath, request.CSRPath, request.P12Path}
+	outputs := request.Outputs
+	ownedOutputs := false
+	if outputs == nil {
+		outputs = &signingCertificateOutputs{}
+		ownedOutputs = true
+	}
+	if ownedOutputs {
+		defer outputs.Close()
+	}
+	if err := outputs.Prepare(outputPaths, request.Force); err != nil {
+		return asc.Resource[asc.CertificateAttributes]{}, createdSigningIdentity{}, err
 	}
 
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -77,10 +88,10 @@ func createMissingSigningCertificate(ctx context.Context, client *asc.Client, re
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
 	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
-	if err := writeBinaryFileReplacing(request.KeyPath, keyPEM, request.Force); err != nil {
+	if err := outputs.Write(0, keyPEM); err != nil {
 		return asc.Resource[asc.CertificateAttributes]{}, createdSigningIdentity{}, fmt.Errorf("write private key: %w", err)
 	}
-	if err := writeBinaryFileReplacing(request.CSRPath, csrPEM, request.Force); err != nil {
+	if err := outputs.Write(1, csrPEM); err != nil {
 		return asc.Resource[asc.CertificateAttributes]{}, createdSigningIdentity{}, fmt.Errorf("write certificate request: %w", err)
 	}
 
@@ -109,7 +120,7 @@ func createMissingSigningCertificate(ctx context.Context, client *asc.Client, re
 	if err != nil {
 		return created.Data, identity, fmt.Errorf("encode p12: %w", err)
 	}
-	if err := writeBinaryFileReplacing(request.P12Path, p12, request.Force); err != nil {
+	if err := outputs.Write(2, p12); err != nil {
 		return created.Data, identity, fmt.Errorf("write p12: %w", err)
 	}
 	sum := sha256.Sum256(certDER)
@@ -153,21 +164,202 @@ type signingProfilesMetadata struct {
 	ProfilePath       string `json:"profilePath,omitempty"`
 }
 
-func writeBinaryFileReplacing(path string, data []byte, replace bool) error {
-	if replace {
-		info, err := os.Lstat(path)
-		switch {
-		case err == nil && info.Mode()&os.ModeSymlink != 0:
-			return fmt.Errorf("output file is a symlink: %s", path)
-		case err == nil:
-			if err := os.Remove(path); err != nil {
-				return err
+type signingCertificateOutput struct {
+	original  string
+	canonical string
+	rooted    string
+	root      *rootfs.Root
+}
+
+// signingCertificateOutputs retains descriptor-backed roots from the final
+// preflight before certificate creation through the key, CSR, and PKCS#12
+// publications. Explicit output paths may have different operator-selected
+// parents, so each distinct parent is anchored independently.
+type signingCertificateOutputs struct {
+	BasePath string
+	prepared bool
+	replace  bool
+	paths    []signingCertificateOutput
+	roots    []*rootfs.Root
+}
+
+func (outputs *signingCertificateOutputs) Prepare(paths []string, replace bool) error {
+	if outputs == nil {
+		return fmt.Errorf("certificate outputs are required")
+	}
+	if outputs.prepared {
+		if outputs.replace != replace || len(outputs.paths) != len(paths) {
+			return fmt.Errorf("certificate output plan changed after preflight")
+		}
+		for index, path := range paths {
+			if outputs.paths[index].original != path {
+				return fmt.Errorf("certificate output plan changed after preflight")
 			}
-		case !os.IsNotExist(err):
-			return err
+		}
+		return outputs.preflight()
+	}
+
+	basePath := strings.TrimSpace(outputs.BasePath)
+	if basePath != "" {
+		var err error
+		basePath, err = filepath.Abs(basePath)
+		if err != nil {
+			return fmt.Errorf("resolve certificate output root %s: %w", outputs.BasePath, err)
 		}
 	}
-	return writeBinaryFile(path, data)
+	rootByParent := make(map[string]*rootfs.Root, len(paths))
+	seen := make(map[string]string, len(paths))
+	prepared := make([]signingCertificateOutput, 0, len(paths))
+	closeOnError := func() {
+		for _, root := range rootByParent {
+			_ = root.Close()
+		}
+	}
+	for _, path := range paths {
+		if strings.TrimSpace(path) == "" {
+			closeOnError()
+			return fmt.Errorf("certificate output path is required")
+		}
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			closeOnError()
+			return fmt.Errorf("resolve output path %s: %w", path, err)
+		}
+		parent := filepath.Dir(absolute)
+		physicalParent, err := filepath.EvalSymlinks(parent)
+		if err != nil {
+			closeOnError()
+			return fmt.Errorf("inspect output parent %s: %w", parent, err)
+		}
+		canonical := filepath.Join(physicalParent, filepath.Base(absolute))
+		if previous, exists := seen[canonical]; exists {
+			closeOnError()
+			return fmt.Errorf("output paths must be distinct: %s aliases %s", path, previous)
+		}
+		seen[canonical] = path
+
+		anchor := parent
+		if basePath != "" && pathWithinDirectory(basePath, absolute) {
+			anchor = basePath
+		} else {
+			parentInfo, err := os.Lstat(parent)
+			if err != nil {
+				closeOnError()
+				return fmt.Errorf("inspect output parent %s: %w", parent, err)
+			}
+			if parentInfo.Mode()&os.ModeSymlink != 0 {
+				closeOnError()
+				return fmt.Errorf("inspect output parent %s: %w", parent, rootfs.ErrSymlink)
+			}
+		}
+		root := rootByParent[anchor]
+		if root == nil {
+			selected, err := rootfs.New(anchor)
+			if err != nil {
+				closeOnError()
+				return fmt.Errorf("anchor output parent %s: %w", anchor, err)
+			}
+			root = &selected
+			rootByParent[anchor] = root
+		}
+		rooted, err := root.Resolve(absolute)
+		if err != nil {
+			closeOnError()
+			return fmt.Errorf("resolve output path %s: %w", path, err)
+		}
+		prepared = append(prepared, signingCertificateOutput{
+			original:  path,
+			canonical: canonical,
+			rooted:    rooted,
+			root:      root,
+		})
+	}
+	outputs.prepared = true
+	outputs.replace = replace
+	outputs.paths = prepared
+	for _, root := range rootByParent {
+		outputs.roots = append(outputs.roots, root)
+	}
+	if err := outputs.preflight(); err != nil {
+		_ = outputs.Close()
+		return err
+	}
+	return nil
+}
+
+func pathWithinDirectory(directory, path string) bool {
+	relative, err := filepath.Rel(directory, path)
+	if err != nil {
+		return false
+	}
+	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+func (outputs *signingCertificateOutputs) preflight() error {
+	for _, output := range outputs.paths {
+		if err := output.root.CheckDirectoryWritable(filepath.Dir(output.rooted), 0o600); err != nil {
+			return fmt.Errorf("inspect output parent %s: %w", filepath.Dir(output.rooted), err)
+		}
+		var err error
+		if outputs.replace {
+			err = output.root.CheckWriteFile(output.rooted)
+		} else {
+			err = output.root.CheckCreateNewFile(output.rooted)
+		}
+		if err != nil {
+			if !outputs.replace && errors.Is(err, os.ErrExist) {
+				return fmt.Errorf("output file already exists: %s: %w", output.original, err)
+			}
+			return fmt.Errorf("preflight output path %s: %w", output.original, err)
+		}
+	}
+	return nil
+}
+
+func (outputs *signingCertificateOutputs) CheckDistinct(path string) error {
+	if outputs == nil || !outputs.prepared {
+		return fmt.Errorf("certificate outputs were not prepared")
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve output path %s: %w", path, err)
+	}
+	physicalParent, err := filepath.EvalSymlinks(filepath.Dir(absolute))
+	if err != nil {
+		return fmt.Errorf("inspect output parent %s: %w", filepath.Dir(absolute), err)
+	}
+	canonical := filepath.Join(physicalParent, filepath.Base(absolute))
+	for _, output := range outputs.paths {
+		if canonical == output.canonical {
+			return fmt.Errorf("output paths must be distinct: %s aliases %s", path, output.original)
+		}
+	}
+	return nil
+}
+
+func (outputs *signingCertificateOutputs) Write(index int, data []byte) error {
+	if outputs == nil || !outputs.prepared || index < 0 || index >= len(outputs.paths) {
+		return fmt.Errorf("certificate output plan is unavailable")
+	}
+	output := outputs.paths[index]
+	if outputs.replace {
+		return output.root.WriteFile(output.rooted, data, 0o600)
+	}
+	return output.root.CreateNewFile(output.rooted, data, 0o600)
+}
+
+func (outputs *signingCertificateOutputs) Close() error {
+	if outputs == nil {
+		return nil
+	}
+	var closeErr error
+	for _, root := range outputs.roots {
+		closeErr = errors.Join(closeErr, root.Close())
+	}
+	outputs.prepared = false
+	outputs.paths = nil
+	outputs.roots = nil
+	return closeErr
 }
 
 func primarySigningCertificateType(profileType, explicit string) (string, error) {

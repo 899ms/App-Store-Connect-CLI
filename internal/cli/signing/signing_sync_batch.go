@@ -61,6 +61,9 @@ func runSigningSyncBatch(ctx context.Context, client *asc.Client, options signin
 	if len(options.BundleIDs) == 0 {
 		return SyncResult{}, fmt.Errorf("targets manifest contains no bundle IDs")
 	}
+	if options.CreateMissingCertificate && len(options.IdentityPassword) == 0 {
+		return SyncResult{}, fmt.Errorf("identity password is empty")
+	}
 	contextWithTimeout := options.ContextWithTimeout
 	if contextWithTimeout == nil {
 		contextWithTimeout = shared.ContextWithTimeout
@@ -86,9 +89,12 @@ func runSigningSyncBatch(ctx context.Context, client *asc.Client, options signin
 	defer func() { _ = store.Cleanup() }()
 	identity := options.Identity
 	var createdCertificate asc.Resource[asc.CertificateAttributes]
+	certificateOutputs := &signingCertificateOutputs{BasePath: tmpDir}
+	defer func() { _ = certificateOutputs.Close() }()
 	certificateRequest := signingCertificateCreateRequest{}
 	if options.CreateMissingCertificate {
 		certificateRequest = signingCertificateCreateRequest{
+			Outputs:  certificateOutputs,
 			KeyPath:  filepath.Join(tmpDir, "created.key"),
 			CSRPath:  filepath.Join(tmpDir, "created.csr"),
 			P12Path:  filepath.Join(tmpDir, "created.p12"),
@@ -150,6 +156,9 @@ func runSigningSyncBatch(ctx context.Context, client *asc.Client, options signin
 					return nil
 				},
 				BeforeCertificateCreate: func(plan profileCreatePlan) error {
+					if err := certificateOutputs.Prepare([]string{certificateRequest.KeyPath, certificateRequest.CSRPath, certificateRequest.P12Path}, false); err != nil {
+						return err
+					}
 					if err := prepareRepository(); err != nil {
 						return err
 					}

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -36,6 +37,100 @@ func TestSigningFetchCreateMissingCertificateUsage(t *testing.T) {
 	err := cmd.Run(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "--create-missing-certificate requires --create-missing") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestSigningFetchRejectsEmptyIdentityPasswordBeforeClientCreation(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		password []byte
+	}{
+		{name: "empty", password: nil},
+		{name: "line feed", password: []byte("\n")},
+		{name: "carriage return and line feed", password: []byte("\r\n")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("ASC_APP_ID", "")
+			t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "missing.json"))
+			clientCreations := 0
+			t.Cleanup(shared.SetASCClientFactoryForTesting(func() (*asc.Client, error) {
+				clientCreations++
+				return nil, fmt.Errorf("client must not be created")
+			}))
+			passwordPath := filepath.Join(t.TempDir(), "password")
+			if err := os.WriteFile(passwordPath, test.password, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cmd := SigningFetchCommand()
+			cmd.FlagSet.SetOutput(io.Discard)
+			if err := cmd.Parse([]string{
+				"--bundle-id", "com.example.app",
+				"--profile-type", "IOS_APP_STORE",
+				"--create-missing",
+				"--create-missing-certificate",
+				"--identity-password-file", passwordPath,
+				"--output", t.TempDir(),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			err := cmd.Run(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "identity password file is empty") {
+				t.Fatalf("error = %v, want empty identity password diagnostic", err)
+			}
+			if clientCreations != 0 {
+				t.Fatalf("client creations = %d, want 0", clientCreations)
+			}
+		})
+	}
+}
+
+func TestSigningSyncPushRejectsEmptyIdentityPasswordBeforeClientCreation(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		password []byte
+	}{
+		{name: "empty", password: nil},
+		{name: "line feed", password: []byte("\n")},
+		{name: "carriage return and line feed", password: []byte("\r\n")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("ASC_APP_ID", "")
+			t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "missing.json"))
+			clientCreations := 0
+			t.Cleanup(shared.SetASCClientFactoryForTesting(func() (*asc.Client, error) {
+				clientCreations++
+				return nil, fmt.Errorf("client must not be created")
+			}))
+			secrets := t.TempDir()
+			repositoryPassword := filepath.Join(secrets, "repository-password")
+			if err := os.WriteFile(repositoryPassword, []byte("repository-password"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			identityPassword := filepath.Join(secrets, "identity-password")
+			if err := os.WriteFile(identityPassword, test.password, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cmd := syncPushCommand()
+			cmd.FlagSet.SetOutput(io.Discard)
+			if err := cmd.Parse([]string{
+				"--bundle-id", "com.example.app",
+				"--profile-type", "IOS_APP_STORE",
+				"--repo", filepath.Join(t.TempDir(), "unused.git"),
+				"--password-file", repositoryPassword,
+				"--create-missing",
+				"--create-missing-certificate",
+				"--identity-password-file", identityPassword,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			err := cmd.Run(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "identity password file is empty") {
+				t.Fatalf("error = %v, want empty identity password diagnostic", err)
+			}
+			if clientCreations != 0 {
+				t.Fatalf("client creations = %d, want 0", clientCreations)
+			}
+		})
 	}
 }
 
@@ -374,6 +469,166 @@ func TestSigningFetchPreflightsGeneratedOutputStructureBeforeCertificatePOST(t *
 				t.Fatalf("stdout = %q, want no receipt before remote mutation", stdout)
 			}
 		})
+	}
+}
+
+func TestSigningFetchRefusesSymlinkedIdentityParentBeforeCertificatePOST(t *testing.T) {
+	t.Setenv("ASC_APP_ID", "")
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "missing.json"))
+	certificatePosts := 0
+	client := newSigningFetchTestClient(t, func(req *http.Request) *http.Response {
+		switch {
+		case req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/bundleIds"):
+			return signingFetchJSONResponse(http.StatusOK, `{"data":[{"type":"bundleIds","id":"bundle-1","attributes":{"identifier":"com.example.app"}}]}`)
+		case req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/profiles"):
+			return signingFetchJSONResponse(http.StatusOK, `{"data":[]}`)
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/certificates":
+			return signingFetchJSONResponse(http.StatusOK, `{"data":[]}`)
+		case req.Method == http.MethodPost && req.URL.Path == "/v1/certificates":
+			certificatePosts++
+			return signingFetchJSONResponse(http.StatusInternalServerError, `{"errors":[{"detail":"must not create"}]}`)
+		default:
+			t.Fatalf("unexpected %s %s", req.Method, req.URL.Path)
+			return nil
+		}
+	})
+	t.Cleanup(shared.SetASCClientFactoryForTesting(func() (*asc.Client, error) { return client, nil }))
+
+	output := t.TempDir()
+	outside := t.TempDir()
+	linkedParent := filepath.Join(output, "linked")
+	if err := os.Symlink(outside, linkedParent); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	password := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(password, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := SigningFetchCommand()
+	cmd.FlagSet.SetOutput(io.Discard)
+	if err := cmd.Parse([]string{
+		"--bundle-id", "com.example.app",
+		"--profile-type", "IOS_APP_STORE",
+		"--create-missing",
+		"--create-missing-certificate",
+		"--identity-password-file", password,
+		"--output", output,
+		"--key-out", filepath.Join(linkedParent, "distribution.key"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := cmd.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "refusing to follow symlink") {
+		t.Fatalf("error = %v, want symlink refusal", err)
+	}
+	if certificatePosts != 0 {
+		t.Fatalf("certificate POSTs = %d, want 0", certificatePosts)
+	}
+	entries, readErr := os.ReadDir(outside)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("outside entries = %v, want no writes", entries)
+	}
+}
+
+func TestSigningCertificateOutputsForceReplacesRegularFilesButRefusesSymlinks(t *testing.T) {
+	output := t.TempDir()
+	paths := []string{
+		filepath.Join(output, "distribution.key"),
+		filepath.Join(output, "distribution.csr"),
+		filepath.Join(output, "distribution.p12"),
+	}
+	for _, path := range paths {
+		if err := os.WriteFile(path, []byte("sentinel"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	outputs := &signingCertificateOutputs{BasePath: output}
+	defer outputs.Close()
+	if err := outputs.Prepare(paths, true); err != nil {
+		t.Fatalf("prepare regular outputs: %v", err)
+	}
+	for index, path := range paths {
+		wanted := []byte(fmt.Sprintf("replacement-%d", index))
+		if err := outputs.Write(index, wanted); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != string(wanted) {
+			t.Fatalf("%s = %q, want %q", path, got, wanted)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+			t.Fatalf("%s mode = %o, want 600", path, info.Mode().Perm())
+		}
+	}
+	if err := outputs.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	target := filepath.Join(t.TempDir(), "target")
+	if err := os.WriteFile(target, []byte("protected"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(paths[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, paths[0]); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	symlinkOutputs := &signingCertificateOutputs{BasePath: output}
+	defer symlinkOutputs.Close()
+	if err := symlinkOutputs.Prepare(paths, true); err == nil || !strings.Contains(err.Error(), "refusing to follow symlink") {
+		t.Fatalf("prepare symlink output error = %v, want symlink refusal", err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "protected" {
+		t.Fatalf("symlink target = %q, want protected", got)
+	}
+}
+
+func TestSigningCertificateOutputsRetainRootAcrossParentReplacement(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("renaming an open directory is not supported on Windows")
+	}
+	parent := t.TempDir()
+	output := filepath.Join(parent, "output")
+	if err := os.Mkdir(output, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{
+		filepath.Join(output, "distribution.key"),
+		filepath.Join(output, "distribution.csr"),
+		filepath.Join(output, "distribution.p12"),
+	}
+	outputs := &signingCertificateOutputs{BasePath: output}
+	defer outputs.Close()
+	if err := outputs.Prepare(paths, false); err != nil {
+		t.Fatal(err)
+	}
+	selected := output + "-selected"
+	if err := os.Rename(output, selected); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(output, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := outputs.Write(0, []byte("private")); err == nil {
+		t.Fatal("write through replaced selected root succeeded")
+	}
+	if _, err := os.Stat(filepath.Join(output, "distribution.key")); !os.IsNotExist(err) {
+		t.Fatalf("replacement root received private key: %v", err)
 	}
 }
 

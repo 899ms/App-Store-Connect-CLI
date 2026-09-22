@@ -131,6 +131,24 @@ Examples:
 				}
 				return ensureOutputPathsAreFree(signingOutputPaths(outputDir, profileName, profileID, profType, certificates))
 			}
+			var password []byte
+			if *createMissingCertificate {
+				var err error
+				password, err = readNonEmptyIdentityPasswordFile(*identityPasswordFile)
+				if err != nil {
+					return fmt.Errorf("signing fetch: %w", err)
+				}
+				defer clear(password)
+			}
+			certSlug := "distribution"
+			if isDevelopmentProfile(profType) {
+				certSlug = "development"
+			}
+			keyPath := firstNonEmpty(*keyOut, filepath.Join(outputDir, certSlug+".key"))
+			csrPath := firstNonEmpty(*csrOut, filepath.Join(outputDir, certSlug+".csr"))
+			p12Path := firstNonEmpty(*p12Out, filepath.Join(outputDir, certSlug+".p12"))
+			certificateOutputs := &signingCertificateOutputs{BasePath: outputDir}
+			defer func() { _ = certificateOutputs.Close() }()
 
 			client, err := shared.GetASCClient()
 			if err != nil {
@@ -159,22 +177,6 @@ Examples:
 			}
 			result.BundleIDResource = bundleIDResp.Data.ID
 
-			var password []byte
-			if *createMissingCertificate {
-				password, err = readProtectedSecretFile(*identityPasswordFile, "identity password")
-				if err != nil {
-					return fmt.Errorf("signing fetch: %w", err)
-				}
-				password = trimPasswordFileNewlineBytes(password)
-				defer clear(password)
-			}
-			certSlug := "distribution"
-			if isDevelopmentProfile(profType) {
-				certSlug = "development"
-			}
-			keyPath := firstNonEmpty(*keyOut, filepath.Join(outputDir, certSlug+".key"))
-			csrPath := firstNonEmpty(*csrOut, filepath.Join(outputDir, certSlug+".csr"))
-			p12Path := firstNonEmpty(*p12Out, filepath.Join(outputDir, certSlug+".p12"))
 			var createdIdentity createdSigningIdentity
 			createdFlag := false
 			progress := &signingAssetsProgress{}
@@ -196,6 +198,7 @@ Examples:
 					CreateMissing:            *createMissing,
 					CreateMissingCertificate: *createMissingCertificate,
 					CertificateCreate: signingCertificateCreateRequest{
+						Outputs:  certificateOutputs,
 						KeyPath:  keyPath,
 						CSRPath:  csrPath,
 						P12Path:  p12Path,
@@ -208,14 +211,14 @@ Examples:
 						if err := preflightOutput(plan.ProfileName, "", nil); err != nil {
 							return err
 						}
-						paths := []string{filepath.Join(outputDir, "profiles.json"), keyPath, csrPath, p12Path}
-						if err := validateOutputPathStructure(paths); err != nil {
+						if err := certificateOutputs.Prepare([]string{keyPath, csrPath, p12Path}, *force); err != nil {
 							return err
 						}
-						if *force {
-							return ensureOutputPathsAreFree([]string{filepath.Join(outputDir, "profiles.json")})
+						metadataPath := filepath.Join(outputDir, "profiles.json")
+						if err := certificateOutputs.CheckDistinct(metadataPath); err != nil {
+							return err
 						}
-						return ensureOutputPathsAreFree(paths)
+						return ensureOutputPathsAreFree([]string{metadataPath})
 					},
 					BeforeCreate: func(plan profileCreatePlan) error {
 						return preflightOutput(plan.ProfileName, "", plan.Certificates)

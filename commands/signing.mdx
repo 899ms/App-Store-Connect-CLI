@@ -169,13 +169,16 @@ asc signing fetch \
 ```
 
 The identity password must come from a protected 0600-or-more-restrictive file;
-it is never accepted as a flag value. Use `--key-out`, `--csr-out`, or
+it is never accepted as a flag value. One trailing LF or CRLF is removed, and
+the remaining password must not be empty. Use `--key-out`, `--csr-out`, or
 `--p12-out` to select different local paths, and `--force` only when replacing
-those three generated identity files is intentional. The command refuses
-existing profile, certificate, or metadata output paths before creating a
-certificate. If a certificate request has an ambiguous transport failure, the
-JSON receipt is partial and reports `certificateCreationState: "unknown"`; do
-not replace the preserved key or CSR until the account is checked for a
+those three generated identity files is intentional. Each selected parent is
+retained as a rooted filesystem anchor from preflight through publication, so
+the command refuses symlinked destinations and parent substitutions. It also
+refuses existing profile, certificate, or metadata output paths before creating
+a certificate. If a certificate request has an ambiguous transport failure,
+the JSON receipt is partial and reports `certificateCreationState: "unknown"`;
+do not replace the preserved key or CSR until the account is checked for a
 matching certificate.
 
 ### Common profile types

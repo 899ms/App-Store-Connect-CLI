@@ -41,6 +41,34 @@ func TestSigningFetchCreateCertificateRequiresCreateMissingAtCommandBoundary(t *
 	}
 }
 
+func TestSigningFetchRejectsEmptyNormalizedIdentityPasswordAtCommandBoundary(t *testing.T) {
+	passwordPath := t.TempDir() + "/identity-password"
+	if err := os.WriteFile(passwordPath, []byte("\r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var code int
+	stdout, stderr := captureOutput(t, func() {
+		code = rootcmd.Run([]string{
+			"signing", "fetch",
+			"--bundle-id", "com.example.app",
+			"--profile-type", "IOS_APP_STORE",
+			"--create-missing",
+			"--create-missing-certificate",
+			"--identity-password-file", passwordPath,
+			"--output", t.TempDir(),
+		}, "test")
+	})
+	if code != rootcmd.ExitUsage {
+		t.Fatalf("exit code = %d, want %d", code, rootcmd.ExitUsage)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, "identity password file is empty") {
+		t.Fatalf("stderr = %q, want empty identity password diagnostic", stderr)
+	}
+}
+
 func TestSigningFetchCreateNoOpAndPartialReceiptsAtCommandBoundary(t *testing.T) {
 	setupAuth(t)
 	passwordPath := t.TempDir() + "/identity-password"

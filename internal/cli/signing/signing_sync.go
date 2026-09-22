@@ -128,6 +128,21 @@ func trimPasswordFileNewlineBytes(password []byte) []byte {
 	}
 }
 
+func readNonEmptyIdentityPasswordFile(path string) ([]byte, error) {
+	password, err := readProtectedSecretFile(path, "identity password")
+	if err != nil {
+		if err.Error() == "identity password file is empty" {
+			return nil, shared.UsageError(err.Error())
+		}
+		return nil, err
+	}
+	password = trimPasswordFileNewlineBytes(password)
+	if len(password) == 0 {
+		return nil, shared.UsageError("identity password file is empty")
+	}
+	return password, nil
+}
+
 func onceAfterSuccess(operation func() error) func() error {
 	done := false
 	return func() error {
@@ -248,11 +263,10 @@ func syncPushCommand() *ffcli.Command {
 			}
 			var certificatePassword []byte
 			if *createMissingCertificate {
-				certificatePassword, err = readProtectedSecretFile(*identityPasswordFile, "identity password")
+				certificatePassword, err = readNonEmptyIdentityPasswordFile(*identityPasswordFile)
 				if err != nil {
 					return fmt.Errorf("signing sync push: identity password: %w", err)
 				}
-				certificatePassword = trimPasswordFileNewlineBytes(certificatePassword)
 				defer clear(certificatePassword)
 			}
 
@@ -381,8 +395,11 @@ func syncPushCommand() *ffcli.Command {
 				return fmt.Errorf("signing sync push: %w", primary)
 			}
 			var certificateRequest signingCertificateCreateRequest
+			certificateOutputs := &signingCertificateOutputs{BasePath: tmpDir}
+			defer func() { _ = certificateOutputs.Close() }()
 			if *createMissingCertificate {
 				certificateRequest = signingCertificateCreateRequest{
+					Outputs:  certificateOutputs,
 					KeyPath:  filepath.Join(tmpDir, "created.key"),
 					CSRPath:  filepath.Join(tmpDir, "created.csr"),
 					P12Path:  filepath.Join(tmpDir, "created.p12"),
@@ -404,6 +421,9 @@ func syncPushCommand() *ffcli.Command {
 					CreatedIdentity:          &createdIdentity,
 					Progress:                 progress,
 					BeforeCertificateCreate: func(plan profileCreatePlan) error {
+						if err := certificateOutputs.Prepare([]string{certificateRequest.KeyPath, certificateRequest.CSRPath, certificateRequest.P12Path}, false); err != nil {
+							return err
+						}
 						if err := prepareRepository(); err != nil {
 							return err
 						}
