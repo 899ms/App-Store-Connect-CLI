@@ -2,6 +2,12 @@ package bundleids
 
 import "github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 
+var dataProtectionOptions = map[string]string{
+	"NSFileProtectionComplete":                             "COMPLETE_PROTECTION",
+	"NSFileProtectionCompleteUnlessOpen":                   "PROTECTED_UNLESS_OPEN",
+	"NSFileProtectionCompleteUntilFirstUserAuthentication": "PROTECTED_UNTIL_FIRST_USER_AUTH",
+}
+
 type entitlementCapability struct {
 	Key        string
 	Capability string
@@ -48,13 +54,14 @@ func entitlementCapabilityCatalog() []entitlementCapability {
 
 func dataProtectionSettings(value any) []asc.CapabilitySetting {
 	text, _ := value.(string)
-	if text == "" {
+	optionKey, ok := dataProtectionOptions[text]
+	if !ok {
 		return nil
 	}
 	enabled := true
 	return []asc.CapabilitySetting{{
 		Key:     "DATA_PROTECTION_PERMISSION_LEVEL",
-		Options: []asc.CapabilityOption{{Key: text, Enabled: &enabled}},
+		Options: []asc.CapabilityOption{{Key: optionKey, Enabled: &enabled}},
 	}}
 }
 
@@ -71,15 +78,38 @@ func mergeCapabilitySettings(existing, desired []asc.CapabilitySetting) ([]asc.C
 				continue
 			}
 			found = true
-			for _, option := range want.Options {
-				if !capabilityOptionPresent(current.Options, option.Key) {
-					merged[index].Options = append(merged[index].Options, option)
-					changed = true
-				}
+			options, optionsChanged := reconcileCapabilityOptions(current.Options, want.Options)
+			if optionsChanged {
+				merged[index].Options = options
+				changed = true
 			}
 		}
 		if !found {
 			merged = append(merged, want)
+			changed = true
+		}
+	}
+	return merged, changed
+}
+
+func reconcileCapabilityOptions(current, desired []asc.CapabilityOption) ([]asc.CapabilityOption, bool) {
+	selected := make(map[string]bool, len(desired))
+	for _, option := range desired {
+		selected[option.Key] = option.Enabled != nil && *option.Enabled
+	}
+	merged := append([]asc.CapabilityOption(nil), current...)
+	changed := false
+	for index, option := range current {
+		wasEnabled := option.Enabled != nil && *option.Enabled
+		shouldEnable := selected[option.Key]
+		if wasEnabled != shouldEnable {
+			merged[index].Enabled = &shouldEnable
+			changed = true
+		}
+	}
+	for _, option := range desired {
+		if !capabilityOptionPresent(current, option.Key) {
+			merged = append(merged, option)
 			changed = true
 		}
 	}

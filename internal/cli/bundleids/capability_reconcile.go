@@ -52,7 +52,10 @@ func capabilityReconcileCommand(name string, apply bool) *ffcli.Command {
 	entitlements := fs.String("entitlements", "", "Path to an entitlements plist")
 	ignoreUnknown := fs.Bool("ignore-unknown", false, "Ignore entitlement keys this mapping does not know")
 	allowRemove := fs.Bool("allow-remove", false, "Remove mapped capabilities that the entitlements file does not request")
-	confirm := fs.Bool("confirm", false, "Apply capability changes")
+	confirm := false
+	if apply {
+		fs.BoolVar(&confirm, "confirm", false, "Apply capability changes")
+	}
 	output := shared.BindOutputFlags(fs)
 	return &ffcli.Command{
 		Name:       name,
@@ -64,9 +67,12 @@ func capabilityReconcileCommand(name string, apply bool) *ffcli.Command {
 			if err := shared.RejectPositionalArgs(args); err != nil {
 				return err
 			}
-			if apply && !*confirm {
+			if _, err := shared.ValidateOutputFormat(*output.Output, *output.Pretty); err != nil {
+				return shared.UsageError(err.Error())
+			}
+			if apply && !confirm {
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return shared.UsageError("--confirm is required")
+				return shared.MissingRequiredUsageError("--confirm")
 			}
 			bundleValue := strings.TrimSpace(*bundleID)
 			if bundleValue == "" {
@@ -99,6 +105,9 @@ func capabilityReconcileCommand(name string, apply bool) *ffcli.Command {
 			plan := buildCapabilityReconcilePlan(resolved, desired, existing, *allowRemove)
 			if apply {
 				if err := applyCapabilityReconcilePlan(requestCtx, client, resolved, plan); err != nil {
+					if outputErr := shared.PrintOutput(plan, *output.Output, *output.Pretty); outputErr != nil {
+						return fmt.Errorf("bundle-ids capabilities reconcile: %w (partial receipt output: %w)", err, outputErr)
+					}
 					return fmt.Errorf("bundle-ids capabilities reconcile: %w", err)
 				}
 			}
@@ -140,6 +149,18 @@ func readDesiredEntitlements(path string, ignoreUnknown bool) ([]desiredEntitlem
 			}
 			selected = append(selected, desiredEntitlement{spec: entitlementCapability{Key: key}, value: raw[key]})
 			continue
+		}
+		if key == "com.apple.developer.default-data-protection" {
+			value, ok := raw[key].(string)
+			if !ok {
+				return nil, shared.UsageError("data protection entitlement must be a string")
+			}
+			if value == "NSFileProtectionNone" {
+				continue
+			}
+			if _, ok := dataProtectionOptions[value]; !ok {
+				return nil, shared.UsageErrorf("unsupported data protection entitlement value %q", value)
+			}
 		}
 		if item.Capability != "" {
 			if _, ok := seen[item.Capability]; ok {
@@ -238,21 +259,29 @@ func listBundleCapabilities(ctx context.Context, client *asc.Client, bundleID st
 }
 
 func applyCapabilityReconcilePlan(ctx context.Context, client *asc.Client, bundleID string, plan *asc.CapabilityReconcilePlan) error {
-	for _, action := range plan.Actions {
+	for index := range plan.Actions {
+		action := &plan.Actions[index]
+		var err error
 		switch action.Action {
 		case "add":
-			if _, err := client.CreateBundleIDCapability(ctx, bundleID, asc.BundleIDCapabilityCreateAttributes{CapabilityType: action.Capability, Settings: action.Settings}); err != nil {
-				return err
+			var created *asc.BundleIDCapabilityResponse
+			created, err = client.CreateBundleIDCapability(ctx, bundleID, asc.BundleIDCapabilityCreateAttributes{CapabilityType: action.Capability, Settings: action.Settings})
+			if err == nil && created != nil {
+				action.CapabilityID = created.Data.ID
 			}
 		case "update":
-			if _, err := client.UpdateBundleIDCapability(ctx, action.CapabilityID, asc.BundleIDCapabilityUpdateAttributes{CapabilityType: action.Capability, Settings: action.Settings}); err != nil {
-				return err
-			}
+			_, err = client.UpdateBundleIDCapability(ctx, action.CapabilityID, asc.BundleIDCapabilityUpdateAttributes{CapabilityType: action.Capability, Settings: action.Settings})
 		case "remove":
-			if err := client.DeleteBundleIDCapability(ctx, action.CapabilityID); err != nil {
-				return err
-			}
+			err = client.DeleteBundleIDCapability(ctx, action.CapabilityID)
+		default:
+			continue
 		}
+		if err != nil {
+			action.Status = "failed"
+			action.Error = err.Error()
+			return err
+		}
+		action.Status = "applied"
 	}
 	return nil
 }

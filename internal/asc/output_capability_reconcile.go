@@ -14,16 +14,18 @@ type CapabilityReconcileAction struct {
 	CapabilityID string              `json:"capabilityId,omitempty"`
 	Command      string              `json:"command,omitempty"`
 	Settings     []CapabilitySetting `json:"settings,omitempty"`
+	Status       string              `json:"status,omitempty"`
+	Error        string              `json:"error,omitempty"`
 }
 
 func capabilityReconcilePlanRows(plan *CapabilityReconcilePlan) ([]string, [][]string) {
-	headers := []string{"Action", "Capability", "Entitlement", "Capability ID"}
+	headers := []string{"Action", "Capability", "Entitlement", "Capability ID", "Status", "Error", "Command"}
 	if plan == nil {
 		return headers, nil
 	}
 	rows := make([][]string, 0, len(plan.Actions))
 	for _, action := range plan.Actions {
-		rows = append(rows, []string{action.Action, action.Capability, action.Entitlement, action.CapabilityID})
+		rows = append(rows, []string{action.Action, action.Capability, action.Entitlement, action.CapabilityID, action.Status, action.Error, action.Command})
 	}
 	return headers, rows
 }
