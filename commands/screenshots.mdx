@@ -253,6 +253,12 @@ asc screenshots upload --version-localization "LOC_ID" \
   --device-type "IPHONE_65" \
   --max-screenshots 10
 
+# Upload a set with bounded parallelism (default: 4, maximum: 8)
+asc screenshots upload --version-localization "LOC_ID" \
+  --path "./screenshots/iphone" \
+  --device-type "IPHONE_65" \
+  --concurrency 4
+
 # Fan out across locale directories in one run
 asc screenshots upload --app "123456789" \
   --version "1.2.3" \
@@ -274,8 +280,11 @@ uploaded from each locale subtree. A device-rooted layout such as
 * Exact dimensions must match the device type specification
 * A screenshot set can contain at most 10 images; use `--max-screenshots 10`
   to upload the first 10 sorted files when a source folder contains extras
+* `--concurrency` controls parallel uploads within one set (1–8, default 4);
+  results and remote ordering remain deterministic
 * Use `asc screenshots sizes` to verify required dimensions
-* Partial failures write a retry artifact under `.asc/reports/screenshots-upload/`
+* Partial failures write a retry artifact under `.asc/reports/screenshots-upload/`;
+  if cleanup of a remote asset fails, the asset ID is retained in the artifact
 
 **Resume a Failed Upload:**
 
@@ -284,6 +293,10 @@ uploaded from each locale subtree. A device-rooted layout such as
 asc screenshots upload \
   --resume ".asc/reports/screenshots-upload/failures-123.json"
 ```
+
+Resume retries unresolved remote-asset cleanup before creating any new
+reservations. A remote asset already absent from App Store Connect is treated
+as cleaned up, so retrying the same artifact is safe.
 
 **Typical Submission:**
 
