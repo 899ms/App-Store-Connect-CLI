@@ -23,6 +23,7 @@ type BuildBetaGroupsUpdateResult struct {
 	BuildID  string   `json:"buildId"`
 	GroupIDs []string `json:"groupIds"`
 	Action   string   `json:"action"`
+	DryRun   bool     `json:"dryRun,omitempty"`
 }
 
 // BuildIndividualTestersUpdateResult represents CLI output for build individual tester updates.
@@ -78,6 +79,7 @@ type BuildExpireAllFailure struct {
 type BuildExpireAllResult struct {
 	DryRun              bool                    `json:"dryRun"`
 	AppID               string                  `json:"appId"`
+	Version             *string                 `json:"version,omitempty"`
 	OlderThan           *string                 `json:"olderThan,omitempty"`
 	KeepLatest          *int                    `json:"keepLatest,omitempty"`
 	SelectedCount       int                     `json:"selectedCount"`
