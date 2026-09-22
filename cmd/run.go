@@ -50,12 +50,13 @@ func Run(args []string, versionInfo string) int {
 	args = hoistRootProfileFlag(root, args)
 	args = normalizeSpacedBooleanFlags(root, args)
 	analysis := analyzeInvocation(root, args)
+	parseArgs := markLeadingSearchFlagTerminator(root, args)
 	runCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stopSignals()
 
 	parseOutput := &parseOutputBuffer{}
-	restoreFlagOutputs := prepareFlagParsing(root, args, parseOutput)
-	parseErr := root.Parse(args)
+	restoreFlagOutputs := prepareFlagParsing(root, parseArgs, parseOutput)
+	parseErr := root.Parse(parseArgs)
 	restoreFlagOutputs()
 	if parseErr != nil {
 		if errors.Is(parseErr, flag.ErrHelp) {
@@ -415,6 +416,39 @@ func requestedHelp(root *ffcli.Command, args []string) bool {
 		i = next
 	}
 	return false
+}
+
+// markLeadingSearchFlagTerminator preserves a terminator that the search flag
+// set would otherwise remove before Exec. A terminator after the first query
+// token is already retained because flag parsing stops at that positional.
+func markLeadingSearchFlagTerminator(root *ffcli.Command, args []string) []string {
+	rootSearch := findDirectSubcommand(root, "search")
+	command := root
+	for i := 0; command != nil && i < len(args); {
+		token := args[i]
+		if token == "--" {
+			if command != rootSearch {
+				return args
+			}
+			marked := append([]string(nil), args...)
+			marked[i] = shared.FlagTerminatorSentinel
+			return marked
+		}
+		if token == "" {
+			return args
+		}
+		if subcommand := findDirectSubcommand(command, token); subcommand != nil {
+			command = subcommand
+			i++
+			continue
+		}
+		next, consumed := consumeFlagToken(command.FlagSet, token, args, i)
+		if !consumed {
+			return args
+		}
+		i = next
+	}
+	return args
 }
 
 func printParseFailure(parseErr error, parseOutput string, analysis invocationAnalysis, commandName string) {

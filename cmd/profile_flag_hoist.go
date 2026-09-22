@@ -164,12 +164,14 @@ func consumesSpacedBooleanValue(command *ffcli.Command, commandPath, args []stri
 }
 
 // hoistedProfileValue returns the token that carries the selector's value.
+// A subcommand or another flag cannot be an implicit profile name; callers
+// can still select a dash-prefixed name explicitly with --profile=NAME.
 func hoistedProfileValue(command *ffcli.Command, args []string, index int) (string, bool) {
 	next := index + 1
 	if next >= len(args) {
 		return "", false
 	}
-	if findDirectSubcommand(command, args[next]) != nil {
+	if strings.HasPrefix(args[next], "-") || findDirectSubcommand(command, args[next]) != nil {
 		return "", false
 	}
 	return args[next], true

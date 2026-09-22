@@ -55,6 +55,12 @@ var ErrMissingAuth = errors.New("missing authentication")
 // flags offer it alongside the command's own flags.
 const RootProfileFlagName = "profile"
 
+// FlagTerminatorSentinel preserves a leading `--` for commands that need to
+// distinguish escaped positional tokens after flag.FlagSet removes the
+// terminator. NUL cannot appear in a real process argument, so it cannot
+// collide with operator input.
+const FlagTerminatorSentinel = "\x00asc-flag-terminator"
+
 var (
 	ascClientFactoryMu sync.RWMutex
 	ascClientFactory   = getASCClient

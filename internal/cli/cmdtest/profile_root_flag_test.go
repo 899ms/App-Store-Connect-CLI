@@ -140,6 +140,8 @@ func TestProfileFlagAfterCommandKeepsLastValue(t *testing.T) {
 func TestProfileFlagAfterCommandWithoutValueIsUsageError(t *testing.T) {
 	for _, args := range [][]string{
 		{"auth", "status", "--profile"},
+		{"apps", "list", "--profile", "--paginate"},
+		{"apps", "list", "--profile", "--unknown"},
 		// `status` names a subcommand of `auth`, so it is a misplaced command
 		// name rather than a profile value.
 		{"auth", "--profile", "status", "--output", "json"},
@@ -227,6 +229,62 @@ func TestEmptyProfileFlagValueMatchesRootPlacement(t *testing.T) {
 
 			if profile := runProfileSelection(t, args); profile != "" {
 				t.Fatalf("profile = %q, want no profile override", profile)
+			}
+		})
+	}
+}
+
+func TestProfileFlagAfterPositionalIsUsageError(t *testing.T) {
+	for _, args := range [][]string{
+		{"search", "upload a build", "--profile", "staging"},
+		{"search", "upload a build", "--profile=staging"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var code int
+			stdout, stderr := captureOutput(t, func() {
+				code = rootcmd.Run(args, "1.2.3")
+			})
+
+			if code != rootcmd.ExitUsage {
+				t.Fatalf("exit code = %d, want %d (stdout %q, stderr %q)", code, rootcmd.ExitUsage, stdout, stderr)
+			}
+			if stdout != "" {
+				t.Fatalf("stdout = %q, want empty", stdout)
+			}
+			wantPrefix := "Error: `--profile` must appear before positional arguments\n"
+			if !strings.HasPrefix(stderr, wantPrefix) || !strings.Contains(stderr, "USAGE\n  asc search [flags] <query>") {
+				t.Fatalf("stderr = %q, want the placement error followed by search usage", stderr)
+			}
+		})
+	}
+}
+
+func TestEscapedProfileSearchTermRemainsPositional(t *testing.T) {
+	for _, query := range [][]string{
+		{"--profile", "staging"},
+		{"apps", "--profile", "staging"},
+	} {
+		t.Run(strings.Join(query, " "), func(t *testing.T) {
+			args := append([]string{"search", "--output", "json", "--"}, query...)
+			var code int
+			stdout, stderr := captureOutput(t, func() {
+				code = rootcmd.Run(args, "1.2.3")
+			})
+
+			if code != rootcmd.ExitSuccess {
+				t.Fatalf("exit code = %d, want %d (stdout %q, stderr %q)", code, rootcmd.ExitSuccess, stdout, stderr)
+			}
+			if stderr != "" {
+				t.Fatalf("stderr = %q, want empty", stderr)
+			}
+			var payload struct {
+				Query string `json:"query"`
+			}
+			if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+				t.Fatalf("decode search output %q: %v", stdout, err)
+			}
+			if want := strings.Join(query, " "); payload.Query != want {
+				t.Fatalf("query = %q, want %q", payload.Query, want)
 			}
 		})
 	}
