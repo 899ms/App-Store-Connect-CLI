@@ -155,6 +155,9 @@ func TestXcodeTestDestinationsParsesFixtureAndFiltersUnavailable(t *testing.T) {
 }
 
 func TestXcodeTestDestinationsMacDoesNotCallSimctl(t *testing.T) {
+	previous := xcodeCommandGOOS
+	xcodeCommandGOOS = "darwin"
+	t.Cleanup(func() { xcodeCommandGOOS = previous })
 	t.Cleanup(SetSimulatorListLoaderForTesting(func(context.Context) ([]byte, error) {
 		t.Fatal("simctl should not run for --platform macOS")
 		return nil, nil
@@ -166,6 +169,24 @@ func TestXcodeTestDestinationsMacDoesNotCallSimctl(t *testing.T) {
 	stdout := captureTestDestinations(t, cmd)
 	if !strings.Contains(stdout, `"destinationString":"platform=macOS"`) {
 		t.Fatalf("stdout = %s", stdout)
+	}
+}
+
+func TestXcodeTestDestinationsMacRefusesNonDarwinBeforeSimctl(t *testing.T) {
+	previous := xcodeCommandGOOS
+	xcodeCommandGOOS = "linux"
+	t.Cleanup(func() { xcodeCommandGOOS = previous })
+	t.Cleanup(SetSimulatorListLoaderForTesting(func(context.Context) ([]byte, error) {
+		t.Fatal("simctl should not run on a non-macOS host")
+		return nil, nil
+	}))
+	cmd := XcodeTestDestinationsCommand()
+	if err := cmd.Parse([]string{"--platform", "macOS", "--output", "json"}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	err := cmd.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "supported on macOS only") {
+		t.Fatalf("error = %v", err)
 	}
 }
 
