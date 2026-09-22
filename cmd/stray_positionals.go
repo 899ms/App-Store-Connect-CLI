@@ -114,7 +114,11 @@ func strayPositionalHint(commandName, flagName, operand, goos string) (string, b
 	if goos == "windows" && !isWindowsRecoverySafeArg(operand) {
 		return "", false
 	}
-	return fmt.Sprintf("%s --%s %s", commandName, flagName, shellSafeCommandArg(operand)), true
+	rendered, ok := shared.ShellQuoteForOS(operand, goos)
+	if !ok {
+		return "", false
+	}
+	return fmt.Sprintf("%s --%s %s", commandName, flagName, rendered), true
 }
 
 // printStrayPositionalOperands writes the diagnostic, then the flag the caller
