@@ -491,11 +491,27 @@ func resolveTestNotesLocalization(ctx context.Context, client *asc.Client, selec
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve localization: %w", err)
 	}
-	if len(localizations.Data) == 0 {
+	if localizations == nil {
+		return nil, fmt.Errorf("empty localization response")
+	}
+	pageHasNext := strings.TrimSpace(localizations.Links.Next) != ""
+	if len(localizations.Data) == 0 && !pageHasNext {
 		return nil, fmt.Errorf("no localization found for build %q and locale %q", buildResp.Data.ID, locale)
 	}
-	if len(localizations.Data) > 1 {
-		return nil, fmt.Errorf("multiple localizations found for build %q and locale %q; use --localization-id", buildResp.Data.ID, locale)
+	if len(localizations.Data) > 1 || pageHasNext {
+		ambiguous := &shared.AmbiguousSelectionError{
+			Kind:        "build localization",
+			Description: fmt.Sprintf("build %q and locale %q", buildResp.Data.ID, strings.TrimSpace(locale)),
+			Flag:        "--localization-id",
+			Candidates: shared.LocalizationCandidates(localizations.Data, func(attributes asc.BetaBuildLocalizationAttributes) string {
+				return attributes.Locale
+			}),
+			Hint: "Use --localization-id instead of the build and locale selectors.",
+		}
+		if pageHasNext {
+			return nil, shared.MarkAmbiguousSelectionSample(ambiguous)
+		}
+		return nil, ambiguous
 	}
 
 	match := localizations.Data[0]
