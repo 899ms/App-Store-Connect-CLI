@@ -79,6 +79,9 @@ Examples:
 }
 
 func listTestDestinations(ctx context.Context, platform string, availableOnly bool) (*asc.XcodeTestDestinationsResult, error) {
+	if platform == "macOS" && xcodeCommandGOOS != "darwin" {
+		return nil, fmt.Errorf("xcode test-destinations is supported on macOS only; current platform is %s", xcodeCommandGOOS)
+	}
 	result := &asc.XcodeTestDestinationsResult{Destinations: []asc.XcodeTestDestination{}}
 	if platform == "" || platform != "macOS" {
 		body, err := loadSimulatorListJSON(ctx)

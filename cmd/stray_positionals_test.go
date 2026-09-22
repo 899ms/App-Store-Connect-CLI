@@ -106,9 +106,15 @@ func TestStrayPositionalHintRendersSafelyPerShell(t *testing.T) {
 			name:     "embedded single quote",
 			operand:  "it's",
 			goos:     "darwin",
-			want:     `asc apps view --id 'it'"'"'s'`,
+			want:     `asc apps view --id 'it'\''s'`,
 			rendered: true,
 		},
+		{name: "leading equals on posix", operand: "=ls", goos: "darwin", want: "asc apps view --id '=ls'", rendered: true},
+		{name: "spaces on linux", operand: "my app", goos: "linux", want: "asc apps view --id 'my app'", rendered: true},
+		{name: "newline on posix", operand: "line\nnext", goos: "darwin"},
+		{name: "ansi escape on posix", operand: "a\x1b[31mred", goos: "darwin"},
+		{name: "bidi override on posix", operand: "a\u202eb", goos: "darwin"},
+		{name: "invalid utf-8 on posix", operand: "a\xffb", goos: "darwin"},
 		{name: "plain id on windows", operand: "123", goos: "windows", want: "asc apps view --id 123", rendered: true},
 		{name: "ampersand on windows", operand: "x&whoami", goos: "windows"},
 		{name: "semicolon on windows", operand: "x;whoami", goos: "windows"},
@@ -125,6 +131,23 @@ func TestStrayPositionalHintRendersSafelyPerShell(t *testing.T) {
 				t.Fatalf("hint = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestStrayPositionalUnsafeOperandOmitsCopyableHint(t *testing.T) {
+	stdout, stderr := captureCommandOutput(t, func() {
+		if code := Run([]string{"apps", "view", "line\nnext"}, "1.2.3"); code != ExitUsage {
+			t.Fatalf("exit code = %d, want %d", code, ExitUsage)
+		}
+	})
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want empty", stdout)
+	}
+	if !strings.Contains(stderr, "unexpected argument") {
+		t.Fatalf("stderr = %q, want the sanitized error", stderr)
+	}
+	if strings.Contains(stderr, "Did you mean:") {
+		t.Fatalf("stderr = %q, want no copyable hint for a non-exact operand", stderr)
 	}
 }
 
