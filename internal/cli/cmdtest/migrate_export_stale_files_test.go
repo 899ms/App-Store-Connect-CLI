@@ -3,12 +3,16 @@ package cmdtest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/rootfs"
 )
 
 func TestMigrateExportRemovesStaleKnownMetadataFiles(t *testing.T) {
@@ -20,15 +24,18 @@ func TestMigrateExportRemovesStaleKnownMetadataFiles(t *testing.T) {
 	if err := os.MkdirAll(localeDir, 0o755); err != nil {
 		t.Fatalf("create locale directory: %v", err)
 	}
-	for name, content := range map[string]string{
+	staleFiles := map[string]string{
 		"description.txt": "obsolete description\n",
 		"keywords.txt":    "obsolete,keywords\n",
 		"name.txt":        "obsolete name\n",
-		"keep.txt":        "unrelated file\n",
-	} {
+	}
+	for name, content := range staleFiles {
 		if err := os.WriteFile(filepath.Join(localeDir, name), []byte(content), 0o644); err != nil {
 			t.Fatalf("write %s: %v", name, err)
 		}
+	}
+	if err := os.WriteFile(filepath.Join(localeDir, "keep.txt"), []byte("unrelated file\n"), 0o644); err != nil {
+		t.Fatalf("write unrelated file: %v", err)
 	}
 
 	installDefaultTransport(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -60,6 +67,26 @@ func TestMigrateExportRemovesStaleKnownMetadataFiles(t *testing.T) {
 		}
 		runErr = rootCmd.Run(context.Background())
 	})
+	if runtime.GOOS == "windows" {
+		if !errors.Is(runErr, rootfs.ErrFileIdentityMutationUnsupported) {
+			t.Fatalf("migrate export error = %v, want ErrFileIdentityMutationUnsupported", runErr)
+		}
+		for name, want := range staleFiles {
+			got, err := os.ReadFile(filepath.Join(localeDir, name))
+			if err != nil {
+				t.Fatalf("read stale %s after unsupported export: %v", name, err)
+			}
+			if string(got) != want {
+				t.Fatalf("stale %s = %q, want unchanged %q", name, got, want)
+			}
+		}
+		if got, err := os.ReadFile(filepath.Join(localeDir, "keep.txt")); err != nil {
+			t.Fatalf("read unrelated file after unsupported export: %v", err)
+		} else if string(got) != "unrelated file\n" {
+			t.Fatalf("unrelated file = %q, want unchanged", got)
+		}
+		return
+	}
 	if runErr != nil {
 		t.Fatalf("migrate export error: %v", runErr)
 	}
