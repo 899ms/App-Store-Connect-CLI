@@ -19,16 +19,32 @@ var (
 func collectAnalyticsReports(ctx context.Context, client *asc.Client, reports []asc.Resource[asc.AnalyticsReportAttributes], instanceOpts []asc.AnalyticsReportInstancesOption, includeSegments bool, processingDateFilter string) ([]asc.AnalyticsReportGetReport, int, error) {
 	results := make([]asc.AnalyticsReportGetReport, len(reports))
 	include := make([]bool, len(reports))
-	errs := make([]error, len(reports))
 	counts := make([]int, len(reports))
 	sem := make(chan struct{}, analyticsInstanceFetchConcurrency)
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var firstErr error
+	var firstErrOnce sync.Once
+	recordError := func(err error) {
+		if err == nil {
+			return
+		}
+		firstErrOnce.Do(func() {
+			firstErr = err
+			cancel()
+		})
+	}
 	var wg sync.WaitGroup
 	var inFlight atomic.Int32
 	for index, report := range reports {
 		wg.Add(1)
 		go func(index int, report asc.Resource[asc.AnalyticsReportAttributes]) {
 			defer wg.Done()
-			sem <- struct{}{}
+			select {
+			case sem <- struct{}{}:
+			case <-workCtx.Done():
+				return
+			}
 			current := inFlight.Add(1)
 			for {
 				seen := analyticsInstanceFetchMaxInFlight.Load()
@@ -40,20 +56,26 @@ func collectAnalyticsReports(ctx context.Context, client *asc.Client, reports []
 				inFlight.Add(-1)
 				<-sem
 			}()
-			reportResult, count, err := analyticsReportResult(ctx, client, report, instanceOpts, includeSegments)
+			reportResult, count, err := analyticsReportResult(workCtx, client, report, instanceOpts, includeSegments)
+			if err != nil {
+				recordError(err)
+				return
+			}
 			results[index] = reportResult
 			counts[index] = count
-			errs[index] = err
-			include[index] = err == nil && (processingDateFilter == "" || count != 0)
+			include[index] = processingDateFilter == "" || count != 0
 		}(index, report)
 	}
 	wg.Wait()
+	if firstErr != nil {
+		return nil, 0, firstErr
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
 	collected := make([]asc.AnalyticsReportGetReport, 0, len(reports))
 	total := 0
 	for index := range reports {
-		if errs[index] != nil {
-			return nil, 0, errs[index]
-		}
 		total += counts[index]
 		if include[index] {
 			collected = append(collected, results[index])

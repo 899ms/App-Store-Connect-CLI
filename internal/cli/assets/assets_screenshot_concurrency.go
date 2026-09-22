@@ -2,10 +2,13 @@ package assets
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
 type screenshotConcurrencyKey struct{}
@@ -55,6 +58,47 @@ type screenshotUploadSlot struct {
 	err     error
 }
 
+func screenshotUploadItemPending(item asc.AssetUploadResultItem) screenshotPendingAsset {
+	return screenshotPendingAsset{
+		FileName: item.FileName,
+		FilePath: item.FilePath,
+		AssetID:  strings.TrimSpace(item.AssetID),
+		State:    item.State,
+	}
+}
+
+func cleanupScreenshotAssets(ctx context.Context, client *asc.Client, assets []screenshotPendingAsset) ([]screenshotPendingAsset, error) {
+	if len(assets) == 0 {
+		return nil, nil
+	}
+	cleanupBase := shared.ContextWithoutTimeout(ctx)
+	cleanupCtx, cancel := shared.ContextWithTimeout(context.WithoutCancel(cleanupBase))
+	defer cancel()
+
+	remaining := make([]screenshotPendingAsset, 0)
+	cleanupErrors := make([]error, 0)
+	seen := make(map[string]struct{}, len(assets))
+	for index := len(assets) - 1; index >= 0; index-- {
+		asset := assets[index]
+		asset.AssetID = strings.TrimSpace(asset.AssetID)
+		if asset.AssetID == "" {
+			continue
+		}
+		if _, ok := seen[asset.AssetID]; ok {
+			continue
+		}
+		seen[asset.AssetID] = struct{}{}
+
+		err := client.DeleteAppScreenshot(cleanupCtx, asset.AssetID)
+		if err == nil || asc.IsNotFound(err) {
+			continue
+		}
+		remaining = append(remaining, asset)
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("delete screenshot %q: %w", asset.AssetID, err))
+	}
+	return remaining, errors.Join(cleanupErrors...)
+}
+
 func uploadScreenshotsConcurrently(ctx context.Context, client *asc.Client, setID string, progress screenshotUploadProgress, files []string, sourceRootPath string, openedFiles openedScreenshotFiles, syncIfNoNew, syncAfterUpload bool, concurrency int) (screenshotUploadProgress, error) {
 	slots := make([]screenshotUploadSlot, len(files))
 	work := make(chan int)
@@ -92,14 +136,16 @@ func uploadScreenshotsConcurrently(ctx context.Context, client *asc.Client, setI
 		}
 	}
 	if failed >= 0 {
+		cleanupAssets := make([]screenshotPendingAsset, 0, len(slots)-failed-1)
 		for idx := failed + 1; idx < len(slots); idx++ {
 			if id := strings.TrimSpace(slots[idx].item.AssetID); id != "" {
-				_ = client.DeleteAppScreenshot(context.WithoutCancel(ctx), id)
+				cleanupAssets = append(cleanupAssets, screenshotUploadItemPending(slots[idx].item))
 			}
-			if id := strings.TrimSpace(slots[idx].pending.AssetID); id != "" && id != strings.TrimSpace(slots[idx].item.AssetID) {
-				_ = client.DeleteAppScreenshot(context.WithoutCancel(ctx), id)
+			if id := strings.TrimSpace(slots[idx].pending.AssetID); id != "" {
+				cleanupAssets = append(cleanupAssets, slots[idx].pending)
 			}
 		}
+		cleanupFailures, cleanupErr := cleanupScreenshotAssets(ctx, client, cleanupAssets)
 		for idx := 0; idx < failed; idx++ {
 			progress.Results = append(progress.Results, slots[idx].item)
 			progress.OrderedIDs = appendUniqueAssetID(progress.OrderedIDs, slots[idx].item.AssetID)
@@ -108,8 +154,11 @@ func uploadScreenshotsConcurrently(ctx context.Context, client *asc.Client, setI
 		if strings.TrimSpace(slots[failed].pending.AssetID) != "" {
 			progress.PendingAssets = []screenshotPendingAsset{slots[failed].pending}
 		}
+		progress.CleanupFailures = cleanupFailures
+		progress.CleanupError = cleanupErr
+		progress.UploadError = slots[failed].err
 		progress.FailedFile = files[failed]
-		return progress, slots[failed].err
+		return progress, errors.Join(slots[failed].err, cleanupErr)
 	}
 
 	for _, slot := range slots {

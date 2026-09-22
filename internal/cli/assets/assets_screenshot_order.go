@@ -10,11 +10,14 @@ import (
 )
 
 type screenshotUploadProgress struct {
-	Results       []asc.AssetUploadResultItem
-	OrderedIDs    []string
-	PendingFiles  []string
-	PendingAssets []screenshotPendingAsset
-	FailedFile    string
+	Results         []asc.AssetUploadResultItem
+	OrderedIDs      []string
+	PendingFiles    []string
+	PendingAssets   []screenshotPendingAsset
+	CleanupFailures []screenshotPendingAsset
+	CleanupError    error
+	UploadError     error
+	FailedFile      string
 }
 
 func uploadScreenshotsToSetFromRoot(ctx context.Context, client *asc.Client, setID string, files []string, sourceRootPath string, preserveExistingOrder bool) ([]asc.AssetUploadResultItem, error) {
@@ -134,6 +137,9 @@ func resumeScreenshotsWithOrderState(ctx context.Context, client *asc.Client, se
 	progress.OrderedIDs = remaining.OrderedIDs
 	progress.PendingFiles = remaining.PendingFiles
 	progress.PendingAssets = remaining.PendingAssets
+	progress.CleanupFailures = remaining.CleanupFailures
+	progress.CleanupError = remaining.CleanupError
+	progress.UploadError = remaining.UploadError
 	progress.FailedFile = remaining.FailedFile
 	return progress, err
 }

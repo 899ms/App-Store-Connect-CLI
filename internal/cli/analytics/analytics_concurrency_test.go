@@ -2,6 +2,7 @@ package analytics
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -47,5 +48,32 @@ func TestCollectAnalyticsReportsBoundsInstanceFetch(t *testing.T) {
 	}
 	if elapsed > 160*time.Millisecond {
 		t.Fatalf("elapsed %s, want bounded parallel fetch under 160ms", elapsed)
+	}
+}
+
+func TestCollectAnalyticsReportsCancelsSiblingsAndPreservesFirstError(t *testing.T) {
+	sentinel := errors.New("report fetch failed")
+	previous := fetchAnalyticsReportInstancesFn
+	t.Cleanup(func() { fetchAnalyticsReportInstancesFn = previous })
+	ready := make(chan struct{}, 3)
+	fetchAnalyticsReportInstancesFn = func(ctx context.Context, _ *asc.Client, reportID string, _ ...asc.AnalyticsReportInstancesOption) ([]asc.Resource[asc.AnalyticsReportInstanceAttributes], error) {
+		if reportID == "fail" {
+			for i := 0; i < 3; i++ {
+				<-ready
+			}
+			return nil, sentinel
+		}
+		ready <- struct{}{}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	reports := make([]asc.Resource[asc.AnalyticsReportAttributes], 4)
+	for i, id := range []string{"a", "b", "c", "fail"} {
+		reports[i].ID = id
+	}
+
+	_, _, err := collectAnalyticsReports(context.Background(), nil, reports, nil, false, "")
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("error = %v, want original sentinel", err)
 	}
 }
