@@ -117,6 +117,17 @@ func trimPasswordFileNewline(password string) string {
 	return strings.TrimSuffix(password, "\n")
 }
 
+func trimPasswordFileNewlineBytes(password []byte) []byte {
+	switch length := len(password); {
+	case length >= 2 && password[length-2] == '\r' && password[length-1] == '\n':
+		return password[:length-2]
+	case length >= 1 && password[length-1] == '\n':
+		return password[:length-1]
+	default:
+		return password
+	}
+}
+
 func onceAfterSuccess(operation func() error) func() error {
 	done := false
 	return func() error {
@@ -241,6 +252,7 @@ func syncPushCommand() *ffcli.Command {
 				if err != nil {
 					return fmt.Errorf("signing sync push: identity password: %w", err)
 				}
+				certificatePassword = trimPasswordFileNewlineBytes(certificatePassword)
 				defer clear(certificatePassword)
 			}
 

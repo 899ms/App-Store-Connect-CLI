@@ -165,6 +165,7 @@ Examples:
 				if err != nil {
 					return fmt.Errorf("signing fetch: %w", err)
 				}
+				password = trimPasswordFileNewlineBytes(password)
 				defer clear(password)
 			}
 			certSlug := "distribution"

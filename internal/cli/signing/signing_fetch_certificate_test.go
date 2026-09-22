@@ -19,6 +19,7 @@ import (
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
+	modernpkcs12 "software.sslmate.com/src/go-pkcs12"
 )
 
 func TestSigningFetchCreateMissingCertificateUsage(t *testing.T) {
@@ -98,7 +99,7 @@ func TestSigningFetchCreatesCertificateThenSkipsOnRerun(t *testing.T) {
 	}))
 	output := t.TempDir()
 	password := filepath.Join(t.TempDir(), "password")
-	if err := os.WriteFile(password, []byte("secret"), 0o600); err != nil {
+	if err := os.WriteFile(password, []byte("secret\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	firstOutput := filepath.Join(output, "first")
@@ -140,6 +141,16 @@ func TestSigningFetchCreatesCertificateThenSkipsOnRerun(t *testing.T) {
 	}
 	if result.CertificateCreated == nil || !*result.CertificateCreated || result.P12Path == "" || result.PrivateKeyPath == "" {
 		t.Fatalf("result = %#v", result)
+	}
+	p12, err := os.ReadFile(result.P12Path)
+	if err != nil {
+		t.Fatalf("read generated p12: %v", err)
+	}
+	if _, _, err := modernpkcs12.Decode(p12, "secret"); err != nil {
+		t.Fatalf("decode generated p12 with normalized password: %v", err)
+	}
+	if _, _, err := modernpkcs12.Decode(p12, "secret\n"); err == nil {
+		t.Fatal("generated p12 retained the password file newline")
 	}
 	if posted != 1 {
 		t.Fatalf("posted %d certificates", posted)
