@@ -85,7 +85,7 @@ func TestUnknownFlagSuggestsTheIntendedFlag(t *testing.T) {
 			name: "profiles list --bundle-id",
 			args: []string{"profiles", "list", "--bundle-id", "PRIVATE_VALUE"},
 			want: "Error: unknown flag `--bundle-id` for `asc profiles list`\n" +
-				"Try:\n  --bundle-id-fields\n  --id\n" +
+				"Try:\n  --id\n" +
 				"For help:\n  asc profiles list --help\n",
 		},
 		{

@@ -268,6 +268,16 @@ func TestUnknownFlagSuggestionRankingTiers(t *testing.T) {
 			want:     nil,
 		},
 		{
+			name: "identifier spelling skips sparse-field flags",
+			flags: func(fs *flag.FlagSet) {
+				fs.String("bundle-id-fields", "", "Sparse fields for included bundleIds")
+				fs.String("id", "", "Profile ID (required)")
+			},
+			unknown:  "--bundle-id",
+			fallback: true,
+			want:     []string{"id"},
+		},
+		{
 			name: "an identifier inside a filename template is not a selector",
 			flags: func(fs *flag.FlagSet) {
 				fs.String("template", "", "Name pattern such as AuthKey_<KEY_ID>.p8")

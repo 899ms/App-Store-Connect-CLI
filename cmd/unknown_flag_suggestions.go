@@ -120,9 +120,12 @@ func unknownFlagSuggestions(flags *flag.FlagSet, flagName string, options unknow
 
 	defined := make(map[string]string, len(candidates))
 	names := make([]string, 0, len(candidates))
+	identifierInput := isInventedIdentifierFlag(name)
 	for _, candidate := range candidates {
 		defined[candidate.Name] = candidate.Usage
-		names = append(names, candidate.Name)
+		if !identifierInput || !isSparseFieldFlag(candidate.Name) {
+			names = append(names, candidate.Name)
+		}
 	}
 
 	skip := map[string]struct{}{name: {}}
@@ -162,6 +165,10 @@ func unknownFlagSuggestions(flags *flag.FlagSet, flagName string, options unknow
 		}
 	}
 	return suggestions
+}
+
+func isSparseFieldFlag(name string) bool {
+	return name == "fields" || strings.HasSuffix(name, "-fields")
 }
 
 // suggestibleFlags lists the flags a suggestion may name: visible in help and
