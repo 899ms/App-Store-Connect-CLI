@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
 
@@ -21,9 +22,10 @@ import (
 
 const deviceWithoutCreateMissingError = "--device requires --create-missing because device IDs are only applied to profiles this command creates"
 
-// maxProfileNameLength is the issue #2520 proposed guard. The OpenAPI snapshot
-// has no maxLength; generated names stay within 64 and explicit --name values
-// longer than that are rejected before any API call.
+// maxProfileNameLength is the issue #2520 proposed guard, measured in Unicode
+// code points. The OpenAPI snapshot has no maxLength; generated names stay
+// within 64 and explicit --name values longer than that are rejected before
+// any API call.
 const maxProfileNameLength = 64
 
 const profileNameHashSuffixLen = 6
@@ -600,16 +602,17 @@ func profileCreateNameForTarget(profileType, bundleIdentifier string, now time.T
 	prefix := profileCreateName(profileType, now)
 	component := safeFileName(bundleIdentifier, "target")
 	full := prefix + "-" + component
-	if len(full) <= maxProfileNameLength {
+	if utf8.RuneCountInString(full) <= maxProfileNameLength {
 		return full
 	}
 	hash := profileNameHash(bundleIdentifier)
-	budget := maxProfileNameLength - len(prefix) - len(hash) - 2
+	budget := maxProfileNameLength - utf8.RuneCountInString(prefix) - utf8.RuneCountInString(hash) - 2
 	if budget < 1 {
 		budget = 1
 	}
-	if len(component) > budget {
-		component = component[:budget]
+	componentRunes := []rune(component)
+	if len(componentRunes) > budget {
+		component = string(componentRunes[:budget])
 	}
 	return prefix + "-" + component + "-" + hash
 }
@@ -622,10 +625,11 @@ func profileNameHash(value string) string {
 // ValidateProfileNameLength reports a usage error when an explicit profile
 // name exceeds the generated-name guard.
 func ValidateProfileNameLength(name string) error {
-	if len(name) <= maxProfileNameLength {
+	length := utf8.RuneCountInString(name)
+	if length <= maxProfileNameLength {
 		return nil
 	}
-	return fmt.Errorf("profile name must be at most %d characters; got %d", maxProfileNameLength, len(name))
+	return fmt.Errorf("profile name must be at most %d characters; got %d", maxProfileNameLength, length)
 }
 
 func isDevelopmentProfile(profileType string) bool {

@@ -25,7 +25,7 @@ func assertNoPlatformFilter(t *testing.T, name, rawQuery string) {
 	if err != nil {
 		t.Fatalf("parse %s query %q: %v", name, rawQuery, err)
 	}
-	if got := values.Get("filter[platform]"); got != "" {
+	if got, present := values["filter[platform]"]; present {
 		t.Fatalf("%s query sent filter[platform]=%q", name, got)
 	}
 }
