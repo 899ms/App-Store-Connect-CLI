@@ -393,10 +393,12 @@ func TestSigningFetchPreflightsCertificateCreationBeforeCertificatePOST(t *testi
 }
 
 func TestSigningFetchPreflightsGeneratedOutputStructureBeforeCertificatePOST(t *testing.T) {
+	fixedProfileTime := time.Date(2026, time.September, 22, 12, 0, 0, 0, time.UTC)
 	for _, test := range []struct {
 		name      string
 		pathArgs  func(string) []string
 		wantError string
+		now       time.Time
 	}{
 		{
 			name: "missing p12 parent",
@@ -413,8 +415,22 @@ func TestSigningFetchPreflightsGeneratedOutputStructureBeforeCertificatePOST(t *
 			},
 			wantError: "output paths must be distinct",
 		},
+		{
+			name: "identity path aliases planned profile",
+			pathArgs: func(output string) []string {
+				plannedProfile := profileOutputPath(output, profileCreateName("IOS_APP_STORE", fixedProfileTime), "", "IOS_APP_STORE")
+				return []string{"--key-out", plannedProfile}
+			},
+			wantError: "output paths must be distinct",
+			now:       fixedProfileTime,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			if !test.now.IsZero() {
+				previousNow := signingFetchNowFn
+				signingFetchNowFn = func() time.Time { return test.now }
+				t.Cleanup(func() { signingFetchNowFn = previousNow })
+			}
 			t.Setenv("ASC_APP_ID", "")
 			t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "missing.json"))
 			certificatePosts := 0

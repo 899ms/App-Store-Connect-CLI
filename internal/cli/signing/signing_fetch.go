@@ -30,6 +30,8 @@ const maxProfileNameLength = 64
 
 const profileNameHashSuffixLen = 6
 
+var signingFetchNowFn = time.Now
+
 // rejectDeviceWithoutCreateMissing fails before any App Store Connect call when
 // device IDs were supplied but could never be applied.
 func rejectDeviceWithoutCreateMissing(deviceIDs string, createMissing bool) error {
@@ -212,6 +214,10 @@ Examples:
 							return err
 						}
 						if err := certificateOutputs.Prepare([]string{keyPath, csrPath, p12Path}, *force); err != nil {
+							return err
+						}
+						plannedProfilePath := profileOutputPath(outputDir, plan.ProfileName, "", profType)
+						if err := certificateOutputs.CheckDistinct(plannedProfilePath); err != nil {
 							return err
 						}
 						metadataPath := filepath.Join(outputDir, "profiles.json")
@@ -443,7 +449,7 @@ func resolveSigningAssets(ctx context.Context, client *asc.Client, options signi
 	}
 	profileName := strings.TrimSpace(options.ProfileName)
 	if profileName == "" {
-		profileName = profileCreateName(options.ProfileType, time.Now())
+		profileName = profileCreateName(options.ProfileType, signingFetchNowFn())
 	}
 
 	profiles, err := findActiveProfiles(ctx, client, options.BundleIDResourceID, options.ProfileType)
