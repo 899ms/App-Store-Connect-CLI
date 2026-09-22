@@ -668,16 +668,21 @@ version. Any other 409 keeps failing.`,
 					attrs.VersionString, normalizedPlatform, resolvedAppID, resp.Data.ID, ifExistsOutcomeText(action), ifExistsMode)
 			}
 
-			result := &asc.AppStoreVersionDetailResult{
-				ID:            resp.Data.ID,
-				VersionString: resp.Data.Attributes.VersionString,
-				Platform:      string(resp.Data.Attributes.Platform),
-				State:         shared.ResolveAppStoreVersionState(resp.Data.Attributes),
-				IdempotentWriteReceipt: asc.IdempotentWriteReceipt{
+			receipt := asc.IdempotentWriteReceipt{}
+			if ifExistsMode != shared.IfExistsFail {
+				receipt = asc.IdempotentWriteReceipt{
 					AlreadyExists: action != asc.IdempotentWriteActionCreated,
 					Action:        action,
-				},
-				MetadataCopy: copySummary,
+				}
+			}
+
+			result := &asc.AppStoreVersionDetailResult{
+				ID:                     resp.Data.ID,
+				VersionString:          resp.Data.Attributes.VersionString,
+				Platform:               string(resp.Data.Attributes.Platform),
+				State:                  shared.ResolveAppStoreVersionState(resp.Data.Attributes),
+				IdempotentWriteReceipt: receipt,
+				MetadataCopy:           copySummary,
 			}
 
 			return shared.PrintOutput(result, *output.Output, *output.Pretty)

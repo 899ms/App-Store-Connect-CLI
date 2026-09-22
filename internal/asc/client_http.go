@@ -808,10 +808,12 @@ func ParseErrorWithStatus(body []byte, statusCode int) error {
 	if err := json.Unmarshal(body, &errResp); err == nil && len(errResp.Errors) > 0 {
 		associatedErrors := parseAssociatedErrors(errResp.Errors[0].Meta)
 		allCodes := make([]string, 0, len(errResp.Errors))
+		allDetails := make([]string, 0, len(errResp.Errors))
 		for _, entry := range errResp.Errors {
 			if code := strings.TrimSpace(entry.Code); code != "" {
 				allCodes = append(allCodes, code)
 			}
+			allDetails = append(allDetails, entry.Detail)
 		}
 		return &APIError{
 			Code:             errResp.Errors[0].Code,
@@ -820,6 +822,7 @@ func ParseErrorWithStatus(body []byte, statusCode int) error {
 			StatusCode:       statusCode,
 			AssociatedErrors: associatedErrors,
 			AllCodes:         allCodes,
+			AllDetails:       allDetails,
 			Remediation:      remediationForAPIError(errResp.Errors[0].Code),
 		}
 	}
