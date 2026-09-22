@@ -5,12 +5,13 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSimctlListJSONUsesOnlyList(t *testing.T) {
-	if runtimeGOOS != "darwin" {
-		t.Skip("simctl list is macOS only")
-	}
+	previousGOOS := runtimeGOOS
+	runtimeGOOS = "darwin"
+	t.Cleanup(func() { runtimeGOOS = previousGOOS })
 	originalLookPath := lookPathFn
 	originalCommandContext := commandContextFn
 	useLookPathAsTrustedResolver(t)
@@ -39,6 +40,120 @@ func TestSimctlListJSONUsesOnlyList(t *testing.T) {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("argv %q contains mutating verb %s", got, forbidden)
 		}
+	}
+}
+
+func TestSimctlListJSONRejectsOversizedStdout(t *testing.T) {
+	previousGOOS := runtimeGOOS
+	runtimeGOOS = "darwin"
+	t.Cleanup(func() { runtimeGOOS = previousGOOS })
+	originalCommandContext := commandContextFn
+	t.Cleanup(func() { commandContextFn = originalCommandContext })
+	useTrustedTestCommandNames(t)
+	commandContextFn = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c", "head -c 16777217 /dev/zero")
+	}
+
+	if _, err := SimctlListJSON(context.Background()); err == nil || !strings.Contains(err.Error(), "output exceeds") {
+		t.Fatalf("SimctlListJSON() error = %v, want bounded-output error", err)
+	}
+}
+
+func TestSimctlListJSONStopsAnUnboundedStdoutProcess(t *testing.T) {
+	previousGOOS := runtimeGOOS
+	runtimeGOOS = "darwin"
+	t.Cleanup(func() { runtimeGOOS = previousGOOS })
+	originalCommandContext := commandContextFn
+	t.Cleanup(func() { commandContextFn = originalCommandContext })
+	useTrustedTestCommandNames(t)
+	commandContextFn = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "yes")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := SimctlListJSON(ctx)
+		done <- err
+	}()
+
+	waitForResult := func(timeout time.Duration) (error, bool) {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		select {
+		case err := <-done:
+			return err, true
+		case <-timer.C:
+			return nil, false
+		}
+	}
+	err, completed := waitForResult(2 * time.Second)
+	if !completed {
+		cancel()
+		if _, cleanedUp := waitForResult(time.Second); !cleanedUp {
+			t.Fatal("SimctlListJSON() did not terminate after cancellation")
+		}
+		t.Fatal("SimctlListJSON() did not stop promptly after output overflow")
+	}
+	if err == nil || !strings.Contains(err.Error(), "output exceeds") {
+		t.Fatalf("SimctlListJSON() error = %v, want bounded-output error", err)
+	}
+}
+
+func TestSimctlListJSONPreservesStderrDiagnostics(t *testing.T) {
+	previousGOOS := runtimeGOOS
+	runtimeGOOS = "darwin"
+	t.Cleanup(func() { runtimeGOOS = previousGOOS })
+	originalCommandContext := commandContextFn
+	t.Cleanup(func() { commandContextFn = originalCommandContext })
+	useTrustedTestCommandNames(t)
+	commandContextFn = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c", "printf '%s\\n' SIMCTL_FAILURE >&2; exit 65")
+	}
+
+	if _, err := SimctlListJSON(context.Background()); err == nil || !strings.Contains(err.Error(), "SIMCTL_FAILURE") {
+		t.Fatalf("SimctlListJSON() error = %v, want preserved stderr diagnostics", err)
+	}
+}
+
+func TestSimctlListJSONBoundsStderrDiagnostics(t *testing.T) {
+	previousGOOS := runtimeGOOS
+	runtimeGOOS = "darwin"
+	t.Cleanup(func() { runtimeGOOS = previousGOOS })
+	originalCommandContext := commandContextFn
+	t.Cleanup(func() { commandContextFn = originalCommandContext })
+	useTrustedTestCommandNames(t)
+	commandContextFn = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c", "head -c 65536 /dev/zero >&2; exit 65")
+	}
+
+	_, err := SimctlListJSON(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "[truncated]") {
+		t.Fatalf("SimctlListJSON() error = %v, want bounded stderr diagnostics", err)
+	}
+	if len(err.Error()) > maxSimctlListDiagnosticBytes+256 {
+		t.Fatalf("error length = %d, want bounded diagnostics", len(err.Error()))
+	}
+}
+
+func TestSimctlListJSONRejectsOversizedStderrBeforeReturningJSON(t *testing.T) {
+	previousGOOS := runtimeGOOS
+	runtimeGOOS = "darwin"
+	t.Cleanup(func() { runtimeGOOS = previousGOOS })
+	originalCommandContext := commandContextFn
+	t.Cleanup(func() { commandContextFn = originalCommandContext })
+	useTrustedTestCommandNames(t)
+	commandContextFn = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c", `printf '%s' '{"devices":{}}'; head -c 65536 /dev/zero >&2`)
+	}
+
+	body, err := SimctlListJSON(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "diagnostics exceed") {
+		t.Fatalf("SimctlListJSON() error = %v, want oversized-diagnostics error", err)
+	}
+	if body != nil {
+		t.Fatalf("SimctlListJSON() body = %d bytes, want no successful JSON result", len(body))
 	}
 }
 

@@ -51,6 +51,9 @@ func XcodeTestJUnitCommand() *ffcli.Command {
 
 The command reads the bundle with xcresulttool and writes the same report shape
 as asc xcode test --report junit. It does not call App Store Connect.
+The xcresulttool reads use the configured ASC timeout, defaulting to 30 seconds.
+If aggregate summary loading succeeds but per-case enrichment fails, the command
+fails closed and does not write a partial report.
 
 Examples:
   asc xcode test junit --xcresult ./Test.xcresult --report-file ./junit.xml --output json`,
@@ -71,7 +74,9 @@ Examples:
 			if _, err := shared.ValidateOutputFormat(*output.Output, *output.Pretty); err != nil {
 				return shared.UsageError(err.Error())
 			}
-			summary, err := loadXCResultSummary(ctx, bundlePath)
+			readCtx, cancel := shared.ContextWithTimeout(ctx)
+			defer cancel()
+			summary, err := loadXCResultSummary(readCtx, bundlePath)
 			if err != nil {
 				return fmt.Errorf("xcode test junit: %w", err)
 			}

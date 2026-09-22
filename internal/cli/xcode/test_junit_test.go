@@ -2,6 +2,7 @@ package xcode
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,7 +48,10 @@ func TestXcodeTestJUnitWritesGoldenReportFromFixtureSummary(t *testing.T) {
 	}
 	summary.Cases = cases
 	reportFile := filepath.Join(t.TempDir(), "junit.xml")
-	t.Cleanup(SetXCResultSummaryLoaderForTesting(func(context.Context, string) (*localxcode.TestSummary, error) {
+	t.Cleanup(SetXCResultSummaryLoaderForTesting(func(ctx context.Context, _ string) (*localxcode.TestSummary, error) {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Error("loader context has no deadline")
+		}
 		return summary, nil
 	}))
 
@@ -67,6 +71,31 @@ func TestXcodeTestJUnitWritesGoldenReportFromFixtureSummary(t *testing.T) {
 		if !strings.Contains(xml, want) {
 			t.Fatalf("junit xml missing %q:\n%s", want, xml)
 		}
+	}
+}
+
+func TestXcodeTestJUnitFailsClosedWhenCaseEnrichmentFails(t *testing.T) {
+	reportFile := filepath.Join(t.TempDir(), "junit.xml")
+	t.Cleanup(SetXCResultSummaryLoaderForTesting(func(ctx context.Context, _ string) (*localxcode.TestSummary, error) {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Error("loader context has no deadline")
+		}
+		return &localxcode.TestSummary{
+			Total:  1,
+			Passed: 1,
+		}, errors.New("case enrichment unavailable")
+	}))
+
+	cmd := XcodeTestJUnitCommand()
+	if err := cmd.Parse([]string{"--xcresult", "Test.xcresult", "--report-file", reportFile, "--output", "json"}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	err := cmd.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "case enrichment unavailable") {
+		t.Fatalf("run error = %v, want case-enrichment failure", err)
+	}
+	if _, statErr := os.Stat(reportFile); !os.IsNotExist(statErr) {
+		t.Fatalf("report stat error = %v, want no report after failed enrichment", statErr)
 	}
 }
 
@@ -92,7 +121,10 @@ func TestXcodeTestJUnitRequiresPathsBeforeLoading(t *testing.T) {
 
 func TestXcodeTestDestinationsParsesFixtureAndFiltersUnavailable(t *testing.T) {
 	var calls int
-	t.Cleanup(SetSimulatorListLoaderForTesting(func(context.Context) ([]byte, error) {
+	t.Cleanup(SetSimulatorListLoaderForTesting(func(ctx context.Context) ([]byte, error) {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Error("loader context has no deadline")
+		}
 		calls++
 		return []byte(`{
 		  "devices": {

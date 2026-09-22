@@ -48,7 +48,8 @@ func XcodeTestDestinationsCommand() *ffcli.Command {
 
 This is a read-only simctl list. It never boots, creates, erases, or deletes a simulator.
 macOS is the local host destination and does not require simctl. Create, boot, and delete
-remain outside this command.
+remain outside this command. The simctl read uses the configured ASC timeout,
+defaulting to 30 seconds.
 
 Examples:
   asc xcode test-destinations --output json
@@ -66,7 +67,9 @@ Examples:
 			if _, err := shared.ValidateOutputFormat(*output.Output, *output.Pretty); err != nil {
 				return shared.UsageError(err.Error())
 			}
-			result, err := listTestDestinations(ctx, normalized, *availableOnly)
+			readCtx, cancel := shared.ContextWithTimeout(ctx)
+			defer cancel()
+			result, err := listTestDestinations(readCtx, normalized, *availableOnly)
 			if err != nil {
 				return fmt.Errorf("xcode test-destinations: %w", err)
 			}
