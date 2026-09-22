@@ -1,7 +1,9 @@
 package cmdtest
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,7 +14,7 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/config"
 )
 
-// writeProfileFixtureConfig creates an isolated config store holding two named
+// writeProfileFixtureConfig creates an isolated config store holding three named
 // credentials so that profile selection is observable without a network call.
 func writeProfileFixtureConfig(t *testing.T) {
 	t.Helper()
@@ -21,14 +23,17 @@ func writeProfileFixtureConfig(t *testing.T) {
 	configPath := filepath.Join(home, "config.json")
 	prodKeyPath := filepath.Join(home, "AuthKey_PROD.p8")
 	stagingKeyPath := filepath.Join(home, "AuthKey_STAGING.p8")
+	clientKeyPath := filepath.Join(home, "AuthKey_CLIENT.p8")
 	writeECDSAPEM(t, prodKeyPath)
 	writeECDSAPEM(t, stagingKeyPath)
+	writeECDSAPEM(t, clientKeyPath)
 
 	cfg := &config.Config{
 		DefaultKeyName: "prod",
 		Keys: []config.Credential{
 			{Name: "prod", KeyID: "KEYPROD", IssuerID: "ISSPROD", PrivateKeyPath: prodKeyPath},
 			{Name: "staging", KeyID: "KEYSTAGE", IssuerID: "ISSSTAGE", PrivateKeyPath: stagingKeyPath},
+			{Name: "client", KeyID: "KEYCLIENT", IssuerID: "ISSCLIENT", PrivateKeyPath: clientKeyPath},
 		},
 	}
 	payload, err := json.Marshal(cfg)
@@ -46,6 +51,71 @@ func writeProfileFixtureConfig(t *testing.T) {
 	previousProfile := shared.SelectedProfile()
 	shared.SetSelectedProfile("")
 	t.Cleanup(func() { shared.SetSelectedProfile(previousProfile) })
+}
+
+func TestAppsListProfilePlacementUsesSameCredential(t *testing.T) {
+	writeProfileFixtureConfig(t)
+
+	var keyIDs []string
+	installDefaultTransport(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodGet || req.URL.Path != "/v1/apps" {
+			t.Fatalf("request = %s %s, want GET /v1/apps", req.Method, req.URL.Path)
+		}
+
+		token := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
+		parts := strings.Split(token, ".")
+		if len(parts) != 3 {
+			t.Fatalf("Authorization token has %d parts, want 3", len(parts))
+		}
+		headerJSON, err := base64.RawURLEncoding.DecodeString(parts[0])
+		if err != nil {
+			t.Fatalf("decode JWT header: %v", err)
+		}
+		var header struct {
+			KeyID string `json:"kid"`
+		}
+		if err := json.Unmarshal(headerJSON, &header); err != nil {
+			t.Fatalf("decode JWT header JSON: %v", err)
+		}
+		keyIDs = append(keyIDs, header.KeyID)
+
+		return jsonResponse(http.StatusOK, `{"data":[{"type":"apps","id":"app-1","attributes":{"name":"Demo"}}]}`)
+	}))
+
+	invocations := [][]string{
+		{"--profile", "client", "apps", "list", "--output", "json"},
+		{"apps", "list", "--output", "json", "--profile", "client"},
+	}
+	var outputs []string
+	for _, args := range invocations {
+		stdout, stderr := captureOutput(t, func() {
+			if code := rootcmd.Run(args, "1.2.3"); code != rootcmd.ExitSuccess {
+				t.Fatalf("Run(%q) exit code = %d, want %d", args, code, rootcmd.ExitSuccess)
+			}
+		})
+		if stderr != "" {
+			t.Fatalf("Run(%q) stderr = %q, want empty", args, stderr)
+		}
+		var payload struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+			t.Fatalf("decode apps output %q: %v", stdout, err)
+		}
+		if len(payload.Data) != 1 || payload.Data[0].ID != "app-1" {
+			t.Fatalf("apps output = %+v, want app-1", payload.Data)
+		}
+		outputs = append(outputs, stdout)
+	}
+
+	if len(keyIDs) != 2 || keyIDs[0] != "KEYCLIENT" || keyIDs[1] != "KEYCLIENT" {
+		t.Fatalf("JWT key IDs = %q, want KEYCLIENT for both placements", keyIDs)
+	}
+	if outputs[0] != outputs[1] {
+		t.Fatalf("apps outputs differ: root=%q trailing=%q", outputs[0], outputs[1])
+	}
 }
 
 func runProfileSelection(t *testing.T, args []string) string {
