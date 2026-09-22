@@ -176,6 +176,7 @@ Examples:
 			p12Path := firstNonEmpty(*p12Out, filepath.Join(outputDir, certSlug+".p12"))
 			var createdIdentity createdSigningIdentity
 			createdFlag := false
+			progress := &signingAssetsProgress{}
 
 			if *createMissingCertificate {
 				if err := prepareOutputDir(); err != nil {
@@ -201,23 +202,51 @@ Examples:
 						Force:    *force,
 					},
 					CreatedIdentity: &createdIdentity,
+					Progress:        progress,
+					BeforeCertificateCreate: func(plan profileCreatePlan) error {
+						if err := preflightOutput(plan.ProfileName, "", nil); err != nil {
+							return err
+						}
+						paths := []string{filepath.Join(outputDir, "profiles.json"), keyPath, csrPath, p12Path}
+						if err := validateOutputPathStructure(paths); err != nil {
+							return err
+						}
+						if *force {
+							return ensureOutputPathsAreFree([]string{filepath.Join(outputDir, "profiles.json")})
+						}
+						return ensureOutputPathsAreFree(paths)
+					},
 					BeforeCreate: func(plan profileCreatePlan) error {
 						return preflightOutput(plan.ProfileName, "", plan.Certificates)
 					},
 				},
 			)
-			createdFlag = createdIdentity.CertificateID != ""
+			createdFlag = createdIdentity.CertificateID != "" && createdIdentity.P12Path != ""
 			if err != nil {
-				if createdFlag {
-					applyCreatedIdentity(result, createdIdentity, true)
-					metadataPath := filepath.Join(outputDir, "profiles.json")
-					_ = writeSigningProfilesMetadata(metadataPath, signingProfilesMetadata{
-						CertificateID:     createdIdentity.CertificateID,
-						CertificateSHA256: createdIdentity.CertificateSHA256,
-						P12Path:           createdIdentity.P12Path,
-						PrivateKeyPath:    createdIdentity.PrivateKeyPath,
-					})
-					result.ProfilesMetadataPath = metadataPath
+				if createdFlag || createdIdentity.CertificateAttempted || progress.ProfileCreateAttempted {
+					result.Partial = true
+					result.CertificateIDs = extractIDs(progress.Certificates)
+					if createdIdentity.CertificateAttempted {
+						result.CertificateCreationState = "unknown"
+					}
+					if createdFlag {
+						result.CertificateCreationState = "created"
+					}
+					applyCreatedIdentity(result, createdIdentity, createdFlag)
+					if progress.ProfileCreateAttempted {
+						result.ProfileCreationState = "unknown"
+					}
+					if createdFlag {
+						metadataPath := filepath.Join(outputDir, "profiles.json")
+						if err := writeSigningProfilesMetadata(metadataPath, signingProfilesMetadata{
+							CertificateID:     createdIdentity.CertificateID,
+							CertificateSHA256: createdIdentity.CertificateSHA256,
+							P12Path:           createdIdentity.P12Path,
+							PrivateKeyPath:    createdIdentity.PrivateKeyPath,
+						}); err == nil {
+							result.ProfilesMetadataPath = metadataPath
+						}
+					}
 					_ = shared.PrintOutput(result, *output.Output, *output.Pretty)
 				}
 				return fmt.Errorf("signing fetch: %w", err)
@@ -225,18 +254,42 @@ Examples:
 			result.CertificateIDs = extractIDs(certs.Data)
 			result.ProfileID = profile.Data.ID
 			result.Created = created
+			if createdFlag {
+				result.CertificateCreationState = "created"
+			} else if *createMissingCertificate {
+				result.CertificateCreationState = "reused"
+				falseValue := false
+				result.CertificateCreated = &falseValue
+			}
+			if created {
+				result.ProfileCreationState = "created"
+			} else if *createMissing {
+				result.ProfileCreationState = "reused"
+			}
+			reportPartial := func(primary error) error {
+				if !created && !progress.ProfileCreateAttempted && result.ProfileFile == "" && len(result.CertificateFiles) == 0 {
+					return fmt.Errorf("signing fetch: %w", primary)
+				}
+				result.Partial = true
+				if created {
+					result.ProfileCreationState = "created"
+				}
+				applyCreatedIdentity(result, createdIdentity, createdFlag)
+				_ = shared.PrintOutput(result, *output.Output, *output.Pretty)
+				return fmt.Errorf("signing fetch: %w", primary)
+			}
 
 			if err := preflightOutput(profile.Data.Attributes.Name, profile.Data.ID, certs.Data); err != nil {
-				return fmt.Errorf("signing fetch: %w", err)
+				return reportPartial(err)
 			}
 
 			profilePath := profileOutputPath(outputDir, profile.Data.Attributes.Name, profile.Data.ID, profType)
 			profileContent, err := decodeBase64Content("profile", profile.Data.Attributes.ProfileContent)
 			if err != nil {
-				return fmt.Errorf("signing fetch: decode profile: %w", err)
+				return reportPartial(fmt.Errorf("decode profile: %w", err))
 			}
 			if err := shared.WriteProfileFile(profilePath, profileContent); err != nil {
-				return fmt.Errorf("signing fetch: write profile: %w", err)
+				return reportPartial(fmt.Errorf("write profile: %w", err))
 			}
 			result.ProfileFile = profilePath
 
@@ -244,19 +297,15 @@ Examples:
 				certPath := certificateOutputPath(outputDir, cert)
 				certContent, err := decodeBase64Content("certificate", cert.Attributes.CertificateContent)
 				if err != nil {
-					return fmt.Errorf("signing fetch: decode certificate: %w", err)
+					return reportPartial(fmt.Errorf("decode certificate: %w", err))
 				}
 				if err := writeBinaryFile(certPath, certContent); err != nil {
-					return fmt.Errorf("signing fetch: write certificate: %w", err)
+					return reportPartial(fmt.Errorf("write certificate: %w", err))
 				}
 				result.CertificateFiles = append(result.CertificateFiles, certPath)
 			}
-			if createdFlag || *createMissingCertificate {
+			if createdFlag {
 				applyCreatedIdentity(result, createdIdentity, createdFlag)
-				if !createdFlag {
-					falseValue := false
-					result.CertificateCreated = &falseValue
-				}
 				metadataPath := filepath.Join(outputDir, "profiles.json")
 				certificateID := ""
 				if len(result.CertificateIDs) > 0 {
@@ -269,7 +318,7 @@ Examples:
 					PrivateKeyPath:    createdIdentity.PrivateKeyPath,
 					ProfilePath:       profilePath,
 				}); err != nil {
-					return fmt.Errorf("signing fetch: write profiles.json: %w", err)
+					return reportPartial(fmt.Errorf("write profiles.json: %w", err))
 				}
 				result.ProfilesMetadataPath = metadataPath
 			}
@@ -359,7 +408,11 @@ type signingAssetsOptions struct {
 	CreateMissingCertificate bool
 	CertificateCreate        signingCertificateCreateRequest
 	CreatedIdentity          *createdSigningIdentity
+	CertificateFallback      *asc.Resource[asc.CertificateAttributes]
+	CreatedCertificate       *asc.Resource[asc.CertificateAttributes]
 	AfterCertificateCreate   func(createdSigningIdentity) error
+	BeforeCertificateCreate  func(profileCreatePlan) error
+	Progress                 *signingAssetsProgress
 	BeforeCreate             func(profileCreatePlan) error
 	CreateContext            func() (context.Context, context.CancelFunc)
 	CertificateFilter        func(asc.Resource[asc.CertificateAttributes]) bool
@@ -372,12 +425,21 @@ type profileCreatePlan struct {
 	Certificates []asc.Resource[asc.CertificateAttributes]
 }
 
+type signingAssetsProgress struct {
+	Certificates           []asc.Resource[asc.CertificateAttributes]
+	ProfileCreateAttempted bool
+}
+
 var errNoMatchingProfileCertificates = errors.New("profile has no matching associated certificates")
 
 func resolveSigningAssets(ctx context.Context, client *asc.Client, options signingAssetsOptions) (*asc.ProfileResponse, *asc.CertificatesResponse, bool, error) {
 	certificateType, err := resolveSigningCertificateTypes(options.ProfileType, options.CertificateType)
 	if err != nil {
 		return nil, nil, false, err
+	}
+	profileName := strings.TrimSpace(options.ProfileName)
+	if profileName == "" {
+		profileName = profileCreateName(options.ProfileType, time.Now())
 	}
 
 	profiles, err := findActiveProfiles(ctx, client, options.BundleIDResourceID, options.ProfileType)
@@ -420,6 +482,18 @@ func resolveSigningAssets(ctx context.Context, client *asc.Client, options signi
 	if certificates == nil {
 		certificates = &asc.CertificatesResponse{}
 	}
+	if options.CertificateFallback != nil && options.CertificateFallback.ID != "" {
+		seen := false
+		for _, certificate := range certificates.Data {
+			if certificate.ID == options.CertificateFallback.ID {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			certificates.Data = append(certificates.Data, *options.CertificateFallback)
+		}
+	}
 	fetchedCertificateCount := len(certificates.Data)
 	certificates.Data = filterSigningCertificates(certificates.Data, options.CertificateFilter)
 	if options.CertificateFilter != nil && fetchedCertificateCount > 0 && len(certificates.Data) == 0 {
@@ -437,9 +511,18 @@ func resolveSigningAssets(ctx context.Context, client *asc.Client, options signi
 		if typeErr != nil {
 			return nil, nil, false, typeErr
 		}
+		if options.BeforeCertificateCreate != nil {
+			plan := profileCreatePlan{ProfileName: profileName}
+			if err := options.BeforeCertificateCreate(plan); err != nil {
+				return nil, nil, false, fmt.Errorf("preflight before creating certificate: %w", err)
+			}
+		}
 		request := options.CertificateCreate
 		request.CertificateType = primaryType
 		created, identity, createErr := createMissingSigningCertificate(ctx, client, request)
+		if options.Progress != nil && created.ID != "" {
+			options.Progress.Certificates = []asc.Resource[asc.CertificateAttributes]{created}
+		}
 		if createErr != nil {
 			if options.CreatedIdentity != nil {
 				*options.CreatedIdentity = identity
@@ -449,6 +532,9 @@ func resolveSigningAssets(ctx context.Context, client *asc.Client, options signi
 		if options.CreatedIdentity != nil {
 			*options.CreatedIdentity = identity
 		}
+		if options.CreatedCertificate != nil {
+			*options.CreatedCertificate = created
+		}
 		if options.AfterCertificateCreate != nil {
 			if err := options.AfterCertificateCreate(identity); err != nil {
 				return nil, nil, false, err
@@ -456,15 +542,18 @@ func resolveSigningAssets(ctx context.Context, client *asc.Client, options signi
 		}
 		certificates.Data = []asc.Resource[asc.CertificateAttributes]{created}
 	}
-	profileName := strings.TrimSpace(options.ProfileName)
-	if profileName == "" {
-		profileName = profileCreateName(options.ProfileType, time.Now())
-	}
 	if options.BeforeCreate != nil {
+		if options.Progress != nil {
+			options.Progress.Certificates = append([]asc.Resource[asc.CertificateAttributes](nil), certificates.Data...)
+		}
 		plan := profileCreatePlan{ProfileName: profileName, Certificates: certificates.Data}
 		if err := options.BeforeCreate(plan); err != nil {
 			return nil, nil, false, fmt.Errorf("preflight before creating profile: %w", err)
 		}
+	}
+	if options.Progress != nil {
+		options.Progress.Certificates = append([]asc.Resource[asc.CertificateAttributes](nil), certificates.Data...)
+		options.Progress.ProfileCreateAttempted = true
 	}
 
 	createCtx := ctx
@@ -819,10 +908,55 @@ func certificateOutputPath(outputDir string, certificate asc.Resource[asc.Certif
 	return filepath.Join(outputDir, safeFileName(certificate.Attributes.SerialNumber, certificate.ID)+".cer")
 }
 
+// validateOutputPathStructure rejects output paths whose parents cannot accept
+// a file and rejects aliases within one write set. These failures are
+// deterministic, so callers must detect them before any remote mutation.
+func validateOutputPathStructure(paths []string) error {
+	seen := make(map[string]string, len(paths))
+	for _, path := range paths {
+		if strings.TrimSpace(path) == "" {
+			return fmt.Errorf("output path is empty")
+		}
+		clean, err := filepath.Abs(path)
+		if err != nil {
+			return fmt.Errorf("resolve output path %s: %w", path, err)
+		}
+		if previous, exists := seen[clean]; exists {
+			return fmt.Errorf("output paths must be distinct: %s aliases %s", path, previous)
+		}
+		seen[clean] = path
+
+		parent := filepath.Dir(path)
+		info, err := os.Stat(parent)
+		if err != nil {
+			return fmt.Errorf("inspect output parent %s: %w", parent, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("output parent is not a directory: %s", parent)
+		}
+		probe, err := os.CreateTemp(parent, ".asc-output-preflight-*")
+		if err != nil {
+			return fmt.Errorf("probe output parent %s: %w", parent, err)
+		}
+		probePath := probe.Name()
+		if err := probe.Close(); err != nil {
+			_ = os.Remove(probePath)
+			return fmt.Errorf("close output preflight probe %s: %w", parent, err)
+		}
+		if err := os.Remove(probePath); err != nil {
+			return fmt.Errorf("remove output preflight probe %s: %w", parent, err)
+		}
+	}
+	return nil
+}
+
 // ensureOutputPathsAreFree reports the first colliding output file. Writes use
 // O_EXCL, so a collision always fails the command; detecting it up front keeps
 // the failure free of remote and on-disk side effects.
 func ensureOutputPathsAreFree(paths []string) error {
+	if err := validateOutputPathStructure(paths); err != nil {
+		return err
+	}
 	for _, path := range paths {
 		_, err := os.Lstat(path)
 		switch {

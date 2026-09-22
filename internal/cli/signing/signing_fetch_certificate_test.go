@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math/big"
 	"net/http"
@@ -216,6 +217,346 @@ func TestSigningFetchReportsPartialCertificateCreate(t *testing.T) {
 	}
 	if !strings.Contains(stdout, `"certificateCreated":true`) {
 		t.Fatalf("partial receipt missing certificateCreated: %s", stdout)
+	}
+}
+
+func TestSigningFetchPreflightsCertificateCreationBeforeCertificatePOST(t *testing.T) {
+	t.Setenv("ASC_APP_ID", "")
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "missing.json"))
+	certificatePosts := 0
+	client := newSigningFetchTestClient(t, func(req *http.Request) *http.Response {
+		switch {
+		case req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/bundleIds"):
+			return signingFetchJSONResponse(http.StatusOK, `{"data":[{"type":"bundleIds","id":"bundle-1","attributes":{"identifier":"com.example.app"}}]}`)
+		case req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/profiles"):
+			return signingFetchJSONResponse(http.StatusOK, `{"data":[]}`)
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/certificates":
+			return signingFetchJSONResponse(http.StatusOK, `{"data":[]}`)
+		case req.Method == http.MethodPost && req.URL.Path == "/v1/certificates":
+			certificatePosts++
+			return signingFetchJSONResponse(http.StatusInternalServerError, `{"errors":[{"detail":"must not create"}]}`)
+		default:
+			t.Fatalf("unexpected %s %s", req.Method, req.URL.Path)
+			return nil
+		}
+	})
+	t.Cleanup(shared.SetASCClientFactoryForTesting(func() (*asc.Client, error) { return client, nil }))
+
+	output := t.TempDir()
+	sentinel := []byte("existing metadata")
+	metadataPath := filepath.Join(output, "profiles.json")
+	if err := os.WriteFile(metadataPath, sentinel, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	password := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(password, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := SigningFetchCommand()
+	cmd.FlagSet.SetOutput(io.Discard)
+	if err := cmd.Parse([]string{
+		"--bundle-id", "com.example.app",
+		"--profile-type", "IOS_APP_STORE",
+		"--create-missing",
+		"--create-missing-certificate",
+		"--identity-password-file", password,
+		"--output", output,
+		"--format", "json",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var runErr error
+	stdout, _ := captureOutput(t, func() { runErr = cmd.Run(context.Background()) })
+	if runErr == nil || !strings.Contains(runErr.Error(), "output file already exists") {
+		t.Fatalf("error = %v, want deterministic metadata preflight failure", runErr)
+	}
+	if certificatePosts != 0 {
+		t.Fatalf("certificate POSTs = %d, want 0", certificatePosts)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want no receipt before remote mutation", stdout)
+	}
+	got, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(sentinel) {
+		t.Fatalf("metadata = %q, want sentinel %q", got, sentinel)
+	}
+}
+
+func TestSigningFetchPreflightsGeneratedOutputStructureBeforeCertificatePOST(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		pathArgs  func(string) []string
+		wantError string
+	}{
+		{
+			name: "missing p12 parent",
+			pathArgs: func(output string) []string {
+				return []string{"--p12-out", filepath.Join(output, "missing", "distribution.p12")}
+			},
+			wantError: "inspect output parent",
+		},
+		{
+			name: "duplicate identity paths",
+			pathArgs: func(output string) []string {
+				shared := filepath.Join(output, "identity.bin")
+				return []string{"--key-out", shared, "--csr-out", shared}
+			},
+			wantError: "output paths must be distinct",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("ASC_APP_ID", "")
+			t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "missing.json"))
+			certificatePosts := 0
+			client := newSigningFetchTestClient(t, func(req *http.Request) *http.Response {
+				switch {
+				case req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/bundleIds"):
+					return signingFetchJSONResponse(http.StatusOK, `{"data":[{"type":"bundleIds","id":"bundle-1","attributes":{"identifier":"com.example.app"}}]}`)
+				case req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/profiles"):
+					return signingFetchJSONResponse(http.StatusOK, `{"data":[]}`)
+				case req.Method == http.MethodGet && req.URL.Path == "/v1/certificates":
+					return signingFetchJSONResponse(http.StatusOK, `{"data":[]}`)
+				case req.Method == http.MethodPost && req.URL.Path == "/v1/certificates":
+					certificatePosts++
+					return signingFetchJSONResponse(http.StatusInternalServerError, `{"errors":[{"detail":"must not create"}]}`)
+				default:
+					t.Fatalf("unexpected %s %s", req.Method, req.URL.Path)
+					return nil
+				}
+			})
+			t.Cleanup(shared.SetASCClientFactoryForTesting(func() (*asc.Client, error) { return client, nil }))
+
+			output := t.TempDir()
+			password := filepath.Join(t.TempDir(), "password")
+			if err := os.WriteFile(password, []byte("secret"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			args := []string{
+				"--bundle-id", "com.example.app",
+				"--profile-type", "IOS_APP_STORE",
+				"--create-missing",
+				"--create-missing-certificate",
+				"--identity-password-file", password,
+				"--output", output,
+				"--format", "json",
+			}
+			args = append(args, test.pathArgs(output)...)
+
+			cmd := SigningFetchCommand()
+			cmd.FlagSet.SetOutput(io.Discard)
+			if err := cmd.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			var runErr error
+			stdout, _ := captureOutput(t, func() { runErr = cmd.Run(context.Background()) })
+			if runErr == nil || !strings.Contains(runErr.Error(), test.wantError) {
+				t.Fatalf("error = %v, want %q", runErr, test.wantError)
+			}
+			if certificatePosts != 0 {
+				t.Fatalf("certificate POSTs = %d, want 0", certificatePosts)
+			}
+			if stdout != "" {
+				t.Fatalf("stdout = %q, want no receipt before remote mutation", stdout)
+			}
+		})
+	}
+}
+
+func TestSigningFetchPreservesUnknownCertificateCreationReceipt(t *testing.T) {
+	t.Setenv("ASC_APP_ID", "")
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "missing.json"))
+	client := newSigningFetchTestClient(t, func(req *http.Request) *http.Response {
+		switch {
+		case req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/bundleIds"):
+			return signingFetchJSONResponse(http.StatusOK, `{"data":[{"type":"bundleIds","id":"bundle-1","attributes":{"identifier":"com.example.app"}}]}`)
+		case req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/profiles"):
+			return signingFetchJSONResponse(http.StatusOK, `{"data":[]}`)
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/certificates":
+			return signingFetchJSONResponse(http.StatusOK, `{"data":[]}`)
+		case req.Method == http.MethodPost && req.URL.Path == "/v1/certificates":
+			return nil
+		default:
+			t.Fatalf("unexpected %s %s", req.Method, req.URL.Path)
+			return nil
+		}
+	})
+	t.Cleanup(shared.SetASCClientFactoryForTesting(func() (*asc.Client, error) { return client, nil }))
+
+	output := t.TempDir()
+	password := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(password, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := SigningFetchCommand()
+	cmd.FlagSet.SetOutput(io.Discard)
+	if err := cmd.Parse([]string{
+		"--bundle-id", "com.example.app",
+		"--profile-type", "IOS_APP_STORE",
+		"--create-missing",
+		"--create-missing-certificate",
+		"--identity-password-file", password,
+		"--output", output,
+		"--format", "json",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var runErr error
+	stdout, _ := captureOutput(t, func() { runErr = cmd.Run(context.Background()) })
+	if runErr == nil {
+		t.Fatal("expected certificate creation failure")
+	}
+	var receipt struct {
+		Partial                  bool   `json:"partial"`
+		CertificateCreationState string `json:"certificateCreationState"`
+		PrivateKeyPath           string `json:"privateKeyPath"`
+		CSRPath                  string `json:"csrPath"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &receipt); err != nil {
+		t.Fatalf("partial receipt = %q: %v", stdout, err)
+	}
+	if !receipt.Partial || receipt.CertificateCreationState != "unknown" || receipt.PrivateKeyPath == "" || receipt.CSRPath == "" {
+		t.Fatalf("receipt = %#v, want partial unknown certificate state and preserved local paths", receipt)
+	}
+}
+
+func TestSigningFetchPreservesUnknownReceiptWhenCertificateResponseCannotBeParsed(t *testing.T) {
+	t.Setenv("ASC_APP_ID", "")
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "missing.json"))
+	client := newSigningFetchTestClient(t, func(req *http.Request) *http.Response {
+		switch {
+		case req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/bundleIds"):
+			return signingFetchJSONResponse(http.StatusOK, `{"data":[{"type":"bundleIds","id":"bundle-1","attributes":{"identifier":"com.example.app"}}]}`)
+		case req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/profiles"):
+			return signingFetchJSONResponse(http.StatusOK, `{"data":[]}`)
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/certificates":
+			return signingFetchJSONResponse(http.StatusOK, `{"data":[]}`)
+		case req.Method == http.MethodPost && req.URL.Path == "/v1/certificates":
+			return signingFetchJSONResponse(http.StatusCreated, `{"data":{"type":"certificates","id":"cert-unknown","attributes":{"certificateContent":"!!!"}}}`)
+		default:
+			t.Fatalf("unexpected %s %s", req.Method, req.URL.Path)
+			return nil
+		}
+	})
+	t.Cleanup(shared.SetASCClientFactoryForTesting(func() (*asc.Client, error) { return client, nil }))
+
+	password := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(password, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := SigningFetchCommand()
+	cmd.FlagSet.SetOutput(io.Discard)
+	if err := cmd.Parse([]string{
+		"--bundle-id", "com.example.app",
+		"--profile-type", "IOS_APP_STORE",
+		"--create-missing",
+		"--create-missing-certificate",
+		"--identity-password-file", password,
+		"--output", t.TempDir(),
+		"--format", "json",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var runErr error
+	stdout, _ := captureOutput(t, func() { runErr = cmd.Run(context.Background()) })
+	if runErr == nil {
+		t.Fatal("expected certificate response parsing failure")
+	}
+	var receipt struct {
+		CertificateIDs           []string `json:"certificateIds"`
+		CertificateCreationState string   `json:"certificateCreationState"`
+		Partial                  bool     `json:"partial"`
+		P12Path                  string   `json:"p12Path"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &receipt); err != nil {
+		t.Fatalf("decode partial receipt %q: %v", stdout, err)
+	}
+	if !receipt.Partial || receipt.CertificateCreationState != "unknown" || strings.Join(receipt.CertificateIDs, ",") != "cert-unknown" || receipt.P12Path != "" {
+		t.Fatalf("receipt = %#v, want unknown state with certificate ID and no p12", receipt)
+	}
+}
+
+func TestSigningSyncPushPreservesPartialCertificateReceipt(t *testing.T) {
+	t.Setenv("ASC_APP_ID", "")
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "missing.json"))
+	remoteURL, _ := newSigningSyncBareRemote(t)
+	repoPassword := filepath.Join(t.TempDir(), "repo-password")
+	identityPassword := filepath.Join(t.TempDir(), "identity-password")
+	if err := os.WriteFile(repoPassword, []byte("repository-password"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(identityPassword, []byte("identity-password"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := newSigningFetchTestClient(t, func(req *http.Request) *http.Response {
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/bundleIds":
+			return signingFetchJSONResponse(http.StatusOK, `{"data":[{"type":"bundleIds","id":"bundle-1","attributes":{"identifier":"com.example.app"}}]}`)
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/bundleIds/bundle-1/profiles":
+			return signingFetchJSONResponse(http.StatusOK, `{"data":[]}`)
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/certificates":
+			return signingFetchJSONResponse(http.StatusOK, `{"data":[]}`)
+		case req.Method == http.MethodPost && req.URL.Path == "/v1/certificates":
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatalf("read certificate create request: %v", err)
+			}
+			var payload asc.CertificateCreateRequest
+			if err := json.Unmarshal(body, &payload); err != nil {
+				t.Fatalf("decode certificate create request: %v", err)
+			}
+			csrDER, err := base64.StdEncoding.DecodeString(payload.Data.Attributes.CSRContent)
+			if err != nil {
+				t.Fatalf("decode CSR: %v", err)
+			}
+			csr, err := x509.ParseCertificateRequest(csrDER)
+			if err != nil {
+				t.Fatalf("parse CSR: %v", err)
+			}
+			certificateContent := issuedCertificateContentWithTeam(t, csr)
+			return signingFetchJSONResponse(http.StatusCreated, fmt.Sprintf(`{"data":{"type":"certificates","id":"certificate-new","attributes":{"serialNumber":"new-serial","certificateType":"IOS_DISTRIBUTION","expirationDate":"2100-01-01T00:00:00Z","certificateContent":%q}}}`, certificateContent))
+		case req.Method == http.MethodPost && req.URL.Path == "/v1/profiles":
+			return signingFetchJSONResponse(http.StatusInternalServerError, `{"errors":[{"status":"500","detail":"profile create failed"}]}`)
+		default:
+			t.Fatalf("unexpected %s %s", req.Method, req.URL.String())
+			return nil
+		}
+	})
+	t.Cleanup(shared.SetASCClientFactoryForTesting(func() (*asc.Client, error) { return client, nil }))
+
+	cmd := syncPushCommand()
+	cmd.FlagSet.SetOutput(io.Discard)
+	if err := cmd.Parse([]string{
+		"--bundle-id", "com.example.app",
+		"--profile-type", "IOS_APP_STORE",
+		"--repo", remoteURL,
+		"--password-file", repoPassword,
+		"--create-missing",
+		"--create-missing-certificate",
+		"--identity-password-file", identityPassword,
+		"--output", "json",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var runErr error
+	stdout, _ := captureOutput(t, func() { runErr = cmd.Run(context.Background()) })
+	if runErr == nil || !strings.Contains(runErr.Error(), "profile create failed") {
+		t.Fatalf("error = %v, want profile creation failure", runErr)
+	}
+	var receipt struct {
+		Partial                  bool     `json:"partial"`
+		CertificateIDs           []string `json:"certificateIds"`
+		CertificateCreationState string   `json:"certificateCreationState"`
+		ProfileCreationState     string   `json:"profileCreationState"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &receipt); err != nil {
+		t.Fatalf("partial receipt = %q: %v", stdout, err)
+	}
+	if !receipt.Partial || receipt.CertificateCreationState != "created" || receipt.ProfileCreationState != "unknown" || strings.Join(receipt.CertificateIDs, ",") != "certificate-new" {
+		t.Fatalf("receipt = %#v, want created certificate and unknown profile state", receipt)
 	}
 }
 

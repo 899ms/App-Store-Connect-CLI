@@ -22,12 +22,13 @@ import (
 )
 
 type createdSigningIdentity struct {
-	CertificateID     string
-	CertificateSHA256 string
-	PrivateKeyPath    string
-	CSRPath           string
-	P12Path           string
-	CertificatePath   string
+	CertificateID        string
+	CertificateSHA256    string
+	PrivateKeyPath       string
+	CSRPath              string
+	P12Path              string
+	CertificatePath      string
+	CertificateAttempted bool
 }
 
 type signingCertificateCreateRequest struct {
@@ -49,8 +50,12 @@ func createMissingSigningCertificate(ctx context.Context, client *asc.Client, re
 			return asc.Resource[asc.CertificateAttributes]{}, createdSigningIdentity{}, fmt.Errorf("certificate output path is required")
 		}
 	}
+	outputPaths := []string{request.KeyPath, request.CSRPath, request.P12Path}
+	if err := validateOutputPathStructure(outputPaths); err != nil {
+		return asc.Resource[asc.CertificateAttributes]{}, createdSigningIdentity{}, err
+	}
 	if !request.Force {
-		if err := ensureOutputPathsAreFree([]string{request.KeyPath, request.CSRPath, request.P12Path}); err != nil {
+		if err := ensureOutputPathsAreFree(outputPaths); err != nil {
 			return asc.Resource[asc.CertificateAttributes]{}, createdSigningIdentity{}, err
 		}
 	}
@@ -79,39 +84,37 @@ func createMissingSigningCertificate(ctx context.Context, client *asc.Client, re
 		return asc.Resource[asc.CertificateAttributes]{}, createdSigningIdentity{}, fmt.Errorf("write certificate request: %w", err)
 	}
 
+	identity := createdSigningIdentity{
+		PrivateKeyPath:       request.KeyPath,
+		CSRPath:              request.CSRPath,
+		CertificateAttempted: true,
+	}
 	created, err := client.CreateCertificate(ctx, base64.StdEncoding.EncodeToString(csrDER), certificateType)
 	if err != nil {
-		return asc.Resource[asc.CertificateAttributes]{}, createdSigningIdentity{
-			PrivateKeyPath: request.KeyPath,
-			CSRPath:        request.CSRPath,
-		}, fmt.Errorf("create certificate: %w", err)
+		return asc.Resource[asc.CertificateAttributes]{}, identity, fmt.Errorf("create certificate: %w", err)
 	}
+	identity.CertificateID = created.Data.ID
 	certDER, err := decodeBase64Content("certificate", created.Data.Attributes.CertificateContent)
 	if err != nil {
-		return created.Data, createdSigningIdentity{CertificateID: created.Data.ID, PrivateKeyPath: request.KeyPath, CSRPath: request.CSRPath}, err
+		return created.Data, identity, err
 	}
 	certificate, err := x509.ParseCertificate(certDER)
 	if err != nil {
-		return created.Data, createdSigningIdentity{CertificateID: created.Data.ID, PrivateKeyPath: request.KeyPath, CSRPath: request.CSRPath}, fmt.Errorf("parse created certificate: %w", err)
+		return created.Data, identity, fmt.Errorf("parse created certificate: %w", err)
 	}
 	if err := signingCertificateMatchesKey(certificate, privateKey); err != nil {
-		return created.Data, createdSigningIdentity{CertificateID: created.Data.ID, PrivateKeyPath: request.KeyPath, CSRPath: request.CSRPath}, err
+		return created.Data, identity, err
 	}
 	p12, err := modernpkcs12.Modern2023.WithRand(rand.Reader).Encode(privateKey, certificate, nil, string(request.Password))
 	if err != nil {
-		return created.Data, createdSigningIdentity{CertificateID: created.Data.ID, PrivateKeyPath: request.KeyPath, CSRPath: request.CSRPath}, fmt.Errorf("encode p12: %w", err)
+		return created.Data, identity, fmt.Errorf("encode p12: %w", err)
 	}
 	if err := writeBinaryFileReplacing(request.P12Path, p12, request.Force); err != nil {
-		return created.Data, createdSigningIdentity{CertificateID: created.Data.ID, PrivateKeyPath: request.KeyPath, CSRPath: request.CSRPath}, fmt.Errorf("write p12: %w", err)
+		return created.Data, identity, fmt.Errorf("write p12: %w", err)
 	}
 	sum := sha256.Sum256(certDER)
-	identity := createdSigningIdentity{
-		CertificateID:     created.Data.ID,
-		CertificateSHA256: hex.EncodeToString(sum[:]),
-		PrivateKeyPath:    request.KeyPath,
-		CSRPath:           request.CSRPath,
-		P12Path:           request.P12Path,
-	}
+	identity.CertificateSHA256 = hex.EncodeToString(sum[:])
+	identity.P12Path = request.P12Path
 	if created.Data.Attributes.ExpirationDate == "" {
 		created.Data.Attributes.ExpirationDate = time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
 	}
@@ -139,7 +142,7 @@ func writeSigningProfilesMetadata(path string, metadata signingProfilesMetadata)
 		return err
 	}
 	data = append(data, '\n')
-	return writeBinaryFileReplacing(path, data, true)
+	return writeBinaryFile(path, data)
 }
 
 type signingProfilesMetadata struct {
@@ -193,17 +196,56 @@ func firstNonEmpty(values ...string) string {
 }
 
 func applyCreatedIdentity(result *asc.SigningFetchResult, identity createdSigningIdentity, created bool) {
-	if result == nil || !created {
+	if result == nil {
+		return
+	}
+	if identity.CertificateID != "" {
+		seen := false
+		for _, certificateID := range result.CertificateIDs {
+			if certificateID == identity.CertificateID {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			result.CertificateIDs = append(result.CertificateIDs, identity.CertificateID)
+		}
+	}
+	result.PrivateKeyPath = identity.PrivateKeyPath
+	result.CSRPath = identity.CSRPath
+	result.P12Path = identity.P12Path
+	if !created {
 		return
 	}
 	value := true
 	result.CertificateCreated = &value
 	result.CertificateSHA256 = identity.CertificateSHA256
-	result.PrivateKeyPath = identity.PrivateKeyPath
-	result.CSRPath = identity.CSRPath
-	result.P12Path = identity.P12Path
 	if identity.CertificatePath != "" {
 		result.CertificateFiles = append(result.CertificateFiles, identity.CertificatePath)
+	}
+}
+
+func applyCreatedIdentityToSyncResult(result *asc.SigningSyncResult, identity createdSigningIdentity, created bool) {
+	if result == nil {
+		return
+	}
+	if identity.CertificateID != "" {
+		seen := false
+		for _, certificateID := range result.CertificateIDs {
+			if certificateID == identity.CertificateID {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			result.CertificateIDs = append(result.CertificateIDs, identity.CertificateID)
+		}
+	}
+	if identity.CertificateAttempted {
+		result.CertificateCreationState = "unknown"
+	}
+	if created {
+		result.CertificateCreationState = "created"
 	}
 }
 

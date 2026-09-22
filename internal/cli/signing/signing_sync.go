@@ -218,6 +218,9 @@ func syncPushCommand() *ffcli.Command {
 			if *createMissingCertificate && !*createMissing {
 				return shared.UsageError("--create-missing-certificate requires --create-missing")
 			}
+			if *createMissingCertificate && (identityInput != "" || privateKeyInput != "" || strings.TrimSpace(*identitySHA256) != "") {
+				return shared.UsageError("--create-missing-certificate cannot be combined with --identity, --private-key, or --identity-sha256")
+			}
 			if *createMissingCertificate && strings.TrimSpace(*identityPasswordFile) == "" {
 				return shared.MissingRequiredUsageError("--identity-password-file")
 			}
@@ -231,6 +234,14 @@ func syncPushCommand() *ffcli.Command {
 			pass, err := resolveSyncPassword(*passwordFile)
 			if err != nil {
 				return err
+			}
+			var certificatePassword []byte
+			if *createMissingCertificate {
+				certificatePassword, err = readProtectedSecretFile(*identityPasswordFile, "identity password")
+				if err != nil {
+					return fmt.Errorf("signing sync push: identity password: %w", err)
+				}
+				defer clear(certificatePassword)
 			}
 
 			var identity *signingIdentity
@@ -259,6 +270,17 @@ func syncPushCommand() *ffcli.Command {
 			if err != nil {
 				return fmt.Errorf("signing sync push: %w", err)
 			}
+			partialResult := SyncResult{
+				Operation:       "push",
+				RepoURL:         sanitizeRepoURLForOutput(repo),
+				BundleID:        bundle,
+				ProfileType:     profType,
+				Files:           []string{},
+				IdentityPresent: identity != nil,
+			}
+			if identity != nil {
+				partialResult.IdentitySHA256 = identity.CertificateSHA256
+			}
 
 			if hasTargetsPath {
 				// The batch spans one lookup, asset resolution, and optional
@@ -268,17 +290,22 @@ func syncPushCommand() *ffcli.Command {
 				// would fail valid multi-target runs and, with --create-missing,
 				// could abandon created profiles before publication.
 				result, batchErr := runSigningSyncBatchForCommand(ctx, client, signingSyncBatchOptions{
-					RepoURL:         repo,
-					Branch:          *branch,
-					Password:        pass,
-					ProfileType:     profType,
-					CertificateType: *certType,
-					DeviceIDs:       shared.SplitCSV(*deviceIDs),
-					CreateMissing:   *createMissing,
-					Identity:        identity,
-					BundleIDs:       targetBundles,
+					RepoURL:                  repo,
+					Branch:                   *branch,
+					Password:                 pass,
+					ProfileType:              profType,
+					CertificateType:          *certType,
+					DeviceIDs:                shared.SplitCSV(*deviceIDs),
+					CreateMissing:            *createMissing,
+					CreateMissingCertificate: *createMissingCertificate,
+					IdentityPassword:         certificatePassword,
+					Identity:                 identity,
+					BundleIDs:                targetBundles,
 				})
 				if batchErr != nil {
+					if result.Partial {
+						_ = shared.PrintOutput(&result, *output.Output, *output.Pretty)
+					}
 					return fmt.Errorf("signing sync push: %w", batchErr)
 				}
 				return shared.PrintOutput(&result, *output.Output, *output.Pretty)
@@ -317,17 +344,37 @@ func syncPushCommand() *ffcli.Command {
 			var identityArtifacts *signingIdentityArtifacts
 
 			var createdIdentity createdSigningIdentity
+			progress := &signingAssetsProgress{}
+			profileCreated := false
+			reportPartial := func(primary error) error {
+				if !createdIdentity.CertificateAttempted && createdIdentity.CertificateID == "" && !progress.ProfileCreateAttempted && len(partialResult.Files) == 0 {
+					return fmt.Errorf("signing sync push: %w", primary)
+				}
+				partialResult.Partial = true
+				if partialResult.PublicationState == "" {
+					partialResult.PublicationState = "unknown"
+				}
+				partialResult.IdentityPresent = identity != nil
+				if identity != nil {
+					partialResult.IdentitySHA256 = identity.CertificateSHA256
+				}
+				partialResult.CertificateIDs = extractIDs(progress.Certificates)
+				applyCreatedIdentityToSyncResult(&partialResult, createdIdentity, createdIdentity.CertificateID != "" && createdIdentity.P12Path != "")
+				if profileCreated {
+					partialResult.ProfileCreationState = "created"
+				} else if progress.ProfileCreateAttempted {
+					partialResult.ProfileCreationState = "unknown"
+				}
+				_ = shared.PrintOutput(&partialResult, *output.Output, *output.Pretty)
+				return fmt.Errorf("signing sync push: %w", primary)
+			}
 			var certificateRequest signingCertificateCreateRequest
 			if *createMissingCertificate {
-				passwordBytes, readErr := readProtectedSecretFile(*identityPasswordFile, "identity password")
-				if readErr != nil {
-					return fmt.Errorf("signing sync push: identity password: %w", readErr)
-				}
 				certificateRequest = signingCertificateCreateRequest{
 					KeyPath:  filepath.Join(tmpDir, "created.key"),
 					CSRPath:  filepath.Join(tmpDir, "created.csr"),
 					P12Path:  filepath.Join(tmpDir, "created.p12"),
-					Password: passwordBytes,
+					Password: certificatePassword,
 				}
 			}
 			profile, certs, created, err := resolveSigningAssets(
@@ -343,6 +390,15 @@ func syncPushCommand() *ffcli.Command {
 					CreateMissingCertificate: *createMissingCertificate,
 					CertificateCreate:        certificateRequest,
 					CreatedIdentity:          &createdIdentity,
+					Progress:                 progress,
+					BeforeCertificateCreate: func(plan profileCreatePlan) error {
+						if err := prepareRepository(); err != nil {
+							return err
+						}
+						profileExtension := shared.ProvisioningProfileExtension("", profType)
+						profilePath := filepath.Join("profiles", profileDirectoryName(profType), safeFileName(plan.ProfileName, "profile")+profileExtension)
+						return preflightSigningAssetDestinationsForProfile(store, plan, profType, profilePath)
+					},
 					AfterCertificateCreate: func(created createdSigningIdentity) error {
 						if identity != nil {
 							return nil
@@ -396,56 +452,67 @@ func syncPushCommand() *ffcli.Command {
 				},
 			)
 			if err != nil {
-				return fmt.Errorf("signing sync push: %w", err)
+				return reportPartial(err)
 			}
+			partialResult.CertificateIDs = extractIDs(certs.Data)
+			profileCreated = created
+			if *createMissingCertificate && createdIdentity.CertificateID == "" {
+				partialResult.CertificateCreationState = "reused"
+			}
+			if created {
+				partialResult.ProfileCreationState = "created"
+			} else if *createMissing {
+				partialResult.ProfileCreationState = "reused"
+			}
+			applyCreatedIdentityToSyncResult(&partialResult, createdIdentity, createdIdentity.CertificateID != "" && createdIdentity.P12Path != "")
 			if created {
 				fmt.Fprintln(os.Stderr, "Created new profile")
 			}
 			if identity != nil {
 				if err := validateIdentityForResolvedAssets(identity, profile, certs, bundle, profType, time.Now()); err != nil {
-					return fmt.Errorf("signing sync push: validate signing identity: %w", err)
+					return reportPartial(fmt.Errorf("validate signing identity: %w", err))
 				}
 			}
 			if err := prepareRepository(); err != nil {
-				return fmt.Errorf("signing sync push: %w", err)
+				return reportPartial(err)
 			}
 			profileContent, err := base64.StdEncoding.DecodeString(strings.TrimSpace(profile.Data.Attributes.ProfileContent))
 			if err != nil {
-				return fmt.Errorf("signing sync push: decode profile: %w", err)
+				return reportPartial(fmt.Errorf("decode profile: %w", err))
 			}
 			profileDir := profileDirectoryName(profType)
 			profileExtension := shared.ProvisioningProfileExtension(string(profile.Data.Attributes.Platform), profType)
 			profileRelPath := filepath.Join("profiles", profileDir, safeFileName(profile.Data.Attributes.Name, profile.Data.ID)+profileExtension)
 			profileRelPath, err = resolveCompatibleSigningProfilePath(store, profileRelPath)
 			if err != nil {
-				return fmt.Errorf("signing sync push: resolve profile repository path: %w", err)
+				return reportPartial(fmt.Errorf("resolve profile repository path: %w", err))
 			}
 			profileMetadata, err := signingProfileArtifactMetadata(profile, bundle, profType)
 			if err != nil {
-				return fmt.Errorf("signing sync push: prepare profile metadata: %w", err)
+				return reportPartial(fmt.Errorf("prepare profile metadata: %w", err))
 			}
 			if identity != nil {
 				if identityArtifacts == nil {
 					identityArtifacts, err = prepareSigningIdentityArtifacts(identity, pass, bundle, profType)
 					if err != nil {
-						return fmt.Errorf("signing sync push: prepare signing identity: %w", err)
+						return reportPartial(fmt.Errorf("prepare signing identity: %w", err))
 					}
 				}
 				if err := bindSigningIdentityProfile(identityArtifacts, profile, profileRelPath, profileContent); err != nil {
-					return fmt.Errorf("signing sync push: bind signing identity profile: %w", err)
+					return reportPartial(fmt.Errorf("bind signing identity profile: %w", err))
 				}
 			}
 			plannedPaths := signingAssetRepositoryPathsForProfile(certs.Data, profType, profileRelPath, identityArtifacts)
 			if err := store.CheckEncryptedRepositoryPaths(plannedPaths); err != nil {
-				return fmt.Errorf("signing sync push: preflight repository paths: %w", err)
+				return reportPartial(fmt.Errorf("preflight repository paths: %w", err))
 			}
 			if identity != nil {
 				if err := preflightSigningIdentityArtifactsForContextUpdate(store, identityArtifacts, pass); err != nil {
-					return fmt.Errorf("signing sync push: preflight signing identity: %w", err)
+					return reportPartial(fmt.Errorf("preflight signing identity: %w", err))
 				}
 			}
 			if _, err := preflightSigningProfileArtifact(store, profileRelPath, profileContent, pass, profileMetadata); err != nil {
-				return fmt.Errorf("signing sync push: preflight profile: %w", err)
+				return reportPartial(fmt.Errorf("preflight profile: %w", err))
 			}
 
 			// Write encrypted files.
@@ -455,28 +522,31 @@ func syncPushCommand() *ffcli.Command {
 			for _, cert := range certs.Data {
 				certContent, err := base64.StdEncoding.DecodeString(strings.TrimSpace(cert.Attributes.CertificateContent))
 				if err != nil {
-					return fmt.Errorf("signing sync push: decode cert: %w", err)
+					return reportPartial(fmt.Errorf("decode cert: %w", err))
 				}
 				relPath := filepath.Join("certs", certDir, safeFileName(cert.Attributes.SerialNumber, cert.ID)+".cer")
 				if err := store.WriteEncryptedFile(relPath, certContent, pass); err != nil {
-					return fmt.Errorf("signing sync push: encrypt cert: %w", err)
+					return reportPartial(fmt.Errorf("encrypt cert: %w", err))
 				}
 				files = append(files, relPath)
+				partialResult.Files = append(partialResult.Files, relPath)
 				fmt.Fprintf(os.Stderr, "  Encrypted %s\n", relPath)
 			}
 
 			if err := writeOrReuseSigningProfileArtifact(store, profileRelPath, profileContent, pass, profileMetadata); err != nil {
-				return fmt.Errorf("signing sync push: encrypt profile: %w", err)
+				return reportPartial(fmt.Errorf("encrypt profile: %w", err))
 			}
 			files = append(files, profileRelPath)
+			partialResult.Files = append(partialResult.Files, profileRelPath)
 			fmt.Fprintf(os.Stderr, "  Encrypted %s\n", profileRelPath)
 
 			var sensitiveFiles []string
 			if identity != nil {
 				if err := writeOrReuseSigningIdentityArtifacts(store, identityArtifacts, pass); err != nil {
-					return fmt.Errorf("signing sync push: encrypt signing identity: %w", err)
+					return reportPartial(fmt.Errorf("encrypt signing identity: %w", err))
 				}
 				files = append(files, identityArtifacts.IdentityPath, identityArtifacts.BindingPath)
+				partialResult.Files = append(partialResult.Files, identityArtifacts.IdentityPath, identityArtifacts.BindingPath)
 				sensitiveFiles = append(sensitiveFiles, identityArtifacts.IdentityPath)
 				fmt.Fprintf(os.Stderr, "  Encrypted %s\n", identityArtifacts.IdentityPath)
 				fmt.Fprintf(os.Stderr, "  Encrypted %s\n", identityArtifacts.BindingPath)
@@ -486,20 +556,17 @@ func syncPushCommand() *ffcli.Command {
 			commitMsg := fmt.Sprintf("Update signing assets for %s (%s)", bundle, profType)
 			fmt.Fprintln(os.Stderr, "Pushing to git...")
 			if err := store.CommitAndPush(ctx, commitMsg); err != nil {
-				return fmt.Errorf("signing sync push: %w", err)
+				partialResult.PublicationState = "unknown"
+				return reportPartial(err)
 			}
 
 			fmt.Fprintln(os.Stderr, "Done")
 
-			result := SyncResult{
-				Operation:       "push",
-				RepoURL:         sanitizeRepoURLForOutput(repo),
-				BundleID:        bundle,
-				ProfileType:     profType,
-				Files:           files,
-				IdentityPresent: identity != nil,
-				SensitiveFiles:  sensitiveFiles,
-			}
+			result := partialResult
+			result.Files = files
+			result.SensitiveFiles = sensitiveFiles
+			result.IdentityPresent = identity != nil
+			result.PublicationState = "succeeded"
 			if identity != nil {
 				result.IdentitySHA256 = identity.CertificateSHA256
 			}
