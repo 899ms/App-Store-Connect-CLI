@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -747,7 +748,7 @@ func TestPaginateAll_BuildsPreservesIncluded(t *testing.T) {
 
 func TestRawJSONArrayAccumulatorDeduplicatesJSONAPIResourcesByIdentity(t *testing.T) {
 	acc := &rawJSONArrayAccumulator{}
-	for _, payload := range []json.RawMessage{
+	for i, payload := range []json.RawMessage{
 		json.RawMessage(`[
 			{"type":"betaGroups","id":"group-a","attributes":{"name":"Alpha"}},
 			{"type":"apps","id":"shared-id"}
@@ -759,7 +760,7 @@ func TestRawJSONArrayAccumulatorDeduplicatesJSONAPIResourcesByIdentity(t *testin
 		]`),
 	} {
 		if err := acc.add(payload); err != nil {
-			t.Fatalf("acc.add() error: %v", err)
+			t.Fatalf("add payload %d: %v", i+1, err)
 		}
 	}
 	merged, err := acc.merged()
@@ -825,6 +826,9 @@ func TestPaginateAll_MergesOverlappingIncludedAcrossPages(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected *BuildsResponse, got %T", result)
 	}
+	if len(builds.Data) != totalPages {
+		t.Fatalf("data length = %d, want %d", len(builds.Data), totalPages)
+	}
 	var included []struct {
 		Type       string `json:"type"`
 		ID         string `json:"id"`
@@ -841,7 +845,7 @@ func TestPaginateAll_MergesOverlappingIncludedAcrossPages(t *testing.T) {
 	for _, resource := range included {
 		gotIdentities = append(gotIdentities, resource.Type+"/"+resource.ID)
 	}
-	if strings.Join(gotIdentities, ",") != strings.Join(wantIdentities, ",") {
+	if !slices.Equal(gotIdentities, wantIdentities) {
 		t.Fatalf("included identities = %v, want %v", gotIdentities, wantIdentities)
 	}
 	if included[0].Attributes.Name != "App from page 1" {
@@ -894,6 +898,57 @@ func TestPaginateAll_PaginationErrorPreservesPartialIncluded(t *testing.T) {
 	}
 	if got := string(builds.Included); got != string(firstPage.Included) {
 		t.Fatalf("partial included = %q, want %q", got, firstPage.Included)
+	}
+}
+
+func TestPaginateAll_PaginationErrorMergesPartialIncluded(t *testing.T) {
+	firstPage := &BuildsResponse{
+		Data:     []Resource[BuildAttributes]{{Type: ResourceTypeBuilds, ID: "build-1"}},
+		Included: json.RawMessage(`[{"type":"apps","id":"app-1","attributes":{"name":"first"}}]`),
+		Links:    Links{Next: "page=2"},
+	}
+
+	result, err := PaginateAll(context.Background(), firstPage, func(ctx context.Context, nextURL string) (PaginatedResponse, error) {
+		switch nextURL {
+		case "page=2":
+			return &BuildsResponse{
+				Data: []Resource[BuildAttributes]{{Type: ResourceTypeBuilds, ID: "build-2"}},
+				Included: json.RawMessage(`[
+					{"type":"apps","id":"app-1","attributes":{"name":"later"}},
+					{"type":"apps","id":"app-2"}
+				]`),
+				Links: Links{Next: "page=3"},
+			}, nil
+		case "page=3":
+			return nil, errors.New("page unavailable")
+		default:
+			t.Fatalf("unexpected next URL %q", nextURL)
+			return nil, nil
+		}
+	})
+	if err == nil || !strings.Contains(err.Error(), "page 3") {
+		t.Fatalf("expected page 3 error, got %v", err)
+	}
+
+	builds, ok := result.(*BuildsResponse)
+	if !ok {
+		t.Fatalf("expected partial *BuildsResponse, got %T", result)
+	}
+	if len(builds.Data) != 2 {
+		t.Fatalf("partial data length = %d, want 2", len(builds.Data))
+	}
+	var included []struct {
+		Type       string `json:"type"`
+		ID         string `json:"id"`
+		Attributes struct {
+			Name string `json:"name"`
+		} `json:"attributes"`
+	}
+	if err := json.Unmarshal(builds.Included, &included); err != nil {
+		t.Fatalf("decode partial included: %v", err)
+	}
+	if len(included) != 2 || included[0].ID != "app-1" || included[0].Attributes.Name != "first" || included[1].ID != "app-2" {
+		t.Fatalf("partial included = %+v, want first app-1 representation and app-2", included)
 	}
 }
 
