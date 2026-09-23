@@ -225,6 +225,53 @@ func TestMetadataPushIfExistsUpdateRoutesToLocalizationPatch(t *testing.T) {
 	}
 }
 
+func TestMetadataPushIfExistsUpdateContinuesWhenOptionalMatchReadFails(t *testing.T) {
+	dir := writeMetadataVersionFixture(t, `{"description":"Planned JA description","keywords":"planned,keywords","supportUrl":"https://example.com/support","whatsNew":"Planned release notes"}`)
+	localizationReads := 0
+	patched := false
+	stdout, stderr, seen, runErr := runIfExistsCommand(t, []string{
+		"metadata", "push", "--app", "app-1", "--version", "1.2.3", "--platform", "IOS", "--dir", dir,
+		"--if-exists", "update", "--output", "json",
+	}, func(req ifExistsRequest) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodGet && req.Path == "/v1/apps/app-1/appStoreVersions":
+			return jsonResponse(http.StatusOK, metadataPushVersionsList)
+		case req.Method == http.MethodGet && req.Path == "/v1/apps/app-1/appInfos":
+			return jsonResponse(http.StatusOK, metadataPushAppInfosList)
+		case req.Method == http.MethodGet && req.Path == "/v1/appInfos/appinfo-1/appInfoLocalizations":
+			return jsonResponse(http.StatusOK, metadataPushEmptyList)
+		case req.Method == http.MethodGet && req.Path == "/v1/appStoreVersions/version-1/appStoreVersionLocalizations":
+			localizationReads++
+			switch localizationReads {
+			case 1:
+				return jsonResponse(http.StatusOK, metadataPushEmptyList)
+			case 2, 4:
+				return jsonResponse(http.StatusBadRequest, `{"errors":[{"status":"400","code":"PARAMETER_ERROR.INVALID","title":"Invalid request"}]}`)
+			default:
+				return jsonResponse(http.StatusOK, metadataPushVersionLocalizationsRemote)
+			}
+		case req.Method == http.MethodPost && req.Path == "/v1/appStoreVersionLocalizations":
+			return jsonResponse(http.StatusConflict, metadataVersionLocaleDuplicate409)
+		case req.Method == http.MethodPatch && req.Path == "/v1/appStoreVersionLocalizations/loc-ja":
+			patched = true
+			return jsonResponse(http.StatusOK, `{"data":{"type":"appStoreVersionLocalizations","id":"loc-ja","attributes":{"locale":"ja","description":"Planned JA description"}}}`)
+		}
+		t.Fatalf("unexpected request %s %s", req.Method, req.Path)
+		return nil, nil
+	})
+
+	if runErr != nil {
+		t.Fatalf("expected update to proceed after optional read failure, got %v (stderr %q)", runErr, stderr)
+	}
+	if !patched || countRequests(seen, http.MethodPatch, "/v1/appStoreVersionLocalizations/loc-ja") != 1 {
+		t.Fatalf("expected one PATCH despite the optional comparison read failure, requests: %v", seen)
+	}
+	actions := metadataPushActions(t, stdout)
+	if len(actions) != 1 || actions[0]["action"] != "update" || actions[0]["status"] != "succeeded" {
+		t.Fatalf("actions = %v, want one successful update", actions)
+	}
+}
+
 func TestMetadataPushIfExistsFailKeepsConflictFailure(t *testing.T) {
 	dir := writeMetadataVersionFixture(t, `{"description":"Planned JA description","whatsNew":"Planned JA release notes"}`)
 	stdout, stderr, seen, runErr := runIfExistsCommand(t, []string{
@@ -432,6 +479,134 @@ func TestMetadataPushIfExistsUpdateRoutesAppInfoConflictToPatch(t *testing.T) {
 	}
 }
 
+func TestMetadataPushIfExistsUpdateRoutesPatchOnlyAppInfoLocaleToPatch(t *testing.T) {
+	dir := writeMetadataAppInfoFixture(t, `{"subtitle":"Planned JA subtitle"}`)
+	patched := false
+	localizationReads := 0
+	stdout, stderr, seen, runErr := runIfExistsCommand(t, []string{
+		"metadata", "push", "--app", "app-1", "--version", "1.2.3", "--platform", "IOS", "--dir", dir,
+		"--if-exists", "update", "--output", "json",
+	}, func(req ifExistsRequest) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodGet && req.Path == "/v1/apps/app-1/appStoreVersions":
+			return jsonResponse(http.StatusOK, metadataPushVersionsList)
+		case req.Method == http.MethodGet && req.Path == "/v1/apps/app-1/appInfos":
+			return jsonResponse(http.StatusOK, metadataPushAppInfosList)
+		case req.Method == http.MethodGet && req.Path == "/v1/appStoreVersions/version-1/appStoreVersionLocalizations":
+			return jsonResponse(http.StatusOK, metadataPushEmptyList)
+		case req.Method == http.MethodGet && req.Path == "/v1/appInfos/appinfo-1/appInfoLocalizations":
+			localizationReads++
+			if localizationReads == 1 {
+				return jsonResponse(http.StatusOK, metadataPushEmptyList)
+			}
+			if patched {
+				return jsonResponse(http.StatusOK, `{"data":[{"type":"appInfoLocalizations","id":"loc-ja","attributes":{"locale":"ja","name":"Remote JA name","subtitle":"Planned JA subtitle"}}],"links":{"next":""}}`)
+			}
+			return jsonResponse(http.StatusOK, `{"data":[{"type":"appInfoLocalizations","id":"loc-ja","attributes":{"locale":"ja","name":"Remote JA name","subtitle":"Remote JA subtitle"}}],"links":{"next":""}}`)
+		case req.Method == http.MethodPatch && req.Path == "/v1/appInfoLocalizations/loc-ja":
+			if !strings.Contains(req.Body, `"subtitle":"Planned JA subtitle"`) || strings.Contains(req.Body, `"name"`) {
+				t.Fatalf("PATCH body = %q, want only the planned subtitle and no name", req.Body)
+			}
+			patched = true
+			return jsonResponse(http.StatusOK, `{"data":{"type":"appInfoLocalizations","id":"loc-ja","attributes":{"locale":"ja","name":"Remote JA name","subtitle":"Planned JA subtitle"}}}`)
+		}
+		t.Fatalf("unexpected request %s %s", req.Method, req.Path)
+		return nil, nil
+	})
+
+	if runErr != nil {
+		t.Fatalf("expected exit 0 with --if-exists update, got %v (stderr %q)", runErr, stderr)
+	}
+	if !patched {
+		t.Fatalf("--if-exists update must PATCH a late-created patch-only app-info localization: %v", seen)
+	}
+	actions := metadataPushActions(t, stdout)
+	if len(actions) != 1 || actions[0]["action"] != "update" || actions[0]["status"] != "succeeded" || actions[0]["alreadyExists"] != true {
+		t.Fatalf("actions = %v, want one successful update resolved as already existing", actions)
+	}
+}
+
+func TestMetadataPushIfExistsSkipRefreshesPatchOnlyAppInfoLocalesOnce(t *testing.T) {
+	dir := t.TempDir()
+	appInfoDir := filepath.Join(dir, "app-info")
+	if err := os.MkdirAll(appInfoDir, 0o755); err != nil {
+		t.Fatalf("mkdir app-info dir: %v", err)
+	}
+	for locale, body := range map[string]string{
+		"fr-FR": `{"subtitle":"Planned FR subtitle"}`,
+		"ja":    `{"subtitle":"Planned JA subtitle"}`,
+	} {
+		if err := os.WriteFile(filepath.Join(appInfoDir, locale+".json"), []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s app-info localization: %v", locale, err)
+		}
+	}
+
+	localizationReads := 0
+	stdout, stderr, seen, runErr := runIfExistsCommand(t, []string{
+		"metadata", "push", "--app", "app-1", "--version", "1.2.3", "--platform", "IOS", "--dir", dir,
+		"--if-exists", "skip", "--output", "json",
+	}, func(req ifExistsRequest) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodGet && req.Path == "/v1/apps/app-1/appStoreVersions":
+			return jsonResponse(http.StatusOK, metadataPushVersionsList)
+		case req.Method == http.MethodGet && req.Path == "/v1/apps/app-1/appInfos":
+			return jsonResponse(http.StatusOK, metadataPushAppInfosList)
+		case req.Method == http.MethodGet && req.Path == "/v1/appStoreVersions/version-1/appStoreVersionLocalizations":
+			return jsonResponse(http.StatusOK, metadataPushEmptyList)
+		case req.Method == http.MethodGet && req.Path == "/v1/appInfos/appinfo-1/appInfoLocalizations":
+			localizationReads++
+			if localizationReads == 1 {
+				return jsonResponse(http.StatusOK, metadataPushEmptyList)
+			}
+			return jsonResponse(http.StatusOK, `{"data":[{"type":"appInfoLocalizations","id":"loc-ja","attributes":{"locale":"ja","name":"Remote JA name"}},{"type":"appInfoLocalizations","id":"loc-fr","attributes":{"locale":"fr-FR","name":"Remote FR name"}}],"links":{"next":""}}`)
+		}
+		t.Fatalf("unexpected request %s %s", req.Method, req.Path)
+		return nil, nil
+	})
+
+	if runErr != nil {
+		t.Fatalf("expected late-existing locales to be skipped, got %v (stderr %q)", runErr, stderr)
+	}
+	if localizationReads != 2 || countRequests(seen, http.MethodGet, "/v1/appInfos/appinfo-1/appInfoLocalizations") != 2 {
+		t.Fatalf("localization reads = %d, requests = %+v; want initial read plus one shared refresh", localizationReads, seen)
+	}
+	actions := metadataPushActions(t, stdout)
+	if len(actions) != 2 || actions[0]["status"] != "skipped" || actions[1]["status"] != "skipped" {
+		t.Fatalf("actions = %v, want both patch-only locales skipped", actions)
+	}
+}
+
+func TestMetadataPushIfExistsUpdateRejectsMissingPatchOnlyAppInfoLocaleBeforeMutation(t *testing.T) {
+	dir := writeMetadataAppInfoFixture(t, `{"subtitle":"Planned JA subtitle"}`)
+	stdout, stderr, seen, runErr := runIfExistsCommand(t, []string{
+		"metadata", "push", "--app", "app-1", "--version", "1.2.3", "--platform", "IOS", "--dir", dir,
+		"--if-exists", "update", "--output", "json",
+	}, func(req ifExistsRequest) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodGet && req.Path == "/v1/apps/app-1/appStoreVersions":
+			return jsonResponse(http.StatusOK, metadataPushVersionsList)
+		case req.Method == http.MethodGet && req.Path == "/v1/apps/app-1/appInfos":
+			return jsonResponse(http.StatusOK, metadataPushAppInfosList)
+		case req.Method == http.MethodGet && req.Path == "/v1/appInfos/appinfo-1/appInfoLocalizations", req.Method == http.MethodGet && req.Path == "/v1/appStoreVersions/version-1/appStoreVersionLocalizations":
+			return jsonResponse(http.StatusOK, metadataPushEmptyList)
+		}
+		t.Fatalf("unexpected mutation request %s %s", req.Method, req.Path)
+		return nil, nil
+	})
+
+	if runErr == nil || !strings.Contains(stderr, "requires name when creating a new locale") {
+		t.Fatalf("runErr = %v, stderr = %q; want a missing-name error", runErr, stderr)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want no receipt before preflight succeeds", stdout)
+	}
+	for _, req := range seen {
+		if req.Method == http.MethodPost || req.Method == http.MethodPatch || req.Method == http.MethodDelete {
+			t.Fatalf("unexpected mutation before missing-name validation: %+v", req)
+		}
+	}
+}
+
 func TestMetadataPushIfExistsUpdateEmitsNoCreateReadinessWarning(t *testing.T) {
 	// No whatsNew locally, so metadata push resolves the submit-readiness
 	// context and would warn about a newly created locale. Nothing was
@@ -451,6 +626,161 @@ func TestMetadataPushIfExistsUpdateEmitsNoCreateReadinessWarning(t *testing.T) {
 	}
 	if strings.Contains(stderr, "created locale ja") || strings.Contains(stderr, "creating locale ja") {
 		t.Fatalf("stderr = %q, want no submit-readiness create warning for a resolved duplicate", stderr)
+	}
+}
+
+func TestMetadataPushSuppressesCreateWarningForReconciledDuplicateVersionLocalization(t *testing.T) {
+	dir := writeMetadataVersionFixture(t, `{"description":"Planned JA description"}`)
+	posts := 0
+	stdout, stderr, _, runErr := runIfExistsCommand(t, []string{
+		"metadata", "push", "--app", "app-1", "--version", "1.2.3", "--platform", "IOS", "--dir", dir,
+		"--output", "json",
+	}, func(req ifExistsRequest) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodGet && req.Path == "/v1/apps/app-1/appStoreVersions":
+			return jsonResponse(http.StatusOK, metadataPushVersionsList)
+		case req.Method == http.MethodGet && req.Path == "/v1/apps/app-1/appInfos":
+			return jsonResponse(http.StatusOK, metadataPushAppInfosList)
+		case req.Method == http.MethodGet && req.Path == "/v1/appInfos/appinfo-1/appInfoLocalizations":
+			return jsonResponse(http.StatusOK, metadataPushEmptyList)
+		case req.Method == http.MethodGet && req.Path == "/v1/appStoreVersions/version-1/appStoreVersionLocalizations":
+			if posts == 0 {
+				return jsonResponse(http.StatusOK, metadataPushEmptyList)
+			}
+			return jsonResponse(http.StatusOK, `{"data":[{"type":"appStoreVersionLocalizations","id":"loc-ja","attributes":{"locale":"ja","description":"Planned JA description"}}],"links":{"next":""}}`)
+		case req.Method == http.MethodPost && req.Path == "/v1/appStoreVersionLocalizations":
+			posts++
+			return jsonResponse(http.StatusConflict, metadataVersionLocaleDuplicate409)
+		}
+		t.Fatalf("unexpected request %s %s", req.Method, req.Path)
+		return nil, nil
+	})
+
+	if runErr != nil {
+		t.Fatalf("expected the field-matching read-back to reconcile the duplicate, got %v (stderr %q)", runErr, stderr)
+	}
+	actions := metadataPushActions(t, stdout)
+	if len(actions) != 1 || actions[0]["action"] != "reconcile" || actions[0]["status"] != "succeeded" {
+		t.Fatalf("actions = %v, want one reconciled successful existing create", actions)
+	}
+	if _, exists := actions[0]["alreadyExists"]; exists {
+		t.Fatalf("default-mode receipt changed unexpectedly: %v", actions[0])
+	}
+	if strings.Contains(stderr, "created locale ja") || strings.Contains(stderr, "creating locale ja") {
+		t.Fatalf("stderr = %q, want no create-readiness warning for an existing duplicate", stderr)
+	}
+}
+
+func TestMetadataPushRetainsCreateWarningAfterAmbiguousCreateReplayDuplicate(t *testing.T) {
+	t.Setenv("ASC_MAX_RETRIES", "1")
+	t.Setenv("ASC_BASE_DELAY", "1ms")
+	t.Setenv("ASC_MAX_DELAY", "1ms")
+	dir := writeMetadataVersionFixture(t, `{"description":"Planned JA description"}`)
+	localizationReads := 0
+	posts := 0
+	createdAfterAmbiguousPost := false
+	stdout, stderr, _, runErr := runIfExistsCommand(t, []string{
+		"metadata", "push", "--app", "app-1", "--version", "1.2.3", "--platform", "IOS", "--dir", dir,
+		"--output", "json",
+	}, func(req ifExistsRequest) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodGet && req.Path == "/v1/apps/app-1/appStoreVersions":
+			return jsonResponse(http.StatusOK, metadataPushVersionsList)
+		case req.Method == http.MethodGet && req.Path == "/v1/apps/app-1/appInfos":
+			return jsonResponse(http.StatusOK, metadataPushAppInfosList)
+		case req.Method == http.MethodGet && req.Path == "/v1/appInfos/appinfo-1/appInfoLocalizations":
+			return jsonResponse(http.StatusOK, metadataPushEmptyList)
+		case req.Method == http.MethodGet && req.Path == "/v1/appStoreVersions/version-1/appStoreVersionLocalizations":
+			localizationReads++
+			if localizationReads <= 3 {
+				return jsonResponse(http.StatusOK, metadataPushEmptyList)
+			}
+			if !createdAfterAmbiguousPost {
+				t.Fatal("final read-back happened before the ambiguous POST created the locale")
+			}
+			return jsonResponse(http.StatusOK, metadataPushVersionLocalizationsPlanned)
+		case req.Method == http.MethodPost && req.Path == "/v1/appStoreVersionLocalizations":
+			posts++
+			if posts == 1 {
+				// Simulate a server-side create whose response is lost, followed by
+				// temporarily stale read-backs before the client replays the POST.
+				createdAfterAmbiguousPost = true
+				return jsonResponse(http.StatusBadGateway, `{"errors":[{"status":"502","code":"SERVICE_ERROR","title":"Temporary service failure"}]}`)
+			}
+			return jsonResponse(http.StatusConflict, metadataVersionLocaleDuplicate409)
+		}
+		t.Fatalf("unexpected request %s %s", req.Method, req.Path)
+		return nil, nil
+	})
+
+	if runErr != nil {
+		t.Fatalf("expected the replayed create to reconcile, got %v (stderr %q)", runErr, stderr)
+	}
+	if posts != 2 {
+		t.Fatalf("create POSTs = %d, want first ambiguous POST and one duplicate replay", posts)
+	}
+	actions := metadataPushActions(t, stdout)
+	if len(actions) != 1 || actions[0]["action"] != "reconcile" || actions[0]["status"] != "succeeded" {
+		t.Fatalf("actions = %v, want one successful reconciliation", actions)
+	}
+	if _, exists := actions[0]["alreadyExists"]; exists {
+		t.Fatalf("ambiguous create replay must not be classified as pre-existing: %v", actions[0])
+	}
+	if !strings.Contains(stderr, "created locale ja now participates in submission validation") {
+		t.Fatalf("stderr = %q, want the create-readiness warning because this run may have created the locale", stderr)
+	}
+}
+
+func TestMetadataPushIfExistsReusesMatchingDuplicateReadBack(t *testing.T) {
+	for _, mode := range []string{"skip", "update"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := writeMetadataVersionFixture(t, `{"description":"Planned JA description"}`)
+			localizationReads := 0
+			stdout, stderr, seen, runErr := runIfExistsCommand(t, []string{
+				"metadata", "push", "--app", "app-1", "--version", "1.2.3", "--platform", "IOS", "--dir", dir,
+				"--if-exists", mode, "--output", "json",
+			}, func(req ifExistsRequest) (*http.Response, error) {
+				switch {
+				case req.Method == http.MethodGet && req.Path == "/v1/apps/app-1/appStoreVersions":
+					return jsonResponse(http.StatusOK, metadataPushVersionsList)
+				case req.Method == http.MethodGet && req.Path == "/v1/apps/app-1/appInfos":
+					return jsonResponse(http.StatusOK, metadataPushAppInfosList)
+				case req.Method == http.MethodGet && req.Path == "/v1/appInfos/appinfo-1/appInfoLocalizations":
+					return jsonResponse(http.StatusOK, metadataPushEmptyList)
+				case req.Method == http.MethodGet && req.Path == "/v1/appStoreVersions/version-1/appStoreVersionLocalizations":
+					localizationReads++
+					if localizationReads == 1 {
+						return jsonResponse(http.StatusOK, metadataPushEmptyList)
+					}
+					if localizationReads == 2 {
+						return jsonResponse(http.StatusOK, metadataPushVersionLocalizationsPlanned)
+					}
+					t.Fatalf("unexpected redundant localization read %d after the matching read-back", localizationReads)
+				case req.Method == http.MethodPost && req.Path == "/v1/appStoreVersionLocalizations":
+					return jsonResponse(http.StatusConflict, metadataVersionLocaleDuplicate409)
+				}
+				t.Fatalf("unexpected request %s %s", req.Method, req.Path)
+				return nil, nil
+			})
+
+			if runErr != nil {
+				t.Fatalf("expected the matching read-back to resolve the duplicate, got %v (stderr %q)", runErr, stderr)
+			}
+			if localizationReads != 2 || countRequests(seen, http.MethodPatch, "/v1/appStoreVersionLocalizations/loc-ja") != 0 {
+				t.Fatalf("localization reads=%d, requests=%+v; want plan read, one matching read-back, and no PATCH", localizationReads, seen)
+			}
+
+			actions := metadataPushActions(t, stdout)
+			if len(actions) != 1 || actions[0]["alreadyExists"] != true || actions[0]["ifExists"] != mode {
+				t.Fatalf("actions = %v, want one existing-resource action for --if-exists %s", actions, mode)
+			}
+			if mode == "skip" && actions[0]["status"] != "skipped" {
+				t.Fatalf("actions = %v, want skipped status", actions)
+			}
+			if mode == "update" && (actions[0]["status"] != "succeeded" || actions[0]["action"] != "reconcile") {
+				t.Fatalf("actions = %v, want successful reconcile without PATCH", actions)
+			}
+		})
 	}
 }
 

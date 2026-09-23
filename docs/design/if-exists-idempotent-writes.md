@@ -134,6 +134,13 @@ case `--if-exists` covers:
   carries only the fields the local file set; `locale` is immutable and is
   never sent.
 
+App-info localization creates require `name`, but a patch-only file can still
+be applied when another writer creates that locale after the initial read:
+with `skip` or `update`, apply re-reads the locale before rejecting the missing
+name. A found locale follows the selected mode; a still-missing locale fails
+before any mutation. Planning and the default `fail` mode keep the create
+prerequisite check.
+
 The existence read-back reuses the command's own natural-key lookups
 (`readBackVersionLocalization` / `readBackAppInfoLocalization`) with no desired
 fields, so it asks only whether the locale is present in
@@ -171,10 +178,13 @@ rather than through `internal/asc/output_*.go`. The change is additive:
 byte-identical JSON; the table and markdown renderers print a `Skipped:` line
 only when the counter is non-zero.
 
-A skipped or updated duplicate also suppresses the submit-readiness "was
-created" warning for that locale, for the same reason as `localizations
-create`: nothing was created, and the existing localization may already carry
-the fields the local file omitted.
+A skipped or updated duplicate suppresses the submit-readiness "was created"
+warning for that locale. In the default `fail` mode, a duplicate 409 on the
+first create attempt is also classified as pre-existing when its read-back
+confirms the planned fields. By contrast, after an ambiguous create attempt is
+replayed, a later duplicate 409 and matching read-back remain an ordinary
+`action: reconcile`: the earlier attempt may have created the locale, so its
+submit-readiness warning is retained.
 
 #### Review-plan binding
 

@@ -160,8 +160,19 @@ func ExecutePushWithWarnings(ctx context.Context, opts PushExecutionOptions) (Pu
 
 	localAppInfo := applyDefaultAppInfoFallback(localBundle.appInfo, localBundle.defaultAppInfo, remoteAppInfo, opts.AllowDeletes)
 	localVersion := applyDefaultVersionFallback(localBundle.version, localBundle.defaultVersion, remoteVersion, opts.AllowDeletes)
+	lateAppInfoIDs := map[string]string(nil)
 	if err := validateMetadataCreatePrerequisites(localAppInfo, remoteAppInfo); err != nil {
-		return PushPlanResult{}, nil, shared.UsageError(err.Error())
+		if opts.DryRun || ifExistsMode == shared.IfExistsFail {
+			return PushPlanResult{}, nil, shared.UsageError(err.Error())
+		}
+		var missingLocale string
+		lateAppInfoIDs, missingLocale, err = findLateExistingAppInfoLocalizations(ctx, client, appInfoIDValue, localAppInfo, remoteAppInfo)
+		if err != nil {
+			return PushPlanResult{}, nil, fmt.Errorf("%s: %w", errorPrefix, err)
+		}
+		if missingLocale != "" {
+			return PushPlanResult{}, nil, shared.UsageError(fmt.Sprintf("app-info localization %q requires name when creating a new locale", missingLocale))
+		}
 	}
 	warningMode := shared.SubmitReadinessCreateModePlanned
 	if !opts.DryRun {
@@ -243,7 +254,7 @@ func ExecutePushWithWarnings(ctx context.Context, opts PushExecutionOptions) (Pu
 		remoteAppInfoItems,
 		remoteVersionItems,
 		opts.AllowDeletes,
-		metadataIfExistsOptions{mode: ifExistsMode, prefix: errorPrefix},
+		metadataIfExistsOptions{mode: ifExistsMode, prefix: errorPrefix, lateAppInfoIDs: lateAppInfoIDs},
 	)
 	result.Actions = actions
 	result.Total = len(actions)
