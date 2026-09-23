@@ -386,6 +386,7 @@ func normalizeSpacedBooleanFlags(root *ffcli.Command, args []string) []string {
 func commandAcceptsPositionalPayload(commandPath []string) bool {
 	switch strings.Join(commandPath, " ") {
 	case "asc docs show",
+		"asc api",
 		"asc schema",
 		"asc search",
 		"asc snitch",
