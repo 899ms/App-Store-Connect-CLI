@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
@@ -174,6 +175,9 @@ type relationshipReference struct {
 func relationshipResourceID(relationships json.RawMessage, key string) (string, error) {
 	if len(relationships) == 0 {
 		return "", fmt.Errorf("missing relationships")
+	}
+	if !utf8.Valid(relationships) {
+		return "", fmt.Errorf("relationships contain invalid UTF-8")
 	}
 
 	var references map[string]relationshipReference
