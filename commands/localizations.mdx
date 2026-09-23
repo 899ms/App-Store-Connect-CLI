@@ -238,12 +238,21 @@ Create a new version localization.
   Canonical App Store Connect locale code to create
 </ParamField>
 
+<ParamField path="--if-exists" type="string" default="fail">
+  Duplicate-locale behavior: `fail` returns the conflict, `skip` leaves the
+  existing localization unchanged, or `update` applies the supplied metadata
+  fields to it. Only the recognized duplicate-locale conflict is handled.
+</ParamField>
+
 Use canonical App Store Connect locale identifiers for `--locale`. Common
 accepted forms include `en-US`, `es-MX`, `de-DE`, `ja`, `ar-SA`, `zh-Hans`, and
 `zh-Hant`.
 
 Run `asc localizations supported-locales --version "VERSION_ID"` to inspect the
 shared CLI locale catalog for that version before creating a new locale.
+
+When `--if-exists update` is used without metadata fields, it behaves like
+`skip` and does not send an empty update request.
 
 Common failures:
 
@@ -255,7 +264,9 @@ Common failures:
 
 ```bash  theme={null}
 asc localizations create --version "VERSION_ID" --locale "ja"
+asc localizations create --version "VERSION_ID" --locale "ja" --if-exists skip
 asc localizations create --version "VERSION_ID" --locale "ar-SA" --description "Arabic app" --keywords "arabic,productivity"
+asc localizations create --version "VERSION_ID" --locale "zh-Hans" --description "Simplified Chinese app" --if-exists update
 asc localizations create --version "VERSION_ID" --locale "zh-Hans" --description "Simplified Chinese app" --keywords "simplified,chinese"
 ```
 
