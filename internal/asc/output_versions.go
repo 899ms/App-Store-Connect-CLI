@@ -173,7 +173,12 @@ func appStoreVersionSubmissionCancelRows(result *AppStoreVersionSubmissionCancel
 
 func appStoreVersionDetailRows(result *AppStoreVersionDetailResult) ([]string, [][]string) {
 	headers := []string{"Version ID", "Version", "Platform", "State", "Build ID", "Build Version", "Submission ID"}
-	rows := [][]string{{result.ID, result.VersionString, displayPlatform(result.Platform), result.State, result.BuildID, result.BuildVersion, result.SubmissionID}}
+	row := []string{result.ID, result.VersionString, displayPlatform(result.Platform), result.State, result.BuildID, result.BuildVersion, result.SubmissionID}
+	if result.Action != "" {
+		headers = append(headers, "Already Exists", "Action")
+		row = append(row, fmt.Sprintf("%t", result.AlreadyExists), result.Action)
+	}
+	rows := [][]string{row}
 	return headers, rows
 }
 
