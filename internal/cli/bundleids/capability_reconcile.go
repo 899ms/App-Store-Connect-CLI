@@ -109,7 +109,7 @@ func capabilityReconcileCommand(name string, apply bool) *ffcli.Command {
 					if outputErr := shared.PrintOutput(plan, *output.Output, *output.Pretty); outputErr != nil {
 						return fmt.Errorf("bundle-ids capabilities reconcile: %w (partial receipt output: %w)", err, outputErr)
 					}
-					return fmt.Errorf("bundle-ids capabilities reconcile: %w", err)
+					return shared.NewReportedError(fmt.Errorf("bundle-ids capabilities reconcile: %w", err))
 				}
 			}
 			return shared.PrintOutput(plan, *output.Output, *output.Pretty)
@@ -321,6 +321,14 @@ func listBundleCapabilities(ctx context.Context, client *asc.Client, bundleID st
 }
 
 func applyCapabilityReconcilePlan(ctx context.Context, client *asc.Client, bundleID string, plan *asc.CapabilityReconcilePlan) error {
+	for index := range plan.Actions {
+		action := &plan.Actions[index]
+		if action.Action == "needsWebSession" {
+			action.Status = "failed"
+			action.Error = "requires a web session; run " + action.Command
+			return fmt.Errorf("entitlement %s requires a web session", action.Entitlement)
+		}
+	}
 	for index := range plan.Actions {
 		action := &plan.Actions[index]
 		var err error

@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -508,6 +509,10 @@ func TestReconcileApplyPrintsPartialReceiptOnAPIFailure(t *testing.T) {
 	if runErr == nil || posts != 2 {
 		t.Fatalf("error=%v posts=%d stdout=%s", runErr, posts, stdout)
 	}
+	var reportedErr shared.ReportedError
+	if !errors.As(runErr, &reportedErr) {
+		t.Fatalf("error type = %T, want reported error after printing receipt", runErr)
+	}
 	var receipt struct {
 		Actions []struct {
 			Capability   string `json:"capability"`
@@ -521,6 +526,50 @@ func TestReconcileApplyPrintsPartialReceiptOnAPIFailure(t *testing.T) {
 	}
 	if len(receipt.Actions) != 2 || receipt.Actions[0].Status != "applied" || receipt.Actions[0].CapabilityID != "created-1" || receipt.Actions[1].Status != "failed" || receipt.Actions[1].Error == "" {
 		t.Fatalf("partial receipt = %+v", receipt)
+	}
+}
+
+func TestReconcileApplyRefusesWebOnlyCapabilityBeforeWrites(t *testing.T) {
+	var writes int
+	client := newReconcileClient(t, func(req *http.Request) *http.Response {
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/bundleIds/bundle-1":
+			return reconcileJSON(http.StatusOK, `{"data":{"type":"bundleIds","id":"bundle-1","attributes":{"identifier":"com.example.app"}}}`)
+		case req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/bundleIdCapabilities"):
+			return reconcileJSON(http.StatusOK, `{"data":[]}`)
+		default:
+			writes++
+			return reconcileJSON(http.StatusCreated, `{"data":{"type":"bundleIdCapabilities","id":"created-1","attributes":{"capabilityType":"HEALTHKIT"}}}`)
+		}
+	})
+	t.Cleanup(shared.SetASCClientFactoryForTesting(func() (*asc.Client, error) { return client, nil }))
+	path := writeEntitlements(t, map[string]any{
+		"com.apple.developer.private-cloud-compute": true,
+		"com.apple.developer.healthkit":             true,
+	})
+	cmd := capabilityReconcileCommand("apply", true)
+	cmd.FlagSet.SetOutput(io.Discard)
+	if err := cmd.Parse([]string{"--bundle", "bundle-1", "--entitlements", path, "--confirm", "--output", "json"}); err != nil {
+		t.Fatal(err)
+	}
+	var runErr error
+	stdout, _ := captureReconcile(t, func() { runErr = cmd.Run(context.Background()) })
+	var reportedErr shared.ReportedError
+	if runErr == nil || !errors.As(runErr, &reportedErr) || writes != 0 {
+		t.Fatalf("error=%v writes=%d stdout=%s, want nonzero reported result with no writes", runErr, writes, stdout)
+	}
+	var receipt struct {
+		Actions []struct {
+			Action string `json:"action"`
+			Status string `json:"status"`
+			Error  string `json:"error"`
+		} `json:"actions"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &receipt); err != nil {
+		t.Fatalf("receipt JSON: %v; stdout=%s", err, stdout)
+	}
+	if len(receipt.Actions) != 2 || receipt.Actions[1].Action != "needsWebSession" || receipt.Actions[1].Status != "failed" || receipt.Actions[1].Error == "" {
+		t.Fatalf("receipt = %+v, want explicit failed web-only action", receipt.Actions)
 	}
 }
 
