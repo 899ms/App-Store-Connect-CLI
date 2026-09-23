@@ -367,7 +367,6 @@ func executeIAPImport(
 		}
 		if result.DryRun {
 			entry.Status = iapImportStatusPlanned
-			entry.LocalizationsCreated = len(product.Localizations)
 			result.Products = append(result.Products, entry)
 			continue
 		}
@@ -409,15 +408,15 @@ func importIAPProduct(
 	if err != nil {
 		return fmt.Errorf("create in-app purchase: %w", err)
 	}
+	// The successful create response acknowledges the product even if it omits
+	// its ID. Record it before any ID-dependent step so the partial receipt
+	// warns that a retry could collide with the accepted product.
+	result.Created++
+	result.CreatedProductIDs = append(result.CreatedProductIDs, product.ProductID)
 	entry.InAppPurchaseID = strings.TrimSpace(created.Data.ID)
 	if entry.InAppPurchaseID == "" {
 		return fmt.Errorf("create in-app purchase: response did not include an id")
 	}
-	// The in-app purchase now exists in App Store Connect. Record it before the
-	// localization and screenshot steps so a failure in either still reports a
-	// product that a retry would collide with.
-	result.Created++
-	result.CreatedProductIDs = append(result.CreatedProductIDs, product.ProductID)
 
 	if len(product.Localizations) > 0 {
 		versionID, err := resolveIAPImportVersionID(ctx, client, entry.InAppPurchaseID)

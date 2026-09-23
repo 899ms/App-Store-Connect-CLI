@@ -428,22 +428,24 @@ func TestIAPImportDryRunPerformsNoCreates(t *testing.T) {
 	}
 
 	var receipt struct {
-		DryRun   bool `json:"dryRun"`
-		Total    int  `json:"total"`
-		Created  int  `json:"created"`
-		Products []struct {
-			Status string `json:"status"`
+		DryRun               bool `json:"dryRun"`
+		Total                int  `json:"total"`
+		Created              int  `json:"created"`
+		LocalizationsCreated int  `json:"localizationsCreated"`
+		Products             []struct {
+			Status               string `json:"status"`
+			LocalizationsCreated int    `json:"localizationsCreated"`
 		} `json:"products"`
 	}
 	if err := json.Unmarshal([]byte(stdout), &receipt); err != nil {
 		t.Fatalf("unmarshal receipt: %v\nstdout=%s", err, stdout)
 	}
-	if !receipt.DryRun || receipt.Total != 2 || receipt.Created != 0 {
+	if !receipt.DryRun || receipt.Total != 2 || receipt.Created != 0 || receipt.LocalizationsCreated != 0 {
 		t.Fatalf("unexpected dry-run receipt: %+v", receipt)
 	}
 	for _, product := range receipt.Products {
-		if product.Status != "planned" {
-			t.Fatalf("expected planned products in a dry run, got %+v", receipt.Products)
+		if product.Status != "planned" || product.LocalizationsCreated != 0 {
+			t.Fatalf("expected planned products with zero created localizations in a dry run, got %+v", receipt.Products)
 		}
 	}
 }
@@ -614,6 +616,53 @@ func TestIAPImportRejectsScreenshotOutsideTheImportRoot(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "must stay inside") {
 		t.Fatalf("expected a containment error on stderr, got %q", stderr)
+	}
+}
+
+func TestIAPImportReportsAcceptedProductWhenCreateResponseHasNoID(t *testing.T) {
+	setupAuth(t)
+	dir := t.TempDir()
+	filePath := writeIAPImportFile(t, dir, `{"products":[{"type":"CONSUMABLE","referenceName":"Coins","productId":"com.example.coins"}]}`)
+
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	createCalls := 0
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/apps/123456789/inAppPurchasesV2":
+			return jsonResponse(http.StatusOK, `{"data":[]}`)
+		case req.Method == http.MethodPost && req.URL.Path == "/v2/inAppPurchases":
+			createCalls++
+			return jsonResponse(http.StatusCreated, `{"data":{"type":"inAppPurchases","attributes":{}}}`)
+		default:
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+
+	stdout, _, runErr := runIAPImport(t, []string{
+		"iap", "import", "--app", "123456789", "--file", filePath, "--confirm", "--output", "json",
+	})
+	if runErr == nil || !strings.Contains(runErr.Error(), "response did not include an id") || createCalls != 1 {
+		t.Fatalf("run error = %v, create calls = %d; want one accepted create with missing ID", runErr, createCalls)
+	}
+
+	var receipt struct {
+		Created           int      `json:"created"`
+		CreatedProductIDs []string `json:"createdProductIds"`
+		FailedProductID   string   `json:"failedProductId"`
+		Products          []struct {
+			Status string `json:"status"`
+		} `json:"products"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &receipt); err != nil {
+		t.Fatalf("unmarshal receipt: %v\nstdout=%s", err, stdout)
+	}
+	if receipt.Created != 1 || len(receipt.CreatedProductIDs) != 1 || receipt.CreatedProductIDs[0] != "com.example.coins" || receipt.FailedProductID != "com.example.coins" {
+		t.Fatalf("accepted product missing from partial receipt: %+v", receipt)
+	}
+	if len(receipt.Products) != 1 || receipt.Products[0].Status != "failed" {
+		t.Fatalf("expected one failed product in receipt, got %+v", receipt.Products)
 	}
 }
 
