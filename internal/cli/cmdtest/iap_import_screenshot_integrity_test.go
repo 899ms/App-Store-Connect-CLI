@@ -82,6 +82,42 @@ func TestIAPImportPreservesScreenshotIDInPartialReceipt(t *testing.T) {
 	}
 }
 
+func TestIAPImportRejectsScreenshotGrownAfterPlanValidation(t *testing.T) {
+	setupAuth(t)
+	dir := t.TempDir()
+	filePath := writeIAPImportFile(t, dir, `{"products":[{"type":"CONSUMABLE","referenceName":"Coins","productId":"com.example.coins","reviewScreenshot":"shots/coins.png"}]}`)
+	screenshotPath := writeIAPImportScreenshot(t, dir)
+
+	createdProduct := false
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/apps/123456789/inAppPurchasesV2":
+			if err := os.Truncate(screenshotPath, 1<<30+1); err != nil {
+				t.Fatalf("grow screenshot after planning: %v", err)
+			}
+			return jsonResponse(http.StatusOK, `{"data":[]}`)
+		case req.Method == http.MethodPost && req.URL.Path == "/v2/inAppPurchases":
+			createdProduct = true
+			return jsonResponse(http.StatusCreated, `{"data":{"type":"inAppPurchases","id":"iap-1","attributes":{}}}`)
+		default:
+			t.Fatalf("unexpected request after screenshot growth: %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+
+	stdout, stderr, runErr := runIAPImport(t, []string{
+		"iap", "import", "--app", "123456789", "--file", filePath, "--confirm", "--output", "json",
+	})
+	if runErr == nil || !createdProduct || !bytes.Contains([]byte(runErr.Error()), []byte("file size exceeds")) {
+		t.Fatalf("run error = %v, product created = %t, stderr = %q; want size rejection after product creation", runErr, createdProduct, stderr)
+	}
+	if !bytes.Contains([]byte(stdout), []byte(`"status":"failed"`)) {
+		t.Fatalf("partial receipt = %q, want failed product", stdout)
+	}
+}
+
 func TestIAPImportKeepsScreenshotChecksumBoundToUploadedBytes(t *testing.T) {
 	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
