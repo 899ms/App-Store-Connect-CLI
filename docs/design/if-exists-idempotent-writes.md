@@ -91,9 +91,9 @@ codes is listed.
 
 - Commands whose receipt is an exported camelCase struct in
   `internal/asc/output_*.go` (for example `versions create`) gain two additive
-  fields: `alreadyExists` (bool, omitted when false) and `action`
-  (`created`, `skipped`, or `updated`). Existing consumers see one new
-  `"action":"created"` key on the unchanged success path.
+  fields for explicit `skip` and `update` modes: `alreadyExists` (bool, omitted
+  when false) and `action` (`created`, `skipped`, or `updated`). Default and
+  explicit `fail` mode preserve the historical success output byte-for-byte.
 - Commands that print Apple's envelope unmodified (for example `review
   details-create`) keep printing the envelope: on `skip` the existing resource's
   envelope from the read-back, on `update` the PATCH response. The envelope is

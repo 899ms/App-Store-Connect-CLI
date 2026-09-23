@@ -192,7 +192,10 @@ Any other 409 keeps failing.`,
 				visited[f.Name] = true
 			})
 
-			if visited["demo-account-required"] && *demoAccountRequired {
+			needsExistingDemoCredentials := ifExistsMode == shared.IfExistsUpdate &&
+				visited["demo-account-required"] && *demoAccountRequired &&
+				(!visited["demo-account-name"] || !visited["demo-account-password"])
+			if visited["demo-account-required"] && *demoAccountRequired && !needsExistingDemoCredentials {
 				if err := validateReviewDetailDemoCredentialValues(strings.TrimSpace(*demoAccountName), strings.TrimSpace(*demoAccountPassword)); err != nil {
 					return err
 				}
@@ -248,9 +251,36 @@ Any other 409 keeps failing.`,
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
 			defer cancel()
 
-			resp, err := client.CreateAppStoreReviewDetail(requestCtx, versionValue, attrsPtr)
+			var resp *asc.AppStoreReviewDetailResponse
+			var existing *asc.AppStoreReviewDetailResponse
+			handled := false
+			if needsExistingDemoCredentials {
+				existing, err = client.GetAppStoreReviewDetailForVersion(requestCtx, versionValue)
+				if err != nil {
+					if asc.IsNotFound(err) {
+						return validateReviewDetailDemoCredentialValues(strings.TrimSpace(*demoAccountName), strings.TrimSpace(*demoAccountPassword))
+					}
+					return fmt.Errorf("review details-create: failed to read existing review details for demo credential validation: %w", err)
+				}
+				if strings.TrimSpace(existing.Data.ID) == "" {
+					return fmt.Errorf("review details-create: existing review detail response did not include an id")
+				}
+
+				if err := validateReviewDetailDemoCredentialsWithExisting(
+					existing.Data.Attributes,
+					visited,
+					strings.TrimSpace(*demoAccountName),
+					strings.TrimSpace(*demoAccountPassword),
+				); err != nil {
+					return err
+				}
+				handled = true
+			} else {
+				resp, err = client.CreateAppStoreReviewDetail(requestCtx, versionValue, attrsPtr)
+			}
 			if err != nil {
-				existing, handled, resolveErr := shared.ResolveIfExistsConflict(ifExistsMode, err, reviewDetailsCreateExistsCodes, func() (*asc.AppStoreReviewDetailResponse, bool, error) {
+				var resolveErr error
+				existing, handled, resolveErr = shared.ResolveIfExistsConflict(ifExistsMode, err, reviewDetailsCreateExistsCodes, func() (*asc.AppStoreReviewDetailResponse, bool, error) {
 					detail, lookupErr := client.GetAppStoreReviewDetailForVersion(requestCtx, versionValue)
 					if lookupErr != nil {
 						return nil, false, lookupErr
@@ -263,6 +293,8 @@ Any other 409 keeps failing.`,
 				if !handled {
 					return fmt.Errorf("review details-create: failed to create: %w", err)
 				}
+			}
+			if handled {
 				resp = existing
 				outcome := "left unchanged"
 				if ifExistsMode == shared.IfExistsUpdate && attrsPtr != nil {
@@ -456,10 +488,8 @@ func validateReviewDetailUpdateDemoCredentials(
 		return nil
 	}
 
-	effectiveName := demoAccountName
-	effectivePassword := demoAccountPassword
 	if visited["demo-account-name"] && visited["demo-account-password"] {
-		return validateReviewDetailDemoCredentialValues(effectiveName, effectivePassword)
+		return validateReviewDetailDemoCredentialValues(demoAccountName, demoAccountPassword)
 	}
 
 	resp, err := client.GetAppStoreReviewDetail(ctx, detailID)
@@ -467,13 +497,23 @@ func validateReviewDetailUpdateDemoCredentials(
 		return fmt.Errorf("review details-update: failed to fetch existing review details for demo credential validation: %w", err)
 	}
 
-	if !visited["demo-account-name"] {
-		effectiveName = strings.TrimSpace(resp.Data.Attributes.DemoAccountName)
-	}
-	if !visited["demo-account-password"] {
-		effectivePassword = strings.TrimSpace(resp.Data.Attributes.DemoAccountPassword)
-	}
+	return validateReviewDetailDemoCredentialsWithExisting(resp.Data.Attributes, visited, demoAccountName, demoAccountPassword)
+}
 
+func validateReviewDetailDemoCredentialsWithExisting(
+	existing asc.AppStoreReviewDetailAttributes,
+	visited map[string]bool,
+	demoAccountName string,
+	demoAccountPassword string,
+) error {
+	effectiveName := demoAccountName
+	if !visited["demo-account-name"] {
+		effectiveName = strings.TrimSpace(existing.DemoAccountName)
+	}
+	effectivePassword := demoAccountPassword
+	if !visited["demo-account-password"] {
+		effectivePassword = strings.TrimSpace(existing.DemoAccountPassword)
+	}
 	return validateReviewDetailDemoCredentialValues(effectiveName, effectivePassword)
 }
 
