@@ -407,6 +407,7 @@ func TestRunScreenshotsUploadFanoutPrintsPartialResultsOnLocaleFailure(t *testin
 			"--version-id", "version-1",
 			"--path", workDir,
 			"--device-type", "IPHONE_65",
+			"--concurrency", "1",
 			"--output", "json",
 		}, "1.2.3")
 		if code != cmd.ExitError {
