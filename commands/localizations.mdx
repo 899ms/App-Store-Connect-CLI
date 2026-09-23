@@ -302,6 +302,24 @@ Update localization metadata.
   Exact App Store Connect locale value to update
 </ParamField>
 
+<ParamField path="--clear-promotional-text" type="boolean">
+  Clear promotional text on a version localization
+</ParamField>
+
+<ParamField path="--clear-subtitle" type="boolean">
+  Clear the subtitle on an app-info localization
+</ParamField>
+
+<ParamField path="--clear-privacy-policy-url" type="boolean">
+  Clear the privacy policy URL on an app-info localization
+</ParamField>
+
+<ParamField path="--confirm" type="boolean">
+  Required when clearing a localization field
+</ParamField>
+
+Do not combine a clear flag with its matching set flag in one update.
+
 Use the exact App Store Connect locale already present on the app or version
 when you pass `--locale`. If update fails with a locale mismatch, run
 `asc localizations list` and reuse the `locale` value returned by ASC.
@@ -327,7 +345,9 @@ Common failures:
 ```bash  theme={null}
 asc localizations update --version "VERSION_ID" --locale "en-US" --description "New description"
 asc localizations update --version "VERSION_ID" --locale "en-US" --keywords "new,keywords"
+asc localizations update --version "VERSION_ID" --locale "en-US" --clear-promotional-text --confirm
 asc localizations update --app "APP_ID" --type app-info --locale "ar-SA" --subtitle "Arabic subtitle"
+asc localizations update --app "APP_ID" --type app-info --locale "ar-SA" --clear-subtitle --confirm
 ```
 
 ***
