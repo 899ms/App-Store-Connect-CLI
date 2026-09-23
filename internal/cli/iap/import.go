@@ -451,10 +451,10 @@ func importIAPProduct(
 	}
 
 	screenshotID, err := uploadIAPImportReviewScreenshot(ctx, client, root, entry.InAppPurchaseID, item.screenshotName)
+	entry.ReviewScreenshotID = screenshotID
 	if err != nil {
 		return err
 	}
-	entry.ReviewScreenshotID = screenshotID
 	result.ScreenshotsUploaded++
 	return nil
 }
@@ -499,7 +499,13 @@ func uploadIAPImportReviewScreenshot(ctx context.Context, client *asc.Client, ro
 	if err != nil {
 		return "", fmt.Errorf("inspect review screenshot %q: %w", name, err)
 	}
-	checksum, err := asc.ComputeChecksumFromReader(file, asc.ChecksumAlgorithmMD5)
+	snapshot, cleanupSnapshot, err := snapshotImageFile(file, info.Size())
+	if err != nil {
+		return "", fmt.Errorf("snapshot review screenshot %q: %w", name, err)
+	}
+	defer cleanupSnapshot()
+
+	checksum, err := asc.ComputeChecksumFromReader(snapshot, asc.ChecksumAlgorithmMD5)
 	if err != nil {
 		return "", fmt.Errorf("checksum review screenshot %q: %w", name, err)
 	}
@@ -511,12 +517,18 @@ func uploadIAPImportReviewScreenshot(ctx context.Context, client *asc.Client, ro
 	if err != nil {
 		return "", fmt.Errorf("create review screenshot: %w", err)
 	}
-	if reservation == nil || len(reservation.Data.Attributes.UploadOperations) == 0 {
+	if reservation == nil {
 		return "", fmt.Errorf("create review screenshot: no upload operations returned")
 	}
 	screenshotID := strings.TrimSpace(reservation.Data.ID)
+	if screenshotID == "" {
+		return "", fmt.Errorf("create review screenshot: response did not include an id")
+	}
+	if len(reservation.Data.Attributes.UploadOperations) == 0 {
+		return screenshotID, fmt.Errorf("create review screenshot: no upload operations returned")
+	}
 
-	if err := asc.UploadAssetFromFile(uploadCtx, file, info.Size(), reservation.Data.Attributes.UploadOperations); err != nil {
+	if err := asc.UploadAssetFromFile(uploadCtx, snapshot, info.Size(), reservation.Data.Attributes.UploadOperations); err != nil {
 		return screenshotID, fmt.Errorf("upload review screenshot: %w", err)
 	}
 
@@ -528,7 +540,9 @@ func uploadIAPImportReviewScreenshot(ctx context.Context, client *asc.Client, ro
 		return screenshotID, fmt.Errorf("commit review screenshot: %w", err)
 	}
 
-	if _, err := waitForIAPReviewScreenshotDelivery(uploadCtx, client, screenshotID); err != nil {
+	verifyCtx, verifyCancel := contextWithAssetUploadTimeout(ctx)
+	defer verifyCancel()
+	if _, err := waitForIAPReviewScreenshotDelivery(verifyCtx, client, screenshotID); err != nil {
 		return screenshotID, fmt.Errorf("verify review screenshot: %w", err)
 	}
 	return screenshotID, nil
