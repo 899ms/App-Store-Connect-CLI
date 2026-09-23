@@ -193,10 +193,85 @@ func TestIAPImportKeepsScreenshotChecksumBoundToUploadedBytes(t *testing.T) {
 	}
 }
 
+func TestIAPImportUsesUploadTimeoutForPresignedPart(t *testing.T) {
+	setupAuth(t)
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+	t.Setenv("ASC_TIMEOUT", "500ms")
+	t.Setenv("ASC_UPLOAD_TIMEOUT", "3s")
+
+	dir := t.TempDir()
+	filePath := writeIAPImportFile(t, dir, `{"products":[{"type":"CONSUMABLE","referenceName":"Coins","productId":"com.example.coins","reviewScreenshot":"shots/coins.png"}]}`)
+	screenshotPath := writeIAPImportScreenshot(t, dir)
+	imageInfo, err := os.Stat(screenshotPath)
+	if err != nil {
+		t.Fatalf("stat screenshot: %v", err)
+	}
+
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	uploadParts := 0
+	minimumTimeout, maximumTimeout := time.Second, 3*time.Second
+	checkDefault := false
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodPut && req.URL.Path == "/part" {
+			deadline, ok := req.Context().Deadline()
+			remaining := time.Until(deadline)
+			if !ok || remaining < minimumTimeout || remaining > maximumTimeout {
+				t.Fatalf("presigned upload deadline = %v (remaining %s), want between %s and %s", deadline, remaining, minimumTimeout, maximumTimeout)
+			}
+			uploadParts++
+		}
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/apps/123456789/inAppPurchasesV2":
+			return jsonResponse(http.StatusOK, `{"data":[]}`)
+		case req.Method == http.MethodPost && req.URL.Path == "/v2/inAppPurchases":
+			return jsonResponse(http.StatusCreated, `{"data":{"type":"inAppPurchases","id":"iap-1","attributes":{}}}`)
+		case req.Method == http.MethodPost && req.URL.Path == "/v1/inAppPurchaseAppStoreReviewScreenshots":
+			if checkDefault {
+				deadline, ok := req.Context().Deadline()
+				remaining := time.Until(deadline)
+				if !ok || remaining < 9*time.Minute || remaining > 10*time.Minute {
+					t.Fatalf("screenshot reservation deadline = %v (remaining %s), want ten-minute IAP default", deadline, remaining)
+				}
+			}
+			body := `{"data":{"type":"inAppPurchaseAppStoreReviewScreenshots","id":"shot-1","attributes":{"fileName":"coins.png","fileSize":` + strconv.FormatInt(imageInfo.Size(), 10) + `,"uploadOperations":[{"method":"PUT","url":"https://upload.example.com/part","length":` + strconv.FormatInt(imageInfo.Size(), 10) + `,"offset":0}]}}}`
+			return jsonResponse(http.StatusCreated, body)
+		case req.Method == http.MethodPut && req.URL.Path == "/part":
+			return jsonResponse(http.StatusOK, "")
+		case req.Method == http.MethodPatch && req.URL.Path == "/v1/inAppPurchaseAppStoreReviewScreenshots/shot-1":
+			return jsonResponse(http.StatusOK, `{"data":{"type":"inAppPurchaseAppStoreReviewScreenshots","id":"shot-1","attributes":{"uploaded":true}}}`)
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/inAppPurchaseAppStoreReviewScreenshots/shot-1":
+			return jsonResponse(http.StatusOK, `{"data":{"type":"inAppPurchaseAppStoreReviewScreenshots","id":"shot-1","attributes":{"assetDeliveryState":{"state":"COMPLETE"}}}}`)
+		default:
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	})
+
+	_, stderr, runErr := runIAPImport(t, []string{
+		"iap", "import", "--app", "123456789", "--file", filePath, "--confirm", "--output", "json",
+	})
+	if runErr != nil || uploadParts != 1 {
+		t.Fatalf("run error = %v, upload parts = %d, stderr = %q; want one upload-timeout part", runErr, uploadParts, stderr)
+	}
+
+	t.Setenv("ASC_UPLOAD_TIMEOUT", "")
+	t.Setenv("ASC_TIMEOUT", "20m")
+	minimumTimeout, maximumTimeout = 4*time.Minute, 5*time.Minute
+	checkDefault = true
+	_, stderr, runErr = runIAPImport(t, []string{
+		"iap", "import", "--app", "123456789", "--file", filePath, "--confirm", "--output", "json",
+	})
+	if runErr != nil || uploadParts != 2 {
+		t.Fatalf("run error = %v, upload parts = %d, stderr = %q; want ten-minute default upload timeout", runErr, uploadParts, stderr)
+	}
+}
+
 func TestIAPImportGivesScreenshotDeliveryVerificationItsOwnTimeout(t *testing.T) {
 	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
-	t.Setenv("ASC_TIMEOUT", "1s")
+	t.Setenv("ASC_TIMEOUT", "3s")
+	t.Setenv("ASC_UPLOAD_TIMEOUT", "1s")
 
 	dir := t.TempDir()
 	filePath := writeIAPImportFile(t, dir, `{"products":[{"type":"CONSUMABLE","referenceName":"Coins","productId":"com.example.coins","reviewScreenshot":"shots/coins.png"}]}`)
