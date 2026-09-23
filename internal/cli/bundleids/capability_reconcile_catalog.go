@@ -9,10 +9,11 @@ var dataProtectionOptions = map[string]string{
 }
 
 type entitlementCapability struct {
-	Key        string
-	Capability string
-	WebCommand string
-	Settings   func(any) []asc.CapabilitySetting
+	Key                   string
+	Capability            string
+	WebCommand            string
+	UnsupportedCapability string
+	Settings              func(any) []asc.CapabilitySetting
 }
 
 func entitlementCapabilityCatalog() []entitlementCapability {
@@ -22,6 +23,7 @@ func entitlementCapabilityCatalog() []entitlementCapability {
 		{Key: "com.apple.developer.healthkit", Capability: "HEALTHKIT"},
 		{Key: "com.apple.developer.icloud-container-identifiers", Capability: "ICLOUD"},
 		{Key: "com.apple.developer.icloud-services", Capability: "ICLOUD"},
+		{Key: "com.apple.developer.ubiquity-container-identifiers", Capability: "ICLOUD"},
 		{Key: "com.apple.developer.ubiquity-kvstore-identifier", Capability: "ICLOUD"},
 		{Key: "com.apple.security.application-groups", Capability: "APP_GROUPS"},
 		{Key: "com.apple.developer.associated-domains", Capability: "ASSOCIATED_DOMAINS"},
@@ -48,7 +50,8 @@ func entitlementCapabilityCatalog() []entitlementCapability {
 		{Key: "com.apple.developer.inter-app-audio", Capability: "INTER_APP_AUDIO"},
 		{Key: "com.apple.InAppPurchase", Capability: "IN_APP_PURCHASE"},
 		{Key: "com.apple.developer.homekit", Capability: "HOMEKIT"},
-		{Key: "com.apple.developer.kernel.increased-memory-limit", WebCommand: "asc web bundle-ids capabilities enable --capability INCREASED_MEMORY_LIMIT"},
+		{Key: "com.apple.developer.private-cloud-compute", WebCommand: "asc web bundle-ids capabilities enable --capability PRIVATE_CLOUD_COMPUTE"},
+		{Key: "com.apple.developer.kernel.increased-memory-limit", UnsupportedCapability: "INCREASED_MEMORY_LIMIT"},
 	}
 }
 

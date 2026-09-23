@@ -150,6 +150,18 @@ func readDesiredEntitlements(path string, ignoreUnknown bool) ([]desiredEntitlem
 			selected = append(selected, desiredEntitlement{spec: entitlementCapability{Key: key}, value: raw[key]})
 			continue
 		}
+		if key == "com.apple.developer.private-cloud-compute" || key == "com.apple.developer.kernel.increased-memory-limit" {
+			enabled, ok := raw[key].(bool)
+			if !ok {
+				return nil, shared.UsageErrorf("entitlement %q must be a boolean", key)
+			}
+			if !enabled {
+				continue
+			}
+		}
+		if item.UnsupportedCapability != "" {
+			return nil, shared.UsageErrorf("entitlement %q requires unsupported capability %s; no supported asc API or web command can enable it", key, item.UnsupportedCapability)
+		}
 		if key == "com.apple.developer.default-data-protection" {
 			value, ok := raw[key].(string)
 			if !ok {
@@ -182,7 +194,13 @@ func buildCapabilityReconcilePlan(bundleID string, desired []desiredEntitlement,
 	actions := make([]asc.CapabilityReconcileAction, 0)
 	for _, item := range desired {
 		if item.spec.WebCommand != "" {
-			actions = append(actions, asc.CapabilityReconcileAction{Action: "needsWebSession", Entitlement: item.spec.Key, Command: item.spec.WebCommand})
+			action := asc.CapabilityReconcileAction{Action: "needsWebSession", Entitlement: item.spec.Key}
+			if quotedBundleID, ok := shared.ShellQuote(bundleID); ok {
+				action.Command = item.spec.WebCommand + " --bundle-id " + quotedBundleID + " --confirm"
+			} else {
+				action.Error = "bundle ID cannot be safely rendered in a shell command"
+			}
+			actions = append(actions, action)
 			continue
 		}
 		if item.spec.Capability == "" {

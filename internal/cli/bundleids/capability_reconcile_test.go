@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 
+	"howett.net/plist"
+
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
@@ -29,6 +31,62 @@ func TestReconcileUnknownEntitlementIsUsage(t *testing.T) {
 	err := cmd.Run(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "unknown entitlement key") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestReconcileUbiquityContainerIdentifiersMapsToICloud(t *testing.T) {
+	path := writeEntitlements(t, map[string]any{
+		"com.apple.developer.ubiquity-container-identifiers": []string{"TEAMID.iCloud.example"},
+	})
+	desired, err := readDesiredEntitlements(path, false)
+	if err != nil {
+		t.Fatalf("read entitlements: %v", err)
+	}
+	if len(desired) != 1 || desired[0].spec.Capability != "ICLOUD" {
+		t.Fatalf("desired = %#v, want ICLOUD", desired)
+	}
+}
+
+func TestReconcileRejectsUnsupportedIncreasedMemoryLimit(t *testing.T) {
+	path := writeEntitlements(t, map[string]any{
+		"com.apple.developer.kernel.increased-memory-limit": true,
+	})
+	_, err := readDesiredEntitlements(path, false)
+	if err == nil || !strings.Contains(err.Error(), "unsupported") || !strings.Contains(err.Error(), "INCREASED_MEMORY_LIMIT") {
+		t.Fatalf("error = %v, want explicit unsupported capability", err)
+	}
+}
+
+func TestReconcilePrivateCloudComputePlansUsableWebCommand(t *testing.T) {
+	path := writeEntitlements(t, map[string]any{
+		"com.apple.developer.private-cloud-compute": true,
+	})
+	desired, err := readDesiredEntitlements(path, false)
+	if err != nil {
+		t.Fatalf("read entitlements: %v", err)
+	}
+	plan := buildCapabilityReconcilePlan("bundle-1", desired, nil, false)
+	if len(plan.Actions) != 1 || plan.Actions[0].Action != "needsWebSession" {
+		t.Fatalf("actions = %#v, want needsWebSession", plan.Actions)
+	}
+	command := plan.Actions[0].Command
+	for _, part := range []string{"asc web bundle-ids capabilities enable", "--bundle-id bundle-1", "--capability PRIVATE_CLOUD_COMPUTE", "--confirm"} {
+		if !strings.Contains(command, part) {
+			t.Fatalf("command = %q, missing %q", command, part)
+		}
+	}
+}
+
+func TestReconcilePrivateCloudComputeFalseDoesNotPlanEnable(t *testing.T) {
+	path := writeEntitlements(t, map[string]any{
+		"com.apple.developer.private-cloud-compute": false,
+	})
+	desired, err := readDesiredEntitlements(path, false)
+	if err != nil {
+		t.Fatalf("read entitlements: %v", err)
+	}
+	if len(desired) != 0 {
+		t.Fatalf("desired = %#v, want no capability request", desired)
 	}
 }
 
@@ -349,36 +407,15 @@ func TestReconcileApplyRejectsInvalidOutputBeforeAPI(t *testing.T) {
 
 func writeEntitlements(t *testing.T, values map[string]any) string {
 	t.Helper()
-	data, err := json.Marshal(values)
+	data, err := plist.Marshal(values, plist.XMLFormat)
 	if err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "App.entitlements")
-	if err := os.WriteFile(path, []byte(plistXML(values)), 0o600); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_ = data
 	return path
-}
-
-func plistXML(values map[string]any) string {
-	var b strings.Builder
-	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict>`)
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	for _, key := range keys {
-		b.WriteString("<key>" + key + "</key>")
-		switch value := values[key].(type) {
-		case string:
-			b.WriteString("<string>" + value + "</string>")
-		default:
-			b.WriteString("<true/>")
-		}
-	}
-	b.WriteString("</dict></plist>")
-	return b.String()
 }
 
 func newReconcileClient(t *testing.T, fn func(*http.Request) *http.Response) *asc.Client {
