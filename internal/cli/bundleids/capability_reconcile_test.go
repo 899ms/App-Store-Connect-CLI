@@ -34,6 +34,50 @@ func TestReconcileUnknownEntitlementIsUsage(t *testing.T) {
 	}
 }
 
+func TestResolveCapabilityBundleIDAcceptsDottedResourceID(t *testing.T) {
+	client := newReconcileClient(t, func(req *http.Request) *http.Response {
+		if req.Method != http.MethodGet || req.URL.Path != "/v1/bundleIds/id.with.dot" {
+			t.Fatalf("unexpected %s %s", req.Method, req.URL.String())
+		}
+		return reconcileJSON(http.StatusOK, `{"data":{"type":"bundleIds","id":"id.with.dot","attributes":{"identifier":"com.example.app"}}}`)
+	})
+	id, err := resolveCapabilityBundleID(context.Background(), client, "id.with.dot")
+	if err != nil || id != "id.with.dot" {
+		t.Fatalf("id=%q error=%v, want dotted resource ID", id, err)
+	}
+}
+
+func TestResolveCapabilityBundleIDAcceptsIdentifierWithoutDot(t *testing.T) {
+	client := newReconcileClient(t, func(req *http.Request) *http.Response {
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/bundleIds/example":
+			return reconcileJSON(http.StatusNotFound, `{"errors":[{"status":"404","code":"NOT_FOUND"}]}`)
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/bundleIds" && req.URL.Query().Get("filter[identifier]") == "example":
+			return reconcileJSON(http.StatusOK, `{"data":[{"type":"bundleIds","id":"opaque-id","attributes":{"identifier":"example"}}]}`)
+		default:
+			t.Fatalf("unexpected %s %s", req.Method, req.URL.String())
+			return nil
+		}
+	})
+	id, err := resolveCapabilityBundleID(context.Background(), client, "example")
+	if err != nil || id != "opaque-id" {
+		t.Fatalf("id=%q error=%v, want resolved resource ID", id, err)
+	}
+}
+
+func TestResolveCapabilityBundleIDDoesNotMaskLookupError(t *testing.T) {
+	client := newReconcileClient(t, func(req *http.Request) *http.Response {
+		if req.Method != http.MethodGet || req.URL.Path != "/v1/bundleIds/example" {
+			t.Fatalf("unexpected %s %s", req.Method, req.URL.String())
+		}
+		return reconcileJSON(http.StatusForbidden, `{"errors":[{"status":"403","code":"FORBIDDEN"}]}`)
+	})
+	_, err := resolveCapabilityBundleID(context.Background(), client, "example")
+	if err == nil || !strings.Contains(err.Error(), "FORBIDDEN") {
+		t.Fatalf("error=%v, want original forbidden error", err)
+	}
+}
+
 func TestReconcileUbiquityContainerIdentifiersMapsToICloud(t *testing.T) {
 	path := writeEntitlements(t, map[string]any{
 		"com.apple.developer.ubiquity-container-identifiers": []string{"TEAMID.iCloud.example"},
@@ -205,6 +249,8 @@ func TestReconcileApplyAddsAndPreservesPushSettings(t *testing.T) {
 	var posts, patches int
 	client := newReconcileClient(t, func(req *http.Request) *http.Response {
 		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/bundleIds/bundle-1":
+			return reconcileJSON(http.StatusOK, `{"data":{"type":"bundleIds","id":"bundle-1","attributes":{"identifier":"com.example.app"}}}`)
 		case req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/bundleIdCapabilities"):
 			body := `{"data":[{"type":"bundleIdCapabilities","id":"push-1","attributes":{"capabilityType":"PUSH_NOTIFICATIONS","settings":[{"key":"BROADCAST","options":[{"key":"BROADCAST_ENABLED","enabled":true}]}]}}]}`
 			return reconcileJSON(http.StatusOK, body)
@@ -251,6 +297,8 @@ func TestReconcileApplyUpdatesProtectionWithoutDroppingAlternatives(t *testing.T
 	var patches int
 	client := newReconcileClient(t, func(req *http.Request) *http.Response {
 		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/bundleIds/bundle-1":
+			return reconcileJSON(http.StatusOK, `{"data":{"type":"bundleIds","id":"bundle-1","attributes":{"identifier":"com.example.app"}}}`)
 		case req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/bundleIdCapabilities"):
 			return reconcileJSON(http.StatusOK, `{"data":[{"type":"bundleIdCapabilities","id":"dp-1","attributes":{"capabilityType":"DATA_PROTECTION","settings":[{"key":"DATA_PROTECTION_PERMISSION_LEVEL","options":[{"key":"COMPLETE_PROTECTION","enabled":false},{"key":"PROTECTED_UNLESS_OPEN","enabled":true},{"key":"PROTECTED_UNTIL_FIRST_USER_AUTH","enabled":false}]}]}}]}`)
 		case req.Method == http.MethodPatch && req.URL.Path == "/v1/bundleIdCapabilities/dp-1":
@@ -430,6 +478,8 @@ func TestReconcileApplyPrintsPartialReceiptOnAPIFailure(t *testing.T) {
 	var posts int
 	client := newReconcileClient(t, func(req *http.Request) *http.Response {
 		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/bundleIds/bundle-1":
+			return reconcileJSON(http.StatusOK, `{"data":{"type":"bundleIds","id":"bundle-1","attributes":{"identifier":"com.example.app"}}}`)
 		case req.Method == http.MethodGet && strings.Contains(req.URL.Path, "/bundleIdCapabilities"):
 			return reconcileJSON(http.StatusOK, `{"data":[]}`)
 		case req.Method == http.MethodPost && req.URL.Path == "/v1/bundleIdCapabilities":

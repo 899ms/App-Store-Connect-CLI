@@ -279,8 +279,15 @@ func buildCapabilityReconcilePlan(bundleID string, desired []desiredEntitlement,
 }
 
 func resolveCapabilityBundleID(ctx context.Context, client *asc.Client, value string) (string, error) {
-	if !strings.Contains(value, ".") {
-		return value, nil
+	bundle, err := client.GetBundleID(ctx, value)
+	if err == nil {
+		if bundle == nil || bundle.Data.ID == "" {
+			return "", fmt.Errorf("bundle ID lookup returned no resource ID: %s", value)
+		}
+		return bundle.Data.ID, nil
+	}
+	if !asc.IsNotFound(err) {
+		return "", err
 	}
 	resp, err := client.GetBundleIDs(ctx, asc.WithBundleIDsFilterIdentifier(value))
 	if err != nil {
@@ -288,6 +295,9 @@ func resolveCapabilityBundleID(ctx context.Context, client *asc.Client, value st
 	}
 	if len(resp.Data) == 0 {
 		return "", fmt.Errorf("bundle ID not found: %s", value)
+	}
+	if len(resp.Data) > 1 {
+		return "", fmt.Errorf("multiple bundle IDs found for identifier %q; use a resource ID", value)
 	}
 	return resp.Data[0].ID, nil
 }
