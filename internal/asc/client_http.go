@@ -772,7 +772,7 @@ func (c *Client) doStream(ctx context.Context, path string, accept string) (*htt
 		req.Header.Set("Accept", accept)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := doStreamingRequest(c.httpClient, req)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -796,8 +796,7 @@ func (c *Client) doStreamNoAuth(ctx context.Context, rawURL, accept string) (*ht
 		req.Header.Set("Accept", accept)
 	}
 
-	client := clientWithoutRedirects(c.httpClient)
-	resp, err := client.Do(req)
+	resp, err := doStreamingRequest(clientWithoutRedirects(c.httpClient), req)
 	if err != nil {
 		return nil, newSanitizedNoAuthStreamError("download request", rawURL, err)
 	}
@@ -846,12 +845,22 @@ func ParseErrorWithStatus(body []byte, statusCode int) error {
 
 	if err := json.Unmarshal(body, &errResp); err == nil && len(errResp.Errors) > 0 {
 		associatedErrors := parseAssociatedErrors(errResp.Errors[0].Meta)
+		allCodes := make([]string, 0, len(errResp.Errors))
+		allDetails := make([]string, 0, len(errResp.Errors))
+		for _, entry := range errResp.Errors {
+			if code := strings.TrimSpace(entry.Code); code != "" {
+				allCodes = append(allCodes, code)
+			}
+			allDetails = append(allDetails, entry.Detail)
+		}
 		return &APIError{
 			Code:             errResp.Errors[0].Code,
 			Title:            errResp.Errors[0].Title,
 			Detail:           errResp.Errors[0].Detail,
 			StatusCode:       statusCode,
 			AssociatedErrors: associatedErrors,
+			AllCodes:         allCodes,
+			AllDetails:       allDetails,
 			Remediation:      remediationForAPIError(errResp.Errors[0].Code),
 		}
 	}
