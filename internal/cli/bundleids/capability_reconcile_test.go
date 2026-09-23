@@ -47,6 +47,33 @@ func TestReconcileUbiquityContainerIdentifiersMapsToICloud(t *testing.T) {
 	}
 }
 
+func TestReconcileCloudKitSettingsSurviveMultipleICloudEntitlements(t *testing.T) {
+	path := writeEntitlements(t, map[string]any{
+		"com.apple.developer.icloud-container-identifiers":   []string{"iCloud.example"},
+		"com.apple.developer.icloud-services":                []string{"CloudKit"},
+		"com.apple.developer.ubiquity-container-identifiers": []string{"iCloud.example"},
+	})
+	desired, err := readDesiredEntitlements(path, false)
+	if err != nil {
+		t.Fatalf("read entitlements: %v", err)
+	}
+	current := []asc.Resource[asc.BundleIDCapabilityAttributes]{{
+		ID: "icloud-1",
+		Attributes: asc.BundleIDCapabilityAttributes{
+			CapabilityType: "ICLOUD",
+			Settings:       []asc.CapabilitySetting{{Key: "ICLOUD_VERSION", Options: []asc.CapabilityOption{{Key: "XCODE_5", Enabled: boolPointer(true)}, {Key: "XCODE_6", Enabled: boolPointer(false)}}}},
+		},
+	}}
+	plan := buildCapabilityReconcilePlan("bundle-1", desired, current, false)
+	if len(plan.Actions) != 1 || plan.Actions[0].Action != "update" {
+		t.Fatalf("actions = %#v, want one ICLOUD update", plan.Actions)
+	}
+	settings := plan.Actions[0].Settings
+	if len(settings) != 1 || settings[0].Key != "ICLOUD_VERSION" || !capabilityOptionEnabled(settings[0].Options, "XCODE_6") || capabilityOptionEnabled(settings[0].Options, "XCODE_5") {
+		t.Fatalf("settings = %#v, want XCODE_6 enabled and XCODE_5 disabled", settings)
+	}
+}
+
 func TestReconcileRejectsUnsupportedIncreasedMemoryLimit(t *testing.T) {
 	path := writeEntitlements(t, map[string]any{
 		"com.apple.developer.kernel.increased-memory-limit": true,
@@ -87,6 +114,80 @@ func TestReconcilePrivateCloudComputeFalseDoesNotPlanEnable(t *testing.T) {
 	}
 	if len(desired) != 0 {
 		t.Fatalf("desired = %#v, want no capability request", desired)
+	}
+}
+
+func TestReconcileFalseBooleanEntitlementsDoNotEnableCapabilities(t *testing.T) {
+	path := writeEntitlements(t, map[string]any{
+		"com.apple.developer.siri":        false,
+		"com.apple.developer.homekit":     false,
+		"com.apple.developer.healthkit":   true,
+		"com.apple.developer.game-center": false,
+	})
+	desired, err := readDesiredEntitlements(path, false)
+	if err != nil {
+		t.Fatalf("read entitlements: %v", err)
+	}
+	if len(desired) != 1 || desired[0].spec.Capability != "HEALTHKIT" {
+		t.Fatalf("desired = %#v, want only HEALTHKIT", desired)
+	}
+}
+
+func TestReconcileRejectsWrongEntitlementValueKinds(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		key   string
+		value any
+	}{
+		{name: "boolean as string", key: "com.apple.developer.healthkit", value: "yes"},
+		{name: "APS environment as boolean", key: "aps-environment", value: false},
+		{name: "iCloud services as boolean", key: "com.apple.developer.icloud-services", value: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeEntitlements(t, map[string]any{tc.key: tc.value})
+			if _, err := readDesiredEntitlements(path, false); err == nil {
+				t.Fatalf("expected %q to reject value %#v", tc.key, tc.value)
+			}
+		})
+	}
+}
+
+func TestReconcileRejectsHallucinatedInAppPurchaseEntitlement(t *testing.T) {
+	path := writeEntitlements(t, map[string]any{"com.apple.InAppPurchase": true})
+	_, err := readDesiredEntitlements(path, false)
+	if err == nil || !strings.Contains(err.Error(), "unknown entitlement key") {
+		t.Fatalf("error = %v, want unknown entitlement key", err)
+	}
+}
+
+func TestReconcileUsesActualInterAppAudioEntitlementKey(t *testing.T) {
+	path := writeEntitlements(t, map[string]any{"inter-app-audio": true})
+	desired, err := readDesiredEntitlements(path, false)
+	if err != nil || len(desired) != 1 || desired[0].spec.Capability != "INTER_APP_AUDIO" {
+		t.Fatalf("desired = %#v, error = %v; want INTER_APP_AUDIO", desired, err)
+	}
+}
+
+func TestReconcileRejectsSymlinkedEntitlementsParent(t *testing.T) {
+	dir := t.TempDir()
+	realDir := filepath.Join(dir, "real")
+	if err := os.Mkdir(realDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(realDir, "App.entitlements")
+	data, err := plist.Marshal(map[string]any{"com.apple.developer.siri": true}, plist.XMLFormat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkedDir := filepath.Join(dir, "linked")
+	if err := os.Symlink(realDir, linkedDir); err != nil {
+		t.Skipf("create symlink: %v", err)
+	}
+	if _, err := readDesiredEntitlements(filepath.Join(linkedDir, "App.entitlements"), false); err == nil {
+		t.Fatal("expected symlinked parent to be rejected")
 	}
 }
 

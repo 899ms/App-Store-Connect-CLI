@@ -13,45 +13,87 @@ type entitlementCapability struct {
 	Capability            string
 	WebCommand            string
 	UnsupportedCapability string
+	ValueKind             entitlementValueKind
 	Settings              func(any) []asc.CapabilitySetting
 }
 
+type entitlementValueKind uint8
+
+const (
+	entitlementValueAny entitlementValueKind = iota
+	entitlementValueBoolean
+	entitlementValueString
+	entitlementValueStringArray
+)
+
 func entitlementCapabilityCatalog() []entitlementCapability {
 	return []entitlementCapability{
-		{Key: "aps-environment", Capability: "PUSH_NOTIFICATIONS"},
-		{Key: "com.apple.developer.aps-environment", Capability: "PUSH_NOTIFICATIONS"},
-		{Key: "com.apple.developer.healthkit", Capability: "HEALTHKIT"},
-		{Key: "com.apple.developer.icloud-container-identifiers", Capability: "ICLOUD"},
-		{Key: "com.apple.developer.icloud-services", Capability: "ICLOUD"},
-		{Key: "com.apple.developer.ubiquity-container-identifiers", Capability: "ICLOUD"},
-		{Key: "com.apple.developer.ubiquity-kvstore-identifier", Capability: "ICLOUD"},
-		{Key: "com.apple.security.application-groups", Capability: "APP_GROUPS"},
-		{Key: "com.apple.developer.associated-domains", Capability: "ASSOCIATED_DOMAINS"},
-		{Key: "com.apple.developer.networking.vpn.api", Capability: "PERSONAL_VPN"},
-		{Key: "com.apple.external-accessory.wireless-configuration", Capability: "WIRELESS_ACCESSORY_CONFIGURATION"},
-		{Key: "com.apple.developer.in-app-payments", Capability: "APPLE_PAY"},
-		{Key: "com.apple.developer.default-data-protection", Capability: "DATA_PROTECTION", Settings: dataProtectionSettings},
-		{Key: "com.apple.developer.siri", Capability: "SIRIKIT"},
-		{Key: "com.apple.developer.networking.networkextension", Capability: "NETWORK_EXTENSIONS"},
-		{Key: "com.apple.developer.networking.multipath", Capability: "MULTIPATH"},
-		{Key: "com.apple.developer.networking.HotspotConfiguration", Capability: "HOT_SPOT"},
-		{Key: "com.apple.developer.nfc.readersession.formats", Capability: "NFC_TAG_READING"},
-		{Key: "com.apple.developer.ClassKit-environment", Capability: "CLASSKIT"},
-		{Key: "com.apple.developer.authentication-services.autofill-credential-provider", Capability: "AUTOFILL_CREDENTIAL_PROVIDER"},
-		{Key: "com.apple.developer.networking.wifi-info", Capability: "ACCESS_WIFI_INFORMATION"},
+		{Key: "aps-environment", Capability: "PUSH_NOTIFICATIONS", ValueKind: entitlementValueString},
+		{Key: "com.apple.developer.aps-environment", Capability: "PUSH_NOTIFICATIONS", ValueKind: entitlementValueString},
+		{Key: "com.apple.developer.healthkit", Capability: "HEALTHKIT", ValueKind: entitlementValueBoolean},
+		{Key: "com.apple.developer.icloud-container-identifiers", Capability: "ICLOUD", ValueKind: entitlementValueStringArray},
+		{Key: "com.apple.developer.icloud-services", Capability: "ICLOUD", ValueKind: entitlementValueStringArray, Settings: iCloudServicesSettings},
+		{Key: "com.apple.developer.ubiquity-container-identifiers", Capability: "ICLOUD", ValueKind: entitlementValueStringArray},
+		{Key: "com.apple.developer.ubiquity-kvstore-identifier", Capability: "ICLOUD", ValueKind: entitlementValueString},
+		{Key: "com.apple.security.application-groups", Capability: "APP_GROUPS", ValueKind: entitlementValueStringArray},
+		{Key: "com.apple.developer.associated-domains", Capability: "ASSOCIATED_DOMAINS", ValueKind: entitlementValueStringArray},
+		{Key: "com.apple.developer.networking.vpn.api", Capability: "PERSONAL_VPN", ValueKind: entitlementValueStringArray},
+		{Key: "com.apple.external-accessory.wireless-configuration", Capability: "WIRELESS_ACCESSORY_CONFIGURATION", ValueKind: entitlementValueBoolean},
+		{Key: "com.apple.developer.in-app-payments", Capability: "APPLE_PAY", ValueKind: entitlementValueStringArray},
+		{Key: "com.apple.developer.default-data-protection", Capability: "DATA_PROTECTION", ValueKind: entitlementValueString, Settings: dataProtectionSettings},
+		{Key: "com.apple.developer.siri", Capability: "SIRIKIT", ValueKind: entitlementValueBoolean},
+		{Key: "com.apple.developer.networking.networkextension", Capability: "NETWORK_EXTENSIONS", ValueKind: entitlementValueStringArray},
+		{Key: "com.apple.developer.networking.multipath", Capability: "MULTIPATH", ValueKind: entitlementValueBoolean},
+		{Key: "com.apple.developer.networking.HotspotConfiguration", Capability: "HOT_SPOT", ValueKind: entitlementValueBoolean},
+		{Key: "com.apple.developer.nfc.readersession.formats", Capability: "NFC_TAG_READING", ValueKind: entitlementValueStringArray},
+		{Key: "com.apple.developer.ClassKit-environment", Capability: "CLASSKIT", ValueKind: entitlementValueString},
+		{Key: "com.apple.developer.authentication-services.autofill-credential-provider", Capability: "AUTOFILL_CREDENTIAL_PROVIDER", ValueKind: entitlementValueBoolean},
+		{Key: "com.apple.developer.networking.wifi-info", Capability: "ACCESS_WIFI_INFORMATION", ValueKind: entitlementValueBoolean},
 		{Key: "com.apple.developer.networking.custom-protocol", Capability: "NETWORK_CUSTOM_PROTOCOL"},
 		{Key: "com.apple.developer.coremedia.hls.low-latency", Capability: "COREMEDIA_HLS_LOW_LATENCY"},
-		{Key: "com.apple.developer.system-extension.install", Capability: "SYSTEM_EXTENSION_INSTALL"},
-		{Key: "com.apple.developer.user-management", Capability: "USER_MANAGEMENT"},
-		{Key: "com.apple.developer.applesignin", Capability: "APPLE_ID_AUTH"},
-		{Key: "com.apple.developer.game-center", Capability: "GAME_CENTER"},
-		{Key: "com.apple.developer.pass-type-identifiers", Capability: "WALLET"},
-		{Key: "com.apple.developer.maps", Capability: "MAPS"},
-		{Key: "com.apple.developer.inter-app-audio", Capability: "INTER_APP_AUDIO"},
-		{Key: "com.apple.InAppPurchase", Capability: "IN_APP_PURCHASE"},
-		{Key: "com.apple.developer.homekit", Capability: "HOMEKIT"},
-		{Key: "com.apple.developer.private-cloud-compute", WebCommand: "asc web bundle-ids capabilities enable --capability PRIVATE_CLOUD_COMPUTE"},
-		{Key: "com.apple.developer.kernel.increased-memory-limit", UnsupportedCapability: "INCREASED_MEMORY_LIMIT"},
+		{Key: "com.apple.developer.system-extension.install", Capability: "SYSTEM_EXTENSION_INSTALL", ValueKind: entitlementValueBoolean},
+		{Key: "com.apple.developer.user-management", Capability: "USER_MANAGEMENT", ValueKind: entitlementValueStringArray},
+		{Key: "com.apple.developer.applesignin", Capability: "APPLE_ID_AUTH", ValueKind: entitlementValueStringArray},
+		{Key: "com.apple.developer.game-center", Capability: "GAME_CENTER", ValueKind: entitlementValueBoolean},
+		{Key: "com.apple.developer.pass-type-identifiers", Capability: "WALLET", ValueKind: entitlementValueStringArray},
+		{Key: "com.apple.developer.maps", Capability: "MAPS", ValueKind: entitlementValueBoolean},
+		{Key: "inter-app-audio", Capability: "INTER_APP_AUDIO", ValueKind: entitlementValueBoolean},
+		{Key: "com.apple.developer.homekit", Capability: "HOMEKIT", ValueKind: entitlementValueBoolean},
+		{Key: "com.apple.developer.private-cloud-compute", WebCommand: "asc web bundle-ids capabilities enable --capability PRIVATE_CLOUD_COMPUTE", ValueKind: entitlementValueBoolean},
+		{Key: "com.apple.developer.kernel.increased-memory-limit", UnsupportedCapability: "INCREASED_MEMORY_LIMIT", ValueKind: entitlementValueBoolean},
+	}
+}
+
+func iCloudServicesSettings(value any) []asc.CapabilitySetting {
+	services, ok := entitlementStringArray(value)
+	if !ok {
+		return nil // readDesiredEntitlements validates this before planning.
+	}
+	for _, service := range services {
+		if service == "CloudKit" {
+			enabled := true
+			return []asc.CapabilitySetting{{Key: "ICLOUD_VERSION", Options: []asc.CapabilityOption{{Key: "XCODE_6", Enabled: &enabled}}}}
+		}
+	}
+	return nil
+}
+
+func entitlementStringArray(value any) ([]string, bool) {
+	switch values := value.(type) {
+	case []string:
+		return values, true
+	case []any:
+		strings := make([]string, len(values))
+		for index, entry := range values {
+			text, ok := entry.(string)
+			if !ok {
+				return nil, false
+			}
+			strings[index] = text
+		}
+		return strings, true
+	default:
+		return nil, false
 	}
 }
 

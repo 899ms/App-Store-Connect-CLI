@@ -14,6 +14,7 @@ import (
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/rootfs"
 )
 
 type desiredEntitlement struct {
@@ -117,7 +118,7 @@ func capabilityReconcileCommand(name string, apply bool) *ffcli.Command {
 }
 
 func readDesiredEntitlements(path string, ignoreUnknown bool) ([]desiredEntitlement, error) {
-	file, err := shared.OpenExistingNoFollow(path)
+	file, err := rootfs.OpenFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("bundle-ids capabilities reconcile: %w", err)
 	}
@@ -140,7 +141,7 @@ func readDesiredEntitlements(path string, ignoreUnknown bool) ([]desiredEntitlem
 	}
 	sort.Strings(keys)
 	selected := make([]desiredEntitlement, 0)
-	seen := map[string]struct{}{}
+	seen := map[string]int{}
 	for _, key := range keys {
 		item, ok := catalog[key]
 		if !ok {
@@ -150,14 +151,12 @@ func readDesiredEntitlements(path string, ignoreUnknown bool) ([]desiredEntitlem
 			selected = append(selected, desiredEntitlement{spec: entitlementCapability{Key: key}, value: raw[key]})
 			continue
 		}
-		if key == "com.apple.developer.private-cloud-compute" || key == "com.apple.developer.kernel.increased-memory-limit" {
-			enabled, ok := raw[key].(bool)
-			if !ok {
-				return nil, shared.UsageErrorf("entitlement %q must be a boolean", key)
-			}
-			if !enabled {
-				continue
-			}
+		requested, err := entitlementValueRequested(key, raw[key], item.ValueKind)
+		if err != nil {
+			return nil, err
+		}
+		if !requested {
+			continue
 		}
 		if item.UnsupportedCapability != "" {
 			return nil, shared.UsageErrorf("entitlement %q requires unsupported capability %s; no supported asc API or web command can enable it", key, item.UnsupportedCapability)
@@ -175,14 +174,49 @@ func readDesiredEntitlements(path string, ignoreUnknown bool) ([]desiredEntitlem
 			}
 		}
 		if item.Capability != "" {
-			if _, ok := seen[item.Capability]; ok {
+			if index, ok := seen[item.Capability]; ok {
+				// Several entitlement keys can request one ASC capability. Retain
+				// the key that also determines its settings, if one is present.
+				if item.Settings != nil {
+					selected[index] = desiredEntitlement{spec: item, value: raw[key]}
+				}
 				continue
 			}
-			seen[item.Capability] = struct{}{}
+			seen[item.Capability] = len(selected)
 		}
 		selected = append(selected, desiredEntitlement{spec: item, value: raw[key]})
 	}
 	return selected, nil
+}
+
+func entitlementValueRequested(key string, value any, kind entitlementValueKind) (bool, error) {
+	switch kind {
+	case entitlementValueBoolean:
+		enabled, ok := value.(bool)
+		if !ok {
+			return false, shared.UsageErrorf("entitlement %q must be a boolean", key)
+		}
+		return enabled, nil
+	case entitlementValueString:
+		text, ok := value.(string)
+		if !ok || strings.TrimSpace(text) == "" {
+			return false, shared.UsageErrorf("entitlement %q must be a non-empty string", key)
+		}
+		return true, nil
+	case entitlementValueStringArray:
+		values, ok := entitlementStringArray(value)
+		if !ok {
+			return false, shared.UsageErrorf("entitlement %q must be an array of strings", key)
+		}
+		return len(values) > 0, nil
+	default:
+		// For catalog entries whose exact value schema has not yet been
+		// established, a false Boolean still must not request a capability.
+		if enabled, ok := value.(bool); ok && !enabled {
+			return false, nil
+		}
+		return true, nil
+	}
 }
 
 func buildCapabilityReconcilePlan(bundleID string, desired []desiredEntitlement, existing []asc.Resource[asc.BundleIDCapabilityAttributes], allowRemove bool) *asc.CapabilityReconcilePlan {
