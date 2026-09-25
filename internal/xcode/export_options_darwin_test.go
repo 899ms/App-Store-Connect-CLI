@@ -31,12 +31,65 @@ import (
 	"howett.net/plist"
 )
 
-func TestManualExportOptionsResolverMethodUsesLegacyAdHocProfileClassification(t *testing.T) {
-	if got := manualExportOptionsResolverMethod(exportOptionsMethodReleaseTesting); got != legacyexportoptions.MethodAdHoc {
-		t.Fatalf("release-testing resolver method = %q, want %q", got, legacyexportoptions.MethodAdHoc)
+func TestManualExportOptionsResolverMethodMatchesInstalledProfileClassification(t *testing.T) {
+	appStoreProfile := profileutil.PlistData{"Platform": []any{"iOS"}}
+	adHocProfile := profileutil.PlistData{
+		"Platform":           []any{"iOS"},
+		"ProvisionedDevices": []any{"00008140-000000000000001C"},
+		"Entitlements":       map[string]any{"get-task-allow": false},
 	}
-	if got := manualExportOptionsResolverMethod(exportOptionsMethodAppStoreConnect); got != legacyexportoptions.MethodAppStoreConnect {
-		t.Fatalf("app-store-connect resolver method = %q, want %q", got, legacyexportoptions.MethodAppStoreConnect)
+	tests := []struct {
+		method  string
+		profile profileutil.PlistData
+	}{
+		{method: exportOptionsMethodAppStoreConnect, profile: appStoreProfile},
+		{method: exportOptionsMethodReleaseTesting, profile: adHocProfile},
+	}
+	for _, test := range tests {
+		t.Run(test.method, func(t *testing.T) {
+			certificate := certificateutil.CertificateInfoModel{
+				CommonName: "iPhone Distribution: Example (TEAM123)",
+				TeamID:     "TEAM123",
+				Serial:     "DIST-SERIAL",
+			}
+			installed := profileutil.ProvisioningProfileInfoModel{
+				UUID:                  "PROFILE-UUID",
+				Name:                  "Example Distribution",
+				BundleID:              "com.example.demo",
+				TeamID:                "TEAM123",
+				Type:                  profileutil.ProfileTypeIos,
+				ExportType:            test.profile.GetExportMethod(),
+				ExpirationDate:        time.Now().Add(time.Hour),
+				DeveloperCertificates: []certificateutil.CertificateInfoModel{certificate},
+				Entitlements:          plistutil.PlistData{"com.apple.developer.team-identifier": "TEAM123"},
+			}
+			var group any
+			var groupErr error
+			if _, err := captureBitriseStdout(func() error {
+				resolved, err := exportoptionsgenerator.NewCodeSignGroupProvider(log.NewLogger()).DetermineCodesignGroup(
+					[]certificateutil.CertificateInfoModel{certificate},
+					[]profileutil.ProvisioningProfileInfoModel{installed},
+					nil,
+					map[string]plistutil.PlistData{"com.example.demo": {"com.apple.developer.team-identifier": "TEAM123"}},
+					manualExportOptionsResolverMethod(test.method),
+					"TEAM123",
+					false,
+				)
+				if resolved != nil {
+					group = resolved.BundleIDProfileMap()["com.example.demo"].UUID
+				}
+				groupErr = err
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if groupErr != nil {
+				t.Fatalf("DetermineCodesignGroup() error: %v", groupErr)
+			}
+			if group != "PROFILE-UUID" {
+				t.Fatalf("resolver method %q did not match a profile classified as %q; resolved profile = %v", manualExportOptionsResolverMethod(test.method), installed.ExportType, group)
+			}
+		})
 	}
 }
 

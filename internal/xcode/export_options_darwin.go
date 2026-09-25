@@ -127,14 +127,15 @@ func manualExportOptionsResolverOptions(teamID, method string) exportoptionsgene
 }
 
 // manualExportOptionsResolverMethod adapts ASC's current public Xcode method
-// name to the pinned resolver's profile classification. Bitrise still labels
-// installed ad hoc profiles as MethodAdHoc and filters by exact equality, even
-// though the final ExportOptions.plist must use MethodReleaseTesting.
+// names to the pinned resolver's profile classification. Bitrise still labels
+// installed iOS and tvOS profiles with the pre-Xcode 15.3 names (app-store and
+// ad-hoc) and filters code signing groups by exact equality, even though the
+// final ExportOptions.plist must use app-store-connect or release-testing.
 func manualExportOptionsResolverMethod(method string) legacyexportoptions.Method {
 	if method == exportOptionsMethodReleaseTesting {
 		return legacyexportoptions.MethodAdHoc
 	}
-	return legacyexportoptions.MethodAppStoreConnect
+	return legacyexportoptions.MethodAppStore
 }
 
 // captureBitriseStdout contains upstream status prints so structured CLI
