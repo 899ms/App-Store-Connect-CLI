@@ -48,7 +48,7 @@ func rejectDeviceWithoutCreateMissing(deviceIDs string, createMissing bool) erro
 func SigningFetchCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("fetch", flag.ExitOnError)
 
-	appID := fs.String("app", "", "App Store Connect app ID (optional, or ASC_APP_ID env)")
+	appID := fs.String("app", "", "App Store Connect app ID (optional); when set, --bundle-id must be this app's bundle ID")
 	bundleID := fs.String("bundle-id", "", "Bundle identifier (e.g., com.example.app) - required")
 	profileType := fs.String("profile-type", "", "Profile type: IOS_APP_STORE, IOS_APP_DEVELOPMENT, MAC_APP_STORE, etc. (required)")
 	deviceIDs := fs.String("device", "", "Device ID(s), comma-separated (requires --create-missing; required for development profiles)")
@@ -238,9 +238,10 @@ Examples:
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
 			defer cancel()
 
-			resolvedAppID := shared.ResolveAppID(*appID)
-			if resolvedAppID != "" {
-				if err := validateBundleIDMatchesApp(requestCtx, client, resolvedAppID, bundle); err != nil {
+			// Only an explicit --app is cross-checked. The ASC_APP_ID or config
+			// default app must not veto the bundle ID the caller named.
+			if explicitAppID := strings.TrimSpace(*appID); explicitAppID != "" {
+				if err := validateBundleIDMatchesApp(requestCtx, client, explicitAppID, bundle); err != nil {
 					return fmt.Errorf("signing fetch: %w", err)
 				}
 			}
