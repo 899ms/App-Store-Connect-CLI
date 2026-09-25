@@ -747,6 +747,65 @@ func TestWaitForBuildProcessingStateFailureKeepsStateErrorWhenDetailsUnavailable
 	}
 }
 
+// Fetching processing details can outlast the wait deadline (altool is slow),
+// but a build that already reported FAILED must never be reported as a
+// timeout.
+func TestWaitForBuildProcessingStateFailureKeepsStateErrorWhenDetailsOutlastDeadline(t *testing.T) {
+	t.Setenv("ASC_MAX_RETRIES", "0")
+
+	t.Cleanup(shared.SetBuildUploadFailureDiagnosticsForTesting(func(ctx context.Context, _ *asc.Client, _ string, _ *asc.BuildUploadResponse) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}))
+
+	client := newBuildsWaitTestClient(t, func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/v1/builds/build-1":
+			return buildsWaitJSONResponse(http.StatusOK, `{
+				"data": {
+					"type": "builds",
+					"id": "build-1",
+					"attributes": {"version": "42", "processingState": "FAILED"}
+				}
+			}`)
+		case "/v1/builds/build-1/preReleaseVersion":
+			return buildsWaitJSONResponse(http.StatusOK, buildsWaitPreReleaseVersionBody)
+		case "/v1/builds":
+			return buildsWaitJSONResponse(http.StatusOK, buildsWaitNoLinkedUploadsBody)
+		case "/v1/apps/app-1/buildUploads":
+			return buildsWaitJSONResponse(http.StatusOK, `{
+				"data": [
+					{
+						"type": "buildUploads",
+						"id": "upload-1",
+						"attributes": {"cfBundleShortVersionString": "1.2.3", "cfBundleVersion": "42", "platform": "IOS"}
+					}
+				],
+				"links": {}
+			}`)
+		default:
+			return nil, fmt.Errorf("unexpected path: %s", req.URL.Path)
+		}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	var err error
+	captureBuildsWaitStderr(t, func() {
+		_, err = waitForBuildProcessingState(ctx, client, "build-1", time.Millisecond, false, shared.BuildProcessingFailureContext{AppID: "app-1"})
+	})
+	if err == nil {
+		t.Fatal("expected terminal FAILED error, got nil")
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want the FAILED state error rather than a deadline", err)
+	}
+	if got := err.Error(); got != "build processing failed with state FAILED" {
+		t.Fatalf("error = %q, want the unmodified state error", got)
+	}
+}
+
 func TestWaitForBuildProcessingStateInvalidFetchesDetailsOnlyWhenFailing(t *testing.T) {
 	tests := []struct {
 		name          string

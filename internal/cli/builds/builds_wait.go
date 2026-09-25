@@ -309,7 +309,7 @@ func waitForBuildProcessingState(
 ) (*asc.BuildResponse, error) {
 	started := time.Now()
 
-	return asc.PollUntilTolerant(ctx, pollInterval, func(ctx context.Context) (*asc.BuildResponse, bool, error) {
+	buildResp, err := asc.PollUntilTolerant(ctx, pollInterval, func(ctx context.Context) (*asc.BuildResponse, bool, error) {
 		buildResp, err := client.GetBuild(ctx, buildID)
 		if err != nil {
 			return nil, false, err
@@ -331,15 +331,34 @@ func waitForBuildProcessingState(
 		case asc.BuildProcessingStateValid:
 			return buildResp, true, nil
 		case asc.BuildProcessingStateFailed:
-			return nil, false, buildProcessingFailureError(ctx, client, buildID, buildResp, state, failure)
+			return nil, false, &terminalBuildProcessingState{build: buildResp, state: state}
 		case asc.BuildProcessingStateInvalid:
 			if failOnInvalid {
-				return nil, false, buildProcessingFailureError(ctx, client, buildID, buildResp, state, failure)
+				return nil, false, &terminalBuildProcessingState{build: buildResp, state: state}
 			}
 			return buildResp, true, nil
 		}
 		return nil, false, nil
 	}, asc.PollOptions{Tolerate: asc.IsTransientWaitError})
+
+	// Processing details are fetched after polling stops: the poller reports an
+	// expired context in place of any callback error, so a slow details lookup
+	// inside the callback could turn a FAILED build into a timeout.
+	var terminal *terminalBuildProcessingState
+	if errors.As(err, &terminal) {
+		return nil, buildProcessingFailureError(ctx, client, buildID, terminal.build, terminal.state, failure)
+	}
+	return buildResp, err
+}
+
+// terminalBuildProcessingState stops polling at a failing processing state.
+type terminalBuildProcessingState struct {
+	build *asc.BuildResponse
+	state string
+}
+
+func (e *terminalBuildProcessingState) Error() string {
+	return fmt.Sprintf("build processing failed with state %s", e.state)
 }
 
 func buildProcessingFailureError(
