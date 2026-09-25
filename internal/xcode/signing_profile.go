@@ -77,12 +77,17 @@ func inferSigningSettings(project *structuredVersionProject, opts SigningPlanOpt
 	if err != nil {
 		return nil, err
 	}
+	projectTargets := signingTargetProductTypes(project)
 	skipped := make(map[string]bool, len(opts.SkipTargets))
 	skipTargets := make([]string, 0, len(opts.SkipTargets))
 	for _, target := range opts.SkipTargets {
 		name := strings.TrimSpace(target)
 		if name == "" || skipped[name] {
 			continue
+		}
+		if _, ok := projectTargets[name]; !ok {
+			// A misspelled target must not be accepted and silently ignored.
+			return nil, newSigningInputError(fmt.Errorf("--skip-target %q is not a target in the project", name))
 		}
 		skipped[name] = true
 		skipTargets = append(skipTargets, name)

@@ -486,3 +486,19 @@ func TestInferSigningPlanExportOptionsFollowSettingsOverrides(t *testing.T) {
 		t.Fatalf("export options = %#v, want the settings-file overrides", plan.ExportOptions)
 	}
 }
+
+func TestInferSigningPlanRejectsUnknownSkipTarget(t *testing.T) {
+	requireStrictSigningPlatform(t)
+	project := writeInferredSigningProject(t)
+	root := t.TempDir()
+	profile := writeSigningTestProfile(t, filepath.Join(root, "Wild.mobileprovision"), "Wildcard", "78787878-7878-7878-7878-787878787878", "ABCDE12345.com.example.*", time.Now().Add(time.Hour))
+	_, err := BuildSigningPlan(SigningPlanOptions{
+		ProjectPath:  project,
+		ProfilePaths: []string{profile},
+		SkipTargets:  []string{"Widgte"},
+		StateDir:     filepath.Join(root, "state"),
+	})
+	if err == nil || !IsSigningInputError(err) || !strings.Contains(err.Error(), `"Widgte"`) {
+		t.Fatalf("error = %v, want an input error naming the unknown skip target", err)
+	}
+}
