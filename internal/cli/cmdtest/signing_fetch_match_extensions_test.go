@@ -280,3 +280,89 @@ func TestSigningSyncPushRejectsMatchExtensionsWithTargetsFile(t *testing.T) {
 		t.Fatalf("stdout = %q, stderr = %q", stdout, stderr)
 	}
 }
+
+func TestSigningFetchMatchExtensionsCreatesDistinctProfilePerTarget(t *testing.T) {
+	setupAuth(t)
+	certContent := base64.StdEncoding.EncodeToString([]byte("cert-one"))
+	var created []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/bundleIds":
+			writeSigningFetchOutputJSON(t, w, http.StatusOK, `{"data":[
+				{"type":"bundleIds","id":"bundle-app","attributes":{"identifier":"com.app","platform":"IOS"}},
+				{"type":"bundleIds","id":"bundle-widget","attributes":{"identifier":"com.app.widget","platform":"IOS"}}
+			],"links":{}}`)
+		case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/profiles"):
+			writeSigningFetchOutputJSON(t, w, http.StatusOK, `{"data":[],"links":{}}`)
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/certificates":
+			writeSigningFetchOutputJSON(t, w, http.StatusOK, `{"data":[`+matchExtensionsCertificate("cert-1", "SER1", certContent)+`],"links":{}}`)
+		case req.Method == http.MethodPost && req.URL.Path == "/v1/profiles":
+			var body struct {
+				Data struct {
+					Attributes struct {
+						Name string `json:"name"`
+					} `json:"attributes"`
+				} `json:"data"`
+			}
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+				t.Errorf("decode create body: %v", err)
+			}
+			name := body.Data.Attributes.Name
+			for _, existing := range created {
+				if existing == name {
+					writeSigningFetchOutputJSON(t, w, http.StatusConflict, `{"errors":[{"status":"409","code":"ENTITY_ERROR","title":"duplicate name","detail":"Multiple profiles found with the name"}]}`)
+					return
+				}
+			}
+			created = append(created, name)
+			writeSigningFetchOutputJSON(t, w, http.StatusCreated, fmt.Sprintf(
+				`{"data":{"type":"profiles","id":"profile-%d","attributes":{"name":%q,"profileType":"IOS_APP_STORE","profileState":"ACTIVE","profileContent":%q}}}`,
+				len(created), name, base64.StdEncoding.EncodeToString([]byte(name)),
+			))
+		default:
+			t.Errorf("unexpected request: %s %s", req.Method, req.URL.String())
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(server.Close)
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := server.Client().Transport
+	client, err := asc.NewClientWithHTTPClient(os.Getenv("ASC_KEY_ID"), os.Getenv("ASC_ISSUER_ID"), os.Getenv("ASC_PRIVATE_KEY_PATH"),
+		&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			cloned := req.Clone(req.Context())
+			cloned.URL.Scheme = serverURL.Scheme
+			cloned.URL.Host = serverURL.Host
+			return transport.RoundTrip(cloned)
+		})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(shared.SetASCClientFactoryForTesting(func() (*asc.Client, error) { return client, nil }))
+
+	outputDir := t.TempDir()
+	var code int
+	stdout, stderr := captureOutput(t, func() {
+		code = rootcmd.Run([]string{
+			"signing", "fetch",
+			"--bundle-id", "com.app",
+			"--profile-type", "IOS_APP_STORE",
+			"--match-extensions", "--create-missing",
+			"--output", outputDir,
+			"--format", "json",
+		}, "test")
+	})
+	if code != rootcmd.ExitSuccess {
+		t.Fatalf("exit code = %d, stderr = %q, stdout = %q", code, stderr, stdout)
+	}
+	if len(created) != 2 || created[0] == created[1] {
+		t.Fatalf("created profile names = %v, want two distinct names", created)
+	}
+	for i, identifier := range []string{"com.app", "com.app.widget"} {
+		if !strings.Contains(created[i], identifier) {
+			t.Fatalf("profile name %q does not identify %s", created[i], identifier)
+		}
+	}
+}

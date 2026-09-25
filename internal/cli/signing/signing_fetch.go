@@ -453,10 +453,13 @@ func fetchMatchedSigningBundle(
 	profile, certs, created, err := resolveSigningAssets(requestCtx, client, signingAssetsOptions{
 		BundleIDResourceID: item.ID,
 		BundleIdentifier:   identifier,
-		ProfileType:        opts.ProfileType,
-		CertificateType:    opts.CertificateType,
-		DeviceIDs:          opts.DeviceIDs,
-		CreateMissing:      opts.CreateMissing,
+		// Generated names carry the bundle ID so targets created in one run
+		// do not collide in App Store Connect or in the output directory.
+		ProfileName:     profileCreateNameForTarget(opts.ProfileType, identifier, signingFetchNowFn()),
+		ProfileType:     opts.ProfileType,
+		CertificateType: opts.CertificateType,
+		DeviceIDs:       opts.DeviceIDs,
+		CreateMissing:   opts.CreateMissing,
 		BeforeCreate: func(plan profileCreatePlan) error {
 			return preflight(plan.ProfileName, "", plan.Certificates)
 		},
