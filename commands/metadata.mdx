@@ -99,7 +99,7 @@ asc metadata push --app "APP_ID" --version "1.2.3" --dir "./metadata" --allow-de
 * `--include` - Included metadata scopes (default: `localizations`)
 * `--dry-run` - Preview changes without mutating App Store Connect
 * `--allow-deletes` - Allow destructive delete operations (disables default locale fallback)
-* `--confirm` - Confirm destructive operations (required with `--allow-deletes`)
+* `--confirm` - Confirm destructive operations (required for deletes, field clears, or `--review-dir` applies)
 * `--output` - Output format: `json`, `table`, `markdown`
 * `--pretty` - Pretty-print JSON output
 
@@ -108,6 +108,7 @@ asc metadata push --app "APP_ID" --version "1.2.3" --dir "./metadata" --allow-de
 * `default.json` fallback is applied only when `--allow-deletes` is not set
 * With `--allow-deletes`, remote locales missing locally are planned as deletes
 * Omitted fields are treated as no-op; they do not imply deletion
+* Explicit `null` clears only supported nullable fields and requires an existing locale when it is the file's only intent
 
 ### metadata validate
 
@@ -180,6 +181,27 @@ metadata has no errors.
 * `supportUrl` - Support URL
 * `whatsNew` - What's new / release notes (4000 characters max)
 
+### Clearing nullable fields
+
+To clear a supported nullable field, set it to JSON `null` in its localization
+file. `subtitle`, `privacyPolicyUrl`, and `promotionalText` support explicit
+clears. Omitted keys leave remote values unchanged; empty strings are not clear
+instructions, and `null` is rejected for fields without clear support.
+An explicit-locale file can combine a clear with other field updates.
+Applying a planned clear requires `--confirm`; dry-run plans do not.
+
+A clear-only file must name a locale that already exists in App Store Connect.
+`metadata plan`, `metadata push`, and `metadata apply` report an error for a
+missing locale instead of silently treating the clear as a successful no-op.
+`metadata validate` accepts these explicit-locale clear-only files offline;
+the remote locale existence check happens during plan, push, or apply.
+
+```json  theme={null}
+{
+  "promotionalText": null
+}
+```
+
 ### Default Locale
 
 **metadata/app-info/default.json:**
@@ -192,6 +214,8 @@ metadata has no errors.
 ```
 
 The `default.json` file provides fallback values for locales not explicitly defined. It is only applied when `--allow-deletes` is not set.
+It cannot contain `null` clear fields because its values fan out to multiple
+locales; put a clear in the corresponding locale-specific file instead.
 
 ## Workflow
 
