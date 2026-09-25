@@ -111,6 +111,10 @@ func inferSigningSettings(project *structuredVersionProject, opts SigningPlanOpt
 
 	productTypes := signingTargetProductTypes(project)
 	assigned := make([]signingProfileAssignment, 0)
+	// settingsOnly holds profile-embedding targets that no supplied profile
+	// matched but the settings file covers; export options must still name
+	// their profile and team.
+	settingsOnly := make([]signingProfileAssignment, 0)
 	blockers := make([]string, 0)
 	warnings := make([]string, 0)
 	covered := signingManifestCoverage(overrides)
@@ -125,6 +129,7 @@ func inferSigningSettings(project *structuredVersionProject, opts SigningPlanOpt
 		bundleID, bundleErr := signingBundleID(project, scope)
 		if bundleErr != nil || bundleID == "" {
 			if covered[scope.target+"\x00"+scope.name] {
+				settingsOnly = append(settingsOnly, signingProfileAssignment{target: scope.target, configuration: scope.name})
 				continue
 			}
 			detail := "PRODUCT_BUNDLE_IDENTIFIER is not set"
@@ -138,6 +143,7 @@ func inferSigningSettings(project *structuredVersionProject, opts SigningPlanOpt
 		selected, discarded, match := selectSigningProfile(signingProfilesForSDK(active, sdk), bundleID)
 		if selected == nil {
 			if covered[scope.target+"\x00"+scope.name] {
+				settingsOnly = append(settingsOnly, signingProfileAssignment{target: scope.target, configuration: scope.name, bundleID: bundleID})
 				continue
 			}
 			detail := ""
@@ -202,7 +208,7 @@ func inferSigningSettings(project *structuredVersionProject, opts SigningPlanOpt
 			blockers = append(blockers, methodBlocker)
 		}
 	}
-	exportOptions, teams := signingExportOptions(method, assigned, manifest)
+	exportOptions, teams := signingExportOptions(method, assigned, settingsOnly, manifest)
 	if len(teams) > 1 {
 		blockers = append(blockers, "selected profiles use more than one development team")
 	}
@@ -538,23 +544,28 @@ func inferSigningExportMethod(assigned []signingProfileAssignment) (string, stri
 // any --settings-file override, so the plist names the same bundle ID,
 // profile, and team that the plan writes into the project. It also returns
 // the distinct development teams those settings use.
-func signingExportOptions(method string, assigned []signingProfileAssignment, manifest *signingSettingsManifest) (*SigningPlanExportOptions, []string) {
+func signingExportOptions(method string, assigned, settingsOnly []signingProfileAssignment, manifest *signingSettingsManifest) (*SigningPlanExportOptions, []string) {
 	profiles := make(map[string]string)
 	teamSet := make(map[string]bool)
-	for _, item := range assigned {
+	items := make([]signingProfileAssignment, 0, len(assigned)+len(settingsOnly))
+	items = append(items, assigned...)
+	items = append(items, settingsOnly...)
+	for _, item := range items {
 		bundleID := item.bundleID
 		if value, found := signingManifestString(manifest, item.target, item.configuration, "PRODUCT_BUNDLE_IDENTIFIER"); found && value != "" {
 			bundleID = value
 		}
-		name := item.profile.name
+		name, team := "", ""
+		if item.profile != nil {
+			name, team = item.profile.name, item.profile.teamID
+		}
 		if value, found := signingManifestString(manifest, item.target, item.configuration, "PROVISIONING_PROFILE_SPECIFIER"); found {
 			name = value
 		}
-		team := item.profile.teamID
 		if value, found := signingManifestString(manifest, item.target, item.configuration, "DEVELOPMENT_TEAM"); found {
 			team = value
 		}
-		if name != "" {
+		if name != "" && bundleID != "" {
 			profiles[bundleID] = name
 		}
 		if team != "" {

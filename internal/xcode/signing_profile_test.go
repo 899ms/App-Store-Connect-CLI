@@ -502,3 +502,40 @@ func TestInferSigningPlanRejectsUnknownSkipTarget(t *testing.T) {
 		t.Fatalf("error = %v, want an input error naming the unknown skip target", err)
 	}
 }
+
+func TestInferSigningPlanExportOptionsIncludeSettingsOnlyTargets(t *testing.T) {
+	requireStrictSigningPlatform(t)
+	project := writeInferredSigningProject(t)
+	root := t.TempDir()
+	profile := writeSigningTestProfileWith(t, filepath.Join(root, "App.mobileprovision"), "App Store", "90909090-9090-9090-9090-909090909090", "ABCDE12345.com.example.demo", time.Now().Add(time.Hour), func(payload map[string]any) {
+		delete(payload, "ProvisionedDevices")
+	})
+	settingsPath := filepath.Join(root, "settings.json")
+	writeSigningSettingsTestFile(t, settingsPath, `{
+		"schemaVersion": 1,
+		"targets": [{
+			"name": "Widget",
+			"configurations": [{
+				"name": "Release",
+				"settings": {"CODE_SIGN_STYLE": "Manual", "PROVISIONING_PROFILE_SPECIFIER": "Widget Store", "DEVELOPMENT_TEAM": "ABCDE12345"}
+			}]
+		}]
+	}`)
+	plan, err := BuildSigningPlan(SigningPlanOptions{
+		ProjectPath:      project,
+		SettingsFilePath: settingsPath,
+		ProfilePaths:     []string{profile},
+		Configuration:    "Release",
+		SkipTargets:      []string{"Watch"},
+		StateDir:         filepath.Join(root, "state"),
+	})
+	if err != nil {
+		t.Fatalf("BuildSigningPlan() error = %v", err)
+	}
+	if !plan.Ready {
+		t.Fatalf("expected ready plan, blockers=%v", plan.Blockers)
+	}
+	if plan.ExportOptions == nil || plan.ExportOptions.ProvisioningProfiles["com.example.demo.widget"] != "Widget Store" {
+		t.Fatalf("export options = %#v, want the settings-only Widget profile", plan.ExportOptions)
+	}
+}
