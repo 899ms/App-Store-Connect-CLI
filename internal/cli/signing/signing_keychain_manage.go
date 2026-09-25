@@ -3,14 +3,23 @@ package signing
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
 
@@ -18,11 +27,19 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
+const (
+	defaultSigningKeychainPartition = "apple-tool:,apple:,codesign:"
+	keychainDiagnosticLimit         = 1 << 10
+)
+
 var (
 	keychainHostGOOS      = runtime.GOOS
 	runKeychainSecurity   = defaultRunKeychainSecurity
+	keychainLockState     = defaultKeychainLockState
 	keychainListLimit     = 64
 	keychainIdentityLimit = 128
+
+	keychainIdentityLinePattern = regexp.MustCompile(`^\s*\d+\)\s+([0-9A-Fa-f]{40})\s`)
 )
 
 func SigningKeychainListCommand() *ffcli.Command {
@@ -34,7 +51,9 @@ func SigningKeychainListCommand() *ffcli.Command {
 		ShortHelp:  "List signing keychains, lock state, and identities.",
 		LongHelp: `List user search-list keychains and the code-signing identities in each.
 
-The command is read-only. It does not unlock a keychain or change the search list.
+The command is read-only. It does not unlock a keychain, prompt for a password,
+or change the search list. Identities are read from certificates, so a locked
+keychain still reports them.
 
 Examples:
   asc signing keychain list --output json`,
@@ -58,7 +77,7 @@ Examples:
 
 func SigningKeychainUnlockCommand() *ffcli.Command {
 	return signingKeychainPasswordCommand("unlock", "Unlock a dedicated signing keychain.", func(ctx context.Context, options *signingKeychainPasswordOptions) error {
-		return applySigningKeychainPasswordCommand(ctx, options, "unlock-keychain")
+		return applySigningKeychainPasswordCommand(ctx, options, "unlock")
 	})
 }
 
@@ -67,7 +86,7 @@ func SigningKeychainSetTimeoutCommand() *ffcli.Command {
 		if !options.TimeoutSet && !options.NoTimeout {
 			return shared.UsageError("signing keychain set-timeout: --timeout or --no-timeout is required")
 		}
-		return applySigningKeychainPasswordCommand(ctx, options, "set-keychain-settings")
+		return applySigningKeychainPasswordCommand(ctx, options, "set-timeout")
 	})
 }
 
@@ -75,14 +94,14 @@ func SigningKeychainSetPartitionListCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("set-partition-list", flag.ExitOnError)
 	keychainPath := fs.String("keychain", "", "Dedicated keychain path")
 	passwordFile := fs.String("keychain-password-file", "", "Protected file containing the keychain password")
-	partition := fs.String("partition", "apple-tool:,apple:,codesign:", "Partition list applied to the signing identity")
-	identitySHA := fs.String("identity-sha256", "", "Only apply when this certificate SHA-256 is present")
+	partition := fs.String("partition", defaultSigningKeychainPartition, "Partition list applied to the signing private keys")
+	identitySHA := fs.String("identity-sha256", "", "Only apply when this code-signing identity certificate SHA-256 is present")
 	output := shared.BindOutputFlags(fs)
 	return &ffcli.Command{
 		Name:       "set-partition-list",
 		ShortUsage: "asc signing keychain set-partition-list --keychain PATH --keychain-password-file PATH [flags]",
 		ShortHelp:  "Reapply the codesign partition list.",
-		LongHelp: `Reapply the signing partition list without printing the keychain password.
+		LongHelp: `Unlock the keychain and reapply the partition list to its signing private keys.
 
 The password is sent to security on stdin, never as a process argument. Repeat calls are safe.
 
@@ -101,38 +120,10 @@ Examples:
 			if _, err := shared.ValidateOutputFormat(*output.Output, *output.Pretty); err != nil {
 				return shared.UsageError(err.Error())
 			}
-			if err := requireKeychainHost("set-partition-list"); err != nil {
+			if err := applySigningKeychainPasswordCommand(ctx, &options, "set-partition-list"); err != nil {
 				return err
 			}
-			resolved, err := resolveExistingKeychainPath(options.KeychainPath, "set-partition-list")
-			if err != nil {
-				return err
-			}
-			password, err := readSigningKeychainPassword(options.PasswordPath, "set-partition-list")
-			if err != nil {
-				return err
-			}
-			defer clear(password)
-			if options.IdentitySHA256 != "" {
-				unlock, err := unlockKeychainCommand(resolved, password)
-				if err != nil {
-					return err
-				}
-				if _, _, err := runKeychainSecurity(ctx, []byte(unlock), "-i"); err != nil {
-					return fmt.Errorf("signing keychain set-partition-list: %w", err)
-				}
-				if err := requireKeychainIdentity(ctx, resolved, options.IdentitySHA256); err != nil {
-					return err
-				}
-			}
-			command, err := partitionListCommand(resolved, password, options.Partition)
-			if err != nil {
-				return err
-			}
-			if _, _, err := runKeychainSecurity(ctx, []byte(command+"\n"), "-i"); err != nil {
-				return fmt.Errorf("signing keychain set-partition-list: %w", err)
-			}
-			return shared.PrintOutput(&asc.SigningKeychainActionResult{Action: "set-partition-list", KeychainPath: resolved, Partition: options.Partition}, *output.Output, *output.Pretty)
+			return shared.PrintOutput(&asc.SigningKeychainActionResult{Action: "set-partition-list", KeychainPath: options.KeychainPath, Partition: options.Partition}, *output.Output, *output.Pretty)
 		},
 	}
 }
@@ -161,8 +152,8 @@ func SigningKeychainLockCommand() *ffcli.Command {
 			if err != nil {
 				return err
 			}
-			if _, _, err := runKeychainSecurity(ctx, nil, "lock-keychain", resolved); err != nil {
-				return fmt.Errorf("signing keychain lock: %w", err)
+			if _, err := runKeychainStep(ctx, "lock", nil, nil, "lock-keychain", resolved); err != nil {
+				return err
 			}
 			return shared.PrintOutput(&asc.SigningKeychainActionResult{Action: "lock", KeychainPath: resolved}, *output.Output, *output.Pretty)
 		},
@@ -180,7 +171,9 @@ func SigningKeychainDeleteCommand() *ffcli.Command {
 		ShortHelp:  "Delete an explicitly selected signing keychain.",
 		LongHelp: `Delete the keychain at the explicit --keychain path.
 
-There is no default path. login.keychain and System.keychain are refused. The command does not remove a keychain merely because it is on the search list.
+There is no default path. Symbolic links are resolved first. The login and
+System keychains, and the user's current default keychain, are refused. Deleting
+a keychain also removes it from the user search list.
 
 Examples:
   asc signing keychain delete --keychain .asc/keychains/release.keychain-db --confirm`,
@@ -203,8 +196,11 @@ Examples:
 			if err != nil {
 				return err
 			}
-			if _, _, err := runKeychainSecurity(ctx, nil, "delete-keychain", resolved); err != nil {
-				return fmt.Errorf("signing keychain delete: %w", err)
+			if err := refuseDefaultKeychain(ctx, resolved); err != nil {
+				return err
+			}
+			if _, err := runKeychainStep(ctx, "delete", nil, nil, "delete-keychain", resolved); err != nil {
+				return err
 			}
 			return shared.PrintOutput(&asc.SigningKeychainActionResult{Action: "delete", KeychainPath: resolved}, *output.Output, *output.Pretty)
 		},
@@ -235,9 +231,10 @@ func signingKeychainPasswordCommand(name, shortHelp string, run func(context.Con
 		LongHelp: shortHelp + `
 
 The password is read from --keychain-password-file and sent to security on stdin. It is never placed in the process argument list.
+Changing the timeout keeps the keychain's existing lock-on-sleep setting.
 
 Examples:
-  asc signing keychain ` + name + ` --keychain .asc/keychains/release.keychain-db --keychain-password-file .asc/secrets/keychain-password`,
+  asc signing keychain ` + name + ` --keychain .asc/keychains/release.keychain-db --keychain-password-file .asc/secrets/keychain-password --timeout 3600`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
@@ -279,11 +276,13 @@ func parseSigningKeychainPasswordOptions(keychainPath, passwordPath string, time
 		return signingKeychainPasswordOptions{}, shared.UsageError("signing keychain: --timeout must be greater than 0")
 	}
 	if strings.TrimSpace(partition) == "" {
-		partition = "apple-tool:,apple:,codesign:"
+		partition = defaultSigningKeychainPartition
 	}
 	sha := strings.ToLower(strings.TrimSpace(identitySHA))
-	if sha != "" && len(sha) != 64 {
-		return signingKeychainPasswordOptions{}, shared.UsageError("signing keychain: --identity-sha256 must be 64 hexadecimal characters")
+	if sha != "" {
+		if decoded, err := hex.DecodeString(sha); err != nil || len(decoded) != sha256.Size {
+			return signingKeychainPasswordOptions{}, shared.UsageError("signing keychain: --identity-sha256 must be 64 hexadecimal characters")
+		}
 	}
 	return signingKeychainPasswordOptions{
 		KeychainPath:   strings.TrimSpace(keychainPath),
@@ -296,6 +295,10 @@ func parseSigningKeychainPasswordOptions(keychainPath, passwordPath string, time
 	}, nil
 }
 
+// applySigningKeychainPasswordCommand runs each security step as its own
+// process and stops at the first failure, so a wrong password never lets a
+// later step run against a locked keychain (which would prompt for the
+// password in a GUI session).
 func applySigningKeychainPasswordCommand(ctx context.Context, options *signingKeychainPasswordOptions, action string) error {
 	if err := requireKeychainHost(action); err != nil {
 		return err
@@ -310,73 +313,105 @@ func applySigningKeychainPasswordCommand(ctx context.Context, options *signingKe
 		return err
 	}
 	defer clear(password)
-	script, err := keychainPasswordScript(action, resolved, password, *options)
-	if err != nil {
+	stdin := make([]byte, len(password)+1)
+	copy(stdin, password)
+	stdin[len(password)] = '\n'
+	defer clear(stdin)
+
+	if _, err := runKeychainStep(ctx, action, stdin, password, "unlock-keychain", resolved); err != nil {
 		return err
 	}
-	if _, _, err := runKeychainSecurity(ctx, []byte(script), "-i"); err != nil {
-		return fmt.Errorf("signing keychain %s: %w", action, err)
-	}
-	return nil
-}
-
-func keychainPasswordScript(action, path string, password []byte, options signingKeychainPasswordOptions) (string, error) {
-	quotedPath, err := securityToken(path)
-	if err != nil {
-		return "", shared.UsageErrorf("signing keychain %s: %s", action, err.Error())
-	}
-	quotedPassword, err := securityToken(string(password))
-	if err != nil {
-		return "", shared.UsageErrorf("signing keychain %s: keychain password %s", action, err.Error())
-	}
-	var lines []string
-	lines = append(lines, fmt.Sprintf("unlock-keychain -p %s %s", quotedPassword, quotedPath))
-	switch action {
-	case "set-keychain-settings":
-		if options.NoTimeout {
-			lines = append(lines, fmt.Sprintf("set-keychain-settings -u %s", quotedPath))
-		} else {
-			lines = append(lines, fmt.Sprintf("set-keychain-settings -t %d %s", options.Timeout, quotedPath))
+	if options.TimeoutSet || options.NoTimeout {
+		if err := setKeychainTimeout(ctx, action, resolved, *options); err != nil {
+			return err
 		}
 	}
-	if options.TimeoutSet || options.NoTimeout {
-		if action == "unlock-keychain" {
-			if options.NoTimeout {
-				lines = append(lines, fmt.Sprintf("set-keychain-settings -u %s", quotedPath))
-			} else if options.TimeoutSet {
-				lines = append(lines, fmt.Sprintf("set-keychain-settings -t %d %s", options.Timeout, quotedPath))
+	if action != "set-partition-list" {
+		return nil
+	}
+	if options.IdentitySHA256 != "" {
+		identities, err := listKeychainIdentities(ctx, action, resolved)
+		if err != nil {
+			return err
+		}
+		found := false
+		for _, identity := range identities {
+			if identity.SHA256 == options.IdentitySHA256 {
+				found = true
+				break
 			}
 		}
+		if !found {
+			return shared.NewValidationError(fmt.Errorf("signing keychain set-partition-list: code-signing identity %s was not found in %s", options.IdentitySHA256, resolved))
+		}
 	}
-	return strings.Join(lines, "\n") + "\n", nil
+	_, err = runKeychainStep(ctx, action, stdin, password, "set-key-partition-list", "-S", options.Partition, "-s", "-t", "private", resolved)
+	return err
 }
 
-func unlockKeychainCommand(path string, password []byte) (string, error) {
-	quotedPath, err := securityToken(path)
+func setKeychainTimeout(ctx context.Context, action, path string, options signingKeychainPasswordOptions) error {
+	stdout, stderr, err := runKeychainSecurity(ctx, nil, "show-keychain-info", path)
 	if err != nil {
-		return "", shared.UsageErrorf("signing keychain set-partition-list: %s", err.Error())
+		return keychainStepError(action, stderr, err, nil)
 	}
-	quotedPassword, err := securityToken(string(password))
-	if err != nil {
-		return "", shared.UsageErrorf("signing keychain set-partition-list: keychain password %s", err.Error())
+	args := []string{"set-keychain-settings"}
+	if strings.Contains(string(stdout)+" "+string(stderr), "lock-on-sleep") {
+		args = append(args, "-l")
 	}
-	return fmt.Sprintf("unlock-keychain -p %s %s\n", quotedPassword, quotedPath), nil
+	if !options.NoTimeout {
+		args = append(args, "-u", "-t", strconv.Itoa(options.Timeout))
+	}
+	args = append(args, path)
+	_, err = runKeychainStep(ctx, action, nil, nil, args...)
+	return err
 }
 
-func partitionListCommand(path string, password []byte, partition string) (string, error) {
-	quotedPath, err := securityToken(path)
+func runKeychainStep(ctx context.Context, action string, stdin, secret []byte, args ...string) ([]byte, error) {
+	stdout, stderr, err := runKeychainSecurity(ctx, stdin, args...)
 	if err != nil {
-		return "", shared.UsageErrorf("signing keychain set-partition-list: %s", err.Error())
+		return nil, keychainStepError(action, stderr, err, secret)
 	}
-	quotedPassword, err := securityToken(string(password))
-	if err != nil {
-		return "", shared.UsageErrorf("signing keychain set-partition-list: keychain password %s", err.Error())
+	return stdout, nil
+}
+
+func keychainStepError(action string, stderr []byte, err error, secret []byte) error {
+	diagnostic := keychainSecurityDiagnostic(stderr, secret)
+	if diagnostic == "" {
+		return fmt.Errorf("signing keychain %s: %w", action, err)
 	}
-	quotedPartition, err := securityToken(partition)
-	if err != nil {
-		return "", shared.UsageErrorf("signing keychain set-partition-list: --partition %s", err.Error())
+	return fmt.Errorf("signing keychain %s: %s: %w", action, diagnostic, err)
+}
+
+// keychainSecurityDiagnostic returns security's stderr with the password
+// prompt, the password itself, and terminal control characters removed.
+func keychainSecurityDiagnostic(stderr, secret []byte) string {
+	lines := strings.Split(string(stderr), "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if strings.HasPrefix(line, "password to unlock ") {
+			index := strings.Index(line, ": security: ")
+			if index < 0 {
+				continue
+			}
+			line = line[index+2:]
+		}
+		kept = append(kept, line)
 	}
-	return fmt.Sprintf("unlock-keychain -p %s %s\nset-key-partition-list -S %s -k %s %s\n", quotedPassword, quotedPath, quotedPartition, quotedPassword, quotedPath), nil
+	diagnostic := strings.Join(kept, "\n")
+	if len(secret) > 0 {
+		for _, representation := range []string{string(secret), hex.EncodeToString(secret), strings.ToUpper(hex.EncodeToString(secret))} {
+			diagnostic = strings.ReplaceAll(diagnostic, representation, "[REDACTED]")
+		}
+	}
+	diagnostic = strings.TrimSpace(shared.SanitizeTerminal(diagnostic))
+	if len(diagnostic) <= keychainDiagnosticLimit {
+		return diagnostic
+	}
+	diagnostic = diagnostic[:keychainDiagnosticLimit]
+	for !utf8.ValidString(diagnostic) {
+		diagnostic = diagnostic[:len(diagnostic)-1]
+	}
+	return diagnostic + " [truncated]"
 }
 
 func requireKeychainHost(action string) error {
@@ -386,6 +421,9 @@ func requireKeychainHost(action string) error {
 	return shared.NewValidationError(fmt.Errorf("signing keychain %s is supported only on macOS", action))
 }
 
+// resolveExistingKeychainPath resolves symbolic links and refuses the login and
+// System keychains by name, location, and file identity (hard links) before any
+// security command runs.
 func resolveExistingKeychainPath(path, action string) (string, error) {
 	trimmed := strings.TrimSpace(path)
 	if trimmed == "" {
@@ -399,7 +437,30 @@ func resolveExistingKeychainPath(path, action string) (string, error) {
 	if reason := refusedKeychainPath(absolute); reason != "" {
 		return "", shared.UsageErrorf("signing keychain %s: %s", action, reason)
 	}
-	return absolute, nil
+	physical, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", shared.NewValidationError(fmt.Errorf("signing keychain %s: keychain %s does not exist", action, absolute))
+		}
+		return "", fmt.Errorf("signing keychain %s: resolve keychain: %w", action, err)
+	}
+	if reason := refusedKeychainPath(physical); reason != "" {
+		return "", shared.UsageErrorf("signing keychain %s: %s", action, reason)
+	}
+	info, err := os.Stat(physical)
+	if err != nil {
+		return "", fmt.Errorf("signing keychain %s: inspect keychain: %w", action, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", shared.NewValidationError(fmt.Errorf("signing keychain %s: %s is not a keychain file", action, physical))
+	}
+	for _, protected := range protectedKeychainFiles() {
+		protectedInfo, err := os.Stat(protected)
+		if err == nil && os.SameFile(info, protectedInfo) {
+			return "", shared.UsageErrorf("signing keychain %s: refusing to operate on the login or System keychain; pass an explicit dedicated keychain path", action)
+		}
+	}
+	return physical, nil
 }
 
 func refusedKeychainPath(path string) string {
@@ -409,10 +470,47 @@ func refusedKeychainPath(path string) string {
 		return "refusing to operate on the login or System keychain; pass an explicit dedicated keychain path"
 	}
 	cleaned := strings.ToLower(filepath.ToSlash(path))
-	if strings.Contains(cleaned, "/library/keychains/system.keychain") || strings.Contains(cleaned, "/system/library/keychains/") {
+	if strings.HasPrefix(cleaned, "/library/keychains/") || strings.HasPrefix(cleaned, "/system/library/keychains/") {
 		return "refusing to operate on a system keychain"
 	}
 	return ""
+}
+
+func protectedKeychainFiles() []string {
+	paths := []string{"/Library/Keychains/System.keychain"}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		paths = append(
+			paths,
+			filepath.Join(home, "Library", "Keychains", "login.keychain-db"),
+			filepath.Join(home, "Library", "Keychains", "login.keychain"),
+		)
+	}
+	return paths
+}
+
+// refuseDefaultKeychain fails closed when the default keychain cannot be read
+// or resolves to the keychain being deleted.
+func refuseDefaultKeychain(ctx context.Context, resolved string) error {
+	stdout, stderr, err := runKeychainSecurity(ctx, nil, "default-keychain", "-d", "user")
+	if err != nil {
+		return keychainStepError("delete: refusing because the default keychain could not be read", stderr, err, nil)
+	}
+	target, err := os.Stat(resolved)
+	if err != nil {
+		return fmt.Errorf("signing keychain delete: inspect keychain: %w", err)
+	}
+	for _, path := range parseKeychainList(stdout) {
+		if physical, err := filepath.EvalSymlinks(path); err == nil {
+			path = physical
+		}
+		if path == resolved {
+			return shared.UsageError("signing keychain delete: refusing to delete the user's default keychain")
+		}
+		if info, err := os.Stat(path); err == nil && os.SameFile(info, target) {
+			return shared.UsageError("signing keychain delete: refusing to delete the user's default keychain")
+		}
+	}
+	return nil
 }
 
 func readSigningKeychainPassword(path, action string) ([]byte, error) {
@@ -422,28 +520,23 @@ func readSigningKeychainPassword(path, action string) ([]byte, error) {
 	}
 	password := trimSigningKeychainSecret(data)
 	if len(password) == 0 {
+		clear(data)
 		return nil, shared.UsageErrorf("signing keychain %s: keychain password is empty", action)
 	}
 	if bytes.ContainsAny(password, "\r\n\x00") {
+		clear(data)
 		return nil, shared.UsageErrorf("signing keychain %s: keychain password must not contain line breaks or NUL bytes", action)
 	}
 	return password, nil
-}
-
-func securityToken(value string) (string, error) {
-	if strings.ContainsAny(value, "\"\\\r\n\x00") {
-		return "", fmt.Errorf("value cannot contain quotes, backslashes, or line breaks")
-	}
-	return `"` + value + `"`, nil
 }
 
 func listSigningKeychains(ctx context.Context) (*asc.SigningKeychainListResult, error) {
 	if err := requireKeychainHost("list"); err != nil {
 		return nil, err
 	}
-	stdout, stderr, err := runKeychainSecurity(ctx, nil, "list-keychains", "-d", "user")
+	stdout, err := runKeychainStep(ctx, "list", nil, nil, "list-keychains", "-d", "user")
 	if err != nil {
-		return nil, fmt.Errorf("signing keychain list: %w: %s", err, sanitizeSecurityOutput(stderr))
+		return nil, err
 	}
 	paths := parseKeychainList(stdout)
 	if len(paths) > keychainListLimit {
@@ -452,11 +545,14 @@ func listSigningKeychains(ctx context.Context) (*asc.SigningKeychainListResult, 
 	result := &asc.SigningKeychainListResult{Keychains: make([]asc.SigningKeychainInfo, 0, len(paths))}
 	for _, path := range paths {
 		info := asc.SigningKeychainInfo{Path: path, InSearchList: true}
-		detail, detailErr, infoErr := runKeychainSecurity(ctx, nil, "show-keychain-info", path)
-		text := string(append(detail, detailErr...))
-		info.Locked = strings.Contains(strings.ToLower(text), "locked")
-		if infoErr == nil && !info.Locked {
-			identities, err := listKeychainIdentities(ctx, path, true)
+		exists, locked, err := keychainLockState(path)
+		if err != nil {
+			return nil, fmt.Errorf("signing keychain list: lock state for %s: %w", path, err)
+		}
+		info.Exists = exists
+		info.Locked = locked
+		if exists {
+			identities, err := listKeychainIdentities(ctx, "list", path)
 			if err != nil {
 				return nil, err
 			}
@@ -467,38 +563,73 @@ func listSigningKeychains(ctx context.Context) (*asc.SigningKeychainListResult, 
 	return result, nil
 }
 
-func listKeychainIdentities(ctx context.Context, path string, lockedIsEmpty bool) ([]asc.SigningKeychainIdentity, error) {
-	stdout, stderr, err := runKeychainSecurity(ctx, nil, "find-certificate", "-a", "-p", "-Z", path)
+// listKeychainIdentities reads code-signing identities without unlocking the
+// keychain: find-identity names the certificates that have a private key and
+// find-certificate supplies the certificates themselves.
+func listKeychainIdentities(ctx context.Context, action, path string) ([]asc.SigningKeychainIdentity, error) {
+	identityOutput, err := runKeychainStep(ctx, action, nil, nil, "find-identity", "-p", "codesigning", path)
 	if err != nil {
-		if lockedIsEmpty && strings.Contains(strings.ToLower(string(stderr)), "locked") {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("signing keychain list: identities for %s: %w", path, err)
+		return nil, err
 	}
-	identities := parseCertificateDump(stdout)
+	identitySHA1 := parseKeychainIdentitySHA1(identityOutput)
+	if len(identitySHA1) == 0 {
+		return nil, nil
+	}
+	certificateOutput, err := runKeychainStep(ctx, action, nil, nil, "find-certificate", "-a", "-p", path)
+	if err != nil {
+		return nil, err
+	}
+	var identities []asc.SigningKeychainIdentity
+	seen := map[string]bool{}
+	for _, certificate := range parseKeychainCertificates(certificateOutput) {
+		sha1Sum := sha1.Sum(certificate.Raw)
+		sha1Hex := hex.EncodeToString(sha1Sum[:])
+		if !identitySHA1[sha1Hex] || seen[sha1Hex] {
+			continue
+		}
+		seen[sha1Hex] = true
+		sha256Sum := sha256.Sum256(certificate.Raw)
+		identities = append(identities, asc.SigningKeychainIdentity{
+			SHA256:     hex.EncodeToString(sha256Sum[:]),
+			SHA1:       sha1Hex,
+			CommonName: certificate.Subject.CommonName,
+			ExpiresAt:  certificate.NotAfter.UTC().Format(time.RFC3339),
+		})
+	}
 	if len(identities) > keychainIdentityLimit {
-		return nil, fmt.Errorf("signing keychain list: %s has %d identities; limit is %d", path, len(identities), keychainIdentityLimit)
+		return nil, fmt.Errorf("signing keychain %s: %s has %d identities; limit is %d", action, path, len(identities), keychainIdentityLimit)
 	}
 	return identities, nil
 }
 
-func requireKeychainIdentity(ctx context.Context, path, sha256 string) error {
-	stdout, stderr, err := runKeychainSecurity(ctx, nil, "find-certificate", "-a", "-p", "-Z", path)
-	if err != nil {
-		return fmt.Errorf("signing keychain set-partition-list: identities for %s: %w: %s", path, err, sanitizeSecurityOutput(stderr))
-	}
-	for _, identity := range parseCertificateDump(stdout) {
-		if strings.EqualFold(identity.SHA256, sha256) {
-			return nil
+func parseKeychainIdentitySHA1(output []byte) map[string]bool {
+	hashes := map[string]bool{}
+	for _, line := range strings.Split(string(output), "\n") {
+		if match := keychainIdentityLinePattern.FindStringSubmatch(line); match != nil {
+			hashes[strings.ToLower(match[1])] = true
 		}
 	}
-	for _, line := range strings.Split(string(stdout), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "SHA-256 hash:") && strings.EqualFold(strings.TrimSpace(strings.TrimPrefix(line, "SHA-256 hash:")), sha256) {
-			return nil
+	return hashes
+}
+
+func parseKeychainCertificates(output []byte) []*x509.Certificate {
+	var certificates []*x509.Certificate
+	rest := output
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			return certificates
 		}
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		certificate, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			continue
+		}
+		certificates = append(certificates, certificate)
 	}
-	return fmt.Errorf("signing keychain set-partition-list: identity %s was not found", sha256)
 }
 
 func parseKeychainList(output []byte) []string {
@@ -511,49 +642,4 @@ func parseKeychainList(output []byte) []string {
 		paths = append(paths, line)
 	}
 	return paths
-}
-
-func parseCertificateDump(output []byte) []asc.SigningKeychainIdentity {
-	var identities []asc.SigningKeychainIdentity
-	var currentSHA string
-	for _, block := range bytes.Split(output, []byte("-----END CERTIFICATE-----")) {
-		text := string(block)
-		for _, line := range strings.Split(text, "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "SHA-256 hash:") {
-				currentSHA = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(line, "SHA-256 hash:")))
-			}
-		}
-		pemStart := bytes.Index(block, []byte("-----BEGIN CERTIFICATE-----"))
-		if pemStart < 0 || currentSHA == "" {
-			continue
-		}
-		pemBytes := append(block[pemStart:], []byte("\n-----END CERTIFICATE-----\n")...)
-		decoded, _ := pem.Decode(pemBytes)
-		if decoded == nil {
-			continue
-		}
-		certificate, err := x509.ParseCertificate(decoded.Bytes)
-		if err != nil {
-			continue
-		}
-		identities = append(identities, asc.SigningKeychainIdentity{
-			SHA256:     currentSHA,
-			CommonName: certificate.Subject.CommonName,
-			ExpiresAt:  certificate.NotAfter.UTC().Format(time.RFC3339),
-		})
-		currentSHA = ""
-	}
-	return identities
-}
-
-func sanitizeSecurityOutput(output []byte) string {
-	text := strings.TrimSpace(string(output))
-	if text == "" {
-		return "security failed"
-	}
-	if len(text) > 200 {
-		text = text[:200]
-	}
-	return text
 }

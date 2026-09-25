@@ -25,9 +25,11 @@ type SigningKeychainListResult struct {
 	Keychains []SigningKeychainInfo `json:"keychains"`
 }
 
-// SigningKeychainInfo is one keychain in the user search list.
+// SigningKeychainInfo is one keychain in the user search list. Exists is false
+// for a stale search-list entry whose keychain file is missing.
 type SigningKeychainInfo struct {
 	Path         string                    `json:"path"`
+	Exists       bool                      `json:"exists"`
 	InSearchList bool                      `json:"inSearchList"`
 	Locked       bool                      `json:"locked"`
 	Identities   []SigningKeychainIdentity `json:"identities,omitempty"`
@@ -36,6 +38,7 @@ type SigningKeychainInfo struct {
 // SigningKeychainIdentity is a public certificate summary. It never includes a key.
 type SigningKeychainIdentity struct {
 	SHA256     string `json:"sha256"`
+	SHA1       string `json:"sha1"`
 	CommonName string `json:"commonName,omitempty"`
 	ExpiresAt  string `json:"expiresAt,omitempty"`
 }
@@ -64,13 +67,13 @@ func signingKeychainActionRows(result *SigningKeychainActionResult) ([]string, [
 }
 
 func signingKeychainListRows(result *SigningKeychainListResult) ([]string, [][]string) {
-	headers := []string{"Path", "Search List", "Locked", "Identities"}
+	headers := []string{"Path", "Exists", "Search List", "Locked", "Identities"}
 	if result == nil {
 		return headers, nil
 	}
 	rows := make([][]string, 0, len(result.Keychains))
 	for _, keychain := range result.Keychains {
-		rows = append(rows, []string{keychain.Path, formatBool(keychain.InSearchList), formatBool(keychain.Locked), fmt.Sprintf("%d", len(keychain.Identities))})
+		rows = append(rows, []string{keychain.Path, formatBool(keychain.Exists), formatBool(keychain.InSearchList), formatBool(keychain.Locked), fmt.Sprintf("%d", len(keychain.Identities))})
 	}
 	return headers, rows
 }
