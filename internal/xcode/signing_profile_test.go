@@ -611,3 +611,46 @@ func TestInferSigningPlanIgnoresProfilesWithNotYetValidCertificates(t *testing.T
 		t.Fatalf("ready=%t blockers=%v, want a certificate validity blocker", plan.Ready, plan.Blockers)
 	}
 }
+
+func TestInferSigningPlanUsesGenericIdentityForMultiCertificateProfiles(t *testing.T) {
+	requireStrictSigningPlatform(t)
+	project := writeInferredSigningProject(t)
+	root := t.TempDir()
+	certificates := make([][]byte, 0, 2)
+	for index, name := range []string{"Apple Development: Alice (AAAAAAAAAA)", "Apple Development: Bob (BBBBBBBBBB)"} {
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			t.Fatal(err)
+		}
+		template := &x509.Certificate{
+			SerialNumber: big.NewInt(int64(10 + index)),
+			Subject:      pkix.Name{CommonName: name},
+			NotBefore:    time.Now().Add(-time.Hour),
+			NotAfter:     time.Now().Add(time.Duration(index+1) * 24 * time.Hour),
+		}
+		der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		certificates = append(certificates, der)
+	}
+	profile := writeSigningTestProfileWith(t, filepath.Join(root, "App.mobileprovision"), "Team Development", "efefefef-efef-efef-efef-efefefefefef", "ABCDE12345.com.example.demo", time.Now().Add(48*time.Hour), func(payload map[string]any) {
+		payload["DeveloperCertificates"] = certificates
+	})
+	plan, err := BuildSigningPlan(SigningPlanOptions{
+		ProjectPath:   project,
+		ProfilePaths:  []string{profile},
+		Configuration: "Debug",
+		SkipTargets:   []string{"Widget", "Watch"},
+		StateDir:      filepath.Join(root, "state"),
+	})
+	if err != nil {
+		t.Fatalf("BuildSigningPlan() error = %v", err)
+	}
+	if !plan.Ready {
+		t.Fatalf("expected ready plan, blockers=%v", plan.Blockers)
+	}
+	if !signingPlanSettingEquals(plan, "App", "Debug", "CODE_SIGN_IDENTITY", "Apple Development") {
+		t.Fatalf("identity is not the generic certificate kind: %#v", plan.Desired)
+	}
+}

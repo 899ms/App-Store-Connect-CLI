@@ -758,12 +758,18 @@ func signingProfileIdentity(certificates [][]byte, now time.Time) (string, strin
 	var chosen *x509.Certificate
 	var chosenDER []byte
 	chosenValid := false
+	validKinds := make(map[string]bool)
+	validCount := 0
 	for _, der := range certificates {
 		certificate, err := x509.ParseCertificate(der)
 		if err != nil {
 			return "", "", time.Time{}, false, fmt.Errorf("parse developer certificate: %w", err)
 		}
 		valid := !now.Before(certificate.NotBefore) && now.Before(certificate.NotAfter)
+		if valid {
+			validCount++
+			validKinds[signingCertificateKind(certificate.Subject.CommonName)] = true
+		}
 		switch {
 		case chosen == nil,
 			valid && !chosenValid,
@@ -773,10 +779,24 @@ func signingProfileIdentity(certificates [][]byte, now time.Time) (string, strin
 	}
 	sum := sha256.Sum256(chosenDER)
 	identity := strings.TrimSpace(chosen.Subject.CommonName)
+	if validCount > 1 && len(validKinds) == 1 {
+		// A team profile embeds several members' certificates, and only one
+		// may have its private key on this machine. Name the certificate
+		// kind (for example "Apple Development") so Xcode picks whichever
+		// matching identity is installed, instead of pinning one member's.
+		identity = signingCertificateKind(identity)
+	}
 	if identity == "" {
 		identity = "Apple Distribution"
 	}
 	return identity, hex.EncodeToString(sum[:]), chosen.NotAfter, chosenValid, nil
+}
+
+// signingCertificateKind returns the generic identity for a certificate
+// common name: the part before ": ", such as "Apple Development".
+func signingCertificateKind(commonName string) string {
+	kind, _, _ := strings.Cut(strings.TrimSpace(commonName), ":")
+	return strings.TrimSpace(kind)
 }
 
 // earliestSigningExpiry is when a profile stops being usable: the profile
