@@ -51,6 +51,9 @@ By default, this command uploads the IPA/PKG to the presigned URLs and commits
 the file immediately. Use --verify-timeout to briefly watch for immediate
 post-commit processing failures, or --wait for full build discovery and
 processing.
+When --wait, --test-notes, or --verify-timeout sees the build App Store Connect
+created from the upload, the receipt includes its buildId. If verification
+ends before the build is visible, a notice on stderr explains how to look it up.
 When --test-notes is set, the command waits only until the build appears, then
 creates or updates the requested localization. Add --wait when the invocation
 must also wait for processing to complete.
@@ -367,6 +370,7 @@ Examples:
 					if buildResp == nil {
 						return fmt.Errorf("builds upload: failed to resolve build for version %q build %q", versionValue, buildNumberValue)
 					}
+					result.BuildID = buildResp.Data.ID
 
 					if testNotesValue != "" {
 						fmt.Fprintf(os.Stderr, "Build %s discovered; setting What to Test notes...\n", buildResp.Data.ID)
@@ -384,8 +388,14 @@ Examples:
 					}
 				} else if *verifyTimeout > 0 {
 					fmt.Fprintf(os.Stderr, "Verifying initial App Store Connect processing for up to %s...\n", verifyTimeout.String())
-					if err := shared.VerifyBuildUploadAfterCommit(ctx, client, resolvedAppID, uploadResp.Data.ID, *pollInterval, *verifyTimeout); err != nil {
+					buildID, err := shared.VerifyBuildUploadAfterCommit(ctx, client, resolvedAppID, uploadResp.Data.ID, *pollInterval, *verifyTimeout)
+					if err != nil {
 						return fmt.Errorf("builds upload: %w", err)
+					}
+					if buildID != "" {
+						result.BuildID = buildID
+					} else {
+						fmt.Fprintf(os.Stderr, "Build ID for upload %s is not available yet: verification ended before App Store Connect exposed the build; look it up later with: asc builds info --app %q --build-number %q --version %q --platform %s\n", uploadResp.Data.ID, resolvedAppID, buildNumberValue, versionValue, platformValue)
 					}
 				}
 			}

@@ -47,7 +47,7 @@ func WaitForBuildByNumberOrUploadFailure(ctx context.Context, client *asc.Client
 
 	return asc.PollUntilTolerant(ctx, pollInterval, func(ctx context.Context) (*asc.BuildResponse, bool, error) {
 		if uploadID != "" {
-			upload, err := client.GetBuildUpload(ctx, uploadID)
+			upload, err := getBuildUploadWithLinkedBuild(ctx, client, uploadID)
 			if err != nil {
 				if !shouldIgnoreBuildWaitLookupError(err) {
 					return nil, false, err
@@ -85,17 +85,26 @@ func WaitForBuildByNumberOrUploadFailure(ctx context.Context, client *asc.Client
 	}, asc.PollOptions{Tolerate: isTransientBuildWaitError})
 }
 
+// getBuildUploadWithLinkedBuild reads a build upload including its build
+// relationship. App Store Connect omits the buildUpload -> build linkage unless
+// include=build is requested, so plain reads never reveal the created build.
+func getBuildUploadWithLinkedBuild(ctx context.Context, client *asc.Client, uploadID string) (*asc.BuildUploadResponse, error) {
+	return client.GetBuildUpload(ctx, uploadID, asc.WithBuildUploadInclude([]string{"build"}))
+}
+
 // VerifyBuildUploadAfterCommit briefly watches a newly committed upload for
-// immediate App Store Connect failures. It returns nil on timeout so the caller
-// can keep the default asynchronous success behavior when no failure is
-// observed during the bounded verification window.
-func VerifyBuildUploadAfterCommit(ctx context.Context, client *asc.Client, appID, uploadID string, pollInterval, verifyTimeout time.Duration) error {
+// immediate App Store Connect failures. It returns the ID of the build the
+// upload created once App Store Connect links it, which ends the watch early.
+// It returns an empty build ID and nil error on timeout so the caller can keep
+// the default asynchronous success behavior when no failure is observed during
+// the bounded verification window.
+func VerifyBuildUploadAfterCommit(ctx context.Context, client *asc.Client, appID, uploadID string, pollInterval, verifyTimeout time.Duration) (string, error) {
 	if client == nil {
-		return nil
+		return "", nil
 	}
 	uploadID = strings.TrimSpace(uploadID)
 	if uploadID == "" || verifyTimeout <= 0 {
-		return nil
+		return "", nil
 	}
 
 	verifyCtx, cancel := ContextWithTimeoutDuration(ctx, verifyTimeout)
@@ -116,8 +125,9 @@ func VerifyBuildUploadAfterCommit(ctx context.Context, client *asc.Client, appID
 	}
 
 	callerCtx := ctx
+	linkedBuildID := ""
 	_, err := asc.PollUntil(verifyCtx, effectiveInterval, func(ctx context.Context) (*asc.BuildUploadResponse, bool, error) {
-		upload, err := client.GetBuildUpload(ctx, uploadID)
+		upload, err := getBuildUploadWithLinkedBuild(ctx, client, uploadID)
 		if err != nil {
 			if isTerminalBuildWaitNotFound(err) {
 				if callerCtx.Err() != nil {
@@ -149,18 +159,58 @@ func VerifyBuildUploadAfterCommit(ctx context.Context, client *asc.Client, appID
 		if err != nil {
 			return nil, false, err
 		}
+		if buildID == "" {
+			// The builds collection exposes a new build shortly before the
+			// upload links it. The lookup is best effort: a failure only
+			// means this poll has not seen the build yet.
+			buildID, _ = findBuildIDForUpload(ctx, client, appID, uploadID, upload.Data.Attributes.CFBundleVersion)
+		}
 		if buildID != "" {
+			linkedBuildID = buildID
 			return upload, true, nil
 		}
 		return nil, false, nil
 	})
 	if err == nil {
-		return nil
+		return linkedBuildID, nil
 	}
 	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-		return nil
+		return "", nil
 	}
-	return err
+	return "", err
+}
+
+// findBuildIDForUpload returns the ID of the build App Store Connect created
+// from uploadID, matched by the build's own buildUpload linkage among the app's
+// builds with the upload's build number. An empty ID means no such build is
+// visible yet.
+func findBuildIDForUpload(ctx context.Context, client *asc.Client, appID, uploadID, buildNumber string) (string, error) {
+	appID = strings.TrimSpace(appID)
+	uploadID = strings.TrimSpace(uploadID)
+	buildNumber = strings.TrimSpace(buildNumber)
+	if client == nil || appID == "" || uploadID == "" || buildNumber == "" {
+		return "", nil
+	}
+
+	builds, err := client.GetBuilds(
+		ctx, appID,
+		asc.WithBuildsVersion(buildNumber),
+		asc.WithBuildsInclude([]string{"buildUpload"}),
+		asc.WithBuildsLimit(200),
+	)
+	if err != nil {
+		return "", err
+	}
+	for _, build := range builds.Data {
+		buildUploadID, err := buildUploadIDForBuild(build)
+		if err != nil {
+			return "", err
+		}
+		if buildUploadID == uploadID {
+			return strings.TrimSpace(build.ID), nil
+		}
+	}
+	return "", nil
 }
 
 func findBuildByNumber(ctx context.Context, client *asc.Client, appID, version, buildNumber, platform, uploadID string) (*asc.BuildResponse, error) {
