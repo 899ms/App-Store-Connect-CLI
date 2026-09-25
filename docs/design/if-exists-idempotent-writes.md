@@ -139,8 +139,15 @@ case `--if-exists` covers:
   `PATCH /v1/appStoreVersionLocalizations/{id}` or
   `PATCH /v1/appInfoLocalizations/{id}` on the localization the read-back
   found, then records `action: update` with `alreadyExists: true`. The body
-  carries only the fields the local file set; `locale` is immutable and is
-  never sent.
+  carries only the fields the local file set, plus its explicit `null`
+  clears as JSON `null`; `locale` is immutable and is never sent. A create
+  cannot carry a clear, so the create's read-back never counts as a match when
+  the file clears a field: the existing localization is re-read against the
+  full desired state, clears included, before deciding whether to PATCH.
+  Because the plan lists such a locale as a create rather than as a "field
+  cleared locally" update, `--if-exists update` requires `--confirm` up front,
+  before any request, whenever a locale planned as a create also clears a
+  field. `skip` never applies a clear and needs no confirmation.
 
 App-info localization creates require `name`, but a patch-only file can still
 be applied when another writer creates that locale after the initial read:

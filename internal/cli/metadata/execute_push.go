@@ -255,6 +255,11 @@ func ExecutePushWithWarnings(ctx context.Context, opts PushExecutionOptions) (Pu
 			}
 		}
 	}
+	if ifExistsMode == shared.IfExistsUpdate && !opts.Confirm {
+		if scope, locale, ok := firstPlannedCreateClear(localAppInfo, remoteAppInfo, localVersion, remoteVersion); ok {
+			return PushPlanResult{}, nil, shared.UsageError(fmt.Sprintf("--confirm is required when --if-exists update may apply field clear operations (%s localization %q is planned as a create and clears fields if it already exists)", scope, locale))
+		}
+	}
 
 	actions, applyErr := applyMetadataPlan(
 		ctx,
@@ -305,6 +310,30 @@ func ExecutePushWithWarnings(ctx context.Context, opts PushExecutionOptions) (Pu
 // being silently treated as a no-op when its version localization is missing.
 // Set fields can still create a localization; a null field on that new resource
 // is already empty and remains omitted from the create payload.
+// firstPlannedCreateClear reports the first locale planned as a create whose
+// file also clears fields. A create cannot carry those clears, so the plan
+// never lists them as "field cleared locally", but --if-exists update applies
+// them when the locale turns out to exist and must be confirmed like any other
+// clear.
+func firstPlannedCreateClear(
+	localAppInfo map[string]appInfoLocalPatch,
+	remoteAppInfo map[string]AppInfoLocalization,
+	localVersion map[string]versionLocalPatch,
+	remoteVersion map[string]VersionLocalization,
+) (string, string, bool) {
+	for _, locale := range sortedKeys(localAppInfo) {
+		if _, exists := remoteAppInfo[locale]; !exists && len(localAppInfo[locale].clearFields) > 0 {
+			return appInfoDirName, locale, true
+		}
+	}
+	for _, locale := range sortedKeys(localVersion) {
+		if _, exists := remoteVersion[locale]; !exists && len(localVersion[locale].clearFields) > 0 {
+			return versionDirName, locale, true
+		}
+	}
+	return "", "", false
+}
+
 func validateVersionClearOnlyLocales(
 	localVersion map[string]versionLocalPatch,
 	remoteVersion map[string]VersionLocalization,

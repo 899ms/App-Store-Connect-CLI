@@ -110,7 +110,7 @@ asc metadata push --app "APP_ID" --version "1.2.3" --dir "./metadata" --allow-de
 * With `--allow-deletes`, remote locales missing locally are planned as deletes
 * Omitted fields are treated as no-op; they do not imply deletion
 * Explicit `null` clears only supported nullable fields and requires an existing locale when it is the file's only intent
-* `--if-exists skip` records an existing locale as `status: skipped` and leaves it untouched; `--if-exists update` applies the planned fields to it instead. `fail` keeps today's behavior and reports the conflict.
+* `--if-exists skip` records an existing locale as `status: skipped` and leaves it untouched; `--if-exists update` applies the planned fields, including explicit `null` clears, to it instead and requires `--confirm` when a locale planned as a create clears a field. `fail` keeps today's behavior and reports the conflict.
 
 ### metadata validate
 
