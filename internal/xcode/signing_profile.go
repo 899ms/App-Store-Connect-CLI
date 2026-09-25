@@ -191,7 +191,11 @@ func inferSigningSettings(project *structuredVersionProject, opts SigningPlanOpt
 
 	method := strings.TrimSpace(opts.ExportMethod)
 	if method == "" {
-		method, warnings = inferSigningExportMethod(assigned, warnings)
+		var methodBlocker string
+		method, methodBlocker = inferSigningExportMethod(assigned)
+		if methodBlocker != "" {
+			blockers = append(blockers, methodBlocker)
+		}
 	}
 	exportOptions := signingExportOptions(method, assigned)
 	if len(assigned) > 1 {
@@ -508,18 +512,27 @@ func cloneSigningManifestConfiguration(configuration signingManifestConfiguratio
 	return cloned
 }
 
-func inferSigningExportMethod(assigned []signingProfileAssignment, warnings []string) (string, []string) {
+// inferSigningExportMethod returns the one export method every selected
+// profile implies. One ExportOptions.plist applies a single method to every
+// target, so profiles that imply different methods cannot be exported
+// together; that is a blocker unless the caller names --export-method.
+func inferSigningExportMethod(assigned []signingProfileAssignment) (string, string) {
 	if len(assigned) == 0 {
-		return "", warnings
+		return "", ""
 	}
-	method := assigned[0].profile.method
-	for _, item := range assigned[1:] {
-		if item.profile.method != method {
-			warnings = append(warnings, fmt.Sprintf("selected profiles imply different export methods; using %s", method))
-			break
-		}
+	methods := make(map[string]bool)
+	for _, item := range assigned {
+		methods[item.profile.method] = true
 	}
-	return method, warnings
+	if len(methods) == 1 {
+		return assigned[0].profile.method, ""
+	}
+	names := make([]string, 0, len(methods))
+	for method := range methods {
+		names = append(names, method)
+	}
+	sort.Strings(names)
+	return names[0], fmt.Sprintf("selected profiles imply different export methods (%s); pass --export-method to choose one", strings.Join(names, ", "))
 }
 
 func signingExportOptions(method string, assigned []signingProfileAssignment) *SigningPlanExportOptions {

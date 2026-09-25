@@ -415,3 +415,37 @@ func TestInferSigningPlanMatchesMacOSProfilesByPlatform(t *testing.T) {
 		t.Fatalf("export options = %#v, want developer-id", plan.ExportOptions)
 	}
 }
+
+func TestInferSigningPlanBlocksMixedExportMethods(t *testing.T) {
+	requireStrictSigningPlatform(t)
+	project := writeInferredSigningProject(t)
+	root := t.TempDir()
+	store := writeSigningTestProfileWith(t, filepath.Join(root, "App.mobileprovision"), "App Store", "12121212-1212-1212-1212-121212121212", "ABCDE12345.com.example.demo", time.Now().Add(time.Hour), func(payload map[string]any) {
+		delete(payload, "ProvisionedDevices")
+	})
+	development := writeSigningTestProfile(t, filepath.Join(root, "Widget.mobileprovision"), "Widget Development", "34343434-3434-3434-3434-343434343434", "ABCDE12345.com.example.demo.widget", time.Now().Add(time.Hour))
+	options := SigningPlanOptions{
+		ProjectPath:   project,
+		ProfilePaths:  []string{store, development},
+		Configuration: "Release",
+		SkipTargets:   []string{"Watch"},
+		StateDir:      filepath.Join(root, "state"),
+	}
+	plan, err := BuildSigningPlan(options)
+	if err != nil {
+		t.Fatalf("BuildSigningPlan() error = %v", err)
+	}
+	if plan.Ready || !strings.Contains(strings.Join(plan.Blockers, "\n"), "different export methods") {
+		t.Fatalf("ready=%t blockers=%v, want a mixed export method blocker", plan.Ready, plan.Blockers)
+	}
+
+	options.ExportMethod = "development"
+	options.StateDir = filepath.Join(root, "state-explicit")
+	explicit, err := BuildSigningPlan(options)
+	if err != nil {
+		t.Fatalf("BuildSigningPlan() error = %v", err)
+	}
+	if !explicit.Ready || explicit.ExportOptions == nil || explicit.ExportOptions.Method != "development" {
+		t.Fatalf("explicit method plan ready=%t blockers=%v export=%#v", explicit.Ready, explicit.Blockers, explicit.ExportOptions)
+	}
+}
