@@ -805,3 +805,33 @@ func TestInferSigningPlanExportOptionsFollowFinalSigningStyle(t *testing.T) {
 		t.Fatalf("export options = %#v, want none when every target signs automatically", automatic.ExportOptions)
 	}
 }
+
+func TestInferSigningPlanExportOptionsAcceptProfileUUIDOverrides(t *testing.T) {
+	requireStrictSigningPlatform(t)
+	project := writeInferredSigningProject(t)
+	root := t.TempDir()
+	unrelated := writeSigningTestProfile(t, filepath.Join(root, "Other.mobileprovision"), "Other", "79797979-7979-7979-7979-797979797979", "ABCDE12345.org.other.app", time.Now().Add(time.Hour))
+	settingsPath := filepath.Join(root, "settings.json")
+	writeSigningSettingsTestFile(t, settingsPath, `{
+		"schemaVersion": 1,
+		"targets": [{
+			"name": "App",
+			"configurations": [{"name": "Release", "settings": {"CODE_SIGN_STYLE": "Manual", "PROVISIONING_PROFILE": "8A8A8A8A-8A8A-8A8A-8A8A-8A8A8A8A8A8A", "DEVELOPMENT_TEAM": "ABCDE12345"}}]
+		}]
+	}`)
+	plan, err := BuildSigningPlan(SigningPlanOptions{
+		ProjectPath:      project,
+		SettingsFilePath: settingsPath,
+		ProfilePaths:     []string{unrelated},
+		Configuration:    "Release",
+		ExportMethod:     "app-store",
+		SkipTargets:      []string{"Widget", "Watch"},
+		StateDir:         filepath.Join(root, "state"),
+	})
+	if err != nil {
+		t.Fatalf("BuildSigningPlan() error = %v", err)
+	}
+	if !plan.Ready || plan.ExportOptions == nil || plan.ExportOptions.ProvisioningProfiles["com.example.demo"] != "8A8A8A8A-8A8A-8A8A-8A8A-8A8A8A8A8A8A" {
+		t.Fatalf("ready=%t blockers=%v export=%#v, want the UUID mapping", plan.Ready, plan.Blockers, plan.ExportOptions)
+	}
+}

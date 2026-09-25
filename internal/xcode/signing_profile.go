@@ -629,6 +629,13 @@ func signingExportOptions(method string, assigned, settingsOnly []signingProfile
 		if value, found := signingManifestString(manifest, item.target, item.configuration, "PROVISIONING_PROFILE_SPECIFIER"); found {
 			name = value
 		}
+		if name == "" {
+			// ExportOptions accepts a profile UUID as well as a name, so a
+			// target pinned only by PROVISIONING_PROFILE still maps.
+			if value, found := signingManifestString(manifest, item.target, item.configuration, "PROVISIONING_PROFILE"); found {
+				name = value
+			}
+		}
 		if value, found := signingManifestString(manifest, item.target, item.configuration, "DEVELOPMENT_TEAM"); found {
 			team = value
 		}
