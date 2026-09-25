@@ -345,3 +345,25 @@ func TestSigningFetchTableShowsStaleProfiles(t *testing.T) {
 		t.Fatalf("table output = %q, want stale columns", stdout)
 	}
 }
+
+func TestSigningFetchDeleteStaleRejectsUnsupportedTypesBeforeRequests(t *testing.T) {
+	for name, extra := range map[string][]string{
+		"certificate type": {"--certificate-type", "NOT_A_TYPE"},
+		"profile type":     {"--profile-type", "NOT_A_PROFILE_TYPE"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stub := startStaleProfilesStub(t, staleProfilesStubConfig{})
+			args := append([]string{"--delete-stale-profiles", "--confirm", "--output", t.TempDir()}, extra...)
+			code, stdout, stderr := runStaleSigningFetch(t, args...)
+			if code != rootcmd.ExitUsage {
+				t.Fatalf("exit code = %d, want %d (stderr %q)", code, rootcmd.ExitUsage, stderr)
+			}
+			if stdout != "" || !strings.Contains(stderr, "--delete-stale-profiles:") {
+				t.Fatalf("stdout = %q, stderr = %q", stdout, stderr)
+			}
+			if got := stub.snapshot(); len(got) != 0 {
+				t.Fatalf("requests = %v, want none before validation", got)
+			}
+		})
+	}
+}

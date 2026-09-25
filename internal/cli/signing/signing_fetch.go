@@ -127,6 +127,15 @@ Examples:
 				fmt.Fprintln(os.Stderr, "Error: --confirm is required with --delete-stale-profiles")
 				return shared.MissingRequiredUsageError("--confirm")
 			}
+			if *deleteStale {
+				// Deletions are irreversible, so every value that would make the
+				// later fetch fail deterministically is rejected before them.
+				if _, err := resolveSigningCertificateTypes(profType, *certType); err != nil {
+					message := fmt.Sprintf("--delete-stale-profiles: %v", err)
+					fmt.Fprintln(os.Stderr, "Error: "+message)
+					return shared.NewReportedUsageError(shared.UsageErrorInvalidValue, message)
+				}
+			}
 			if err := rejectDeviceWithoutCreateMissing(*deviceIDs, *createMissing); err != nil {
 				return err
 			}
