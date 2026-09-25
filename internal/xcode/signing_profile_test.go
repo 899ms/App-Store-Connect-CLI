@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -271,5 +272,45 @@ func TestSelectSigningProfilePrefersNarrowerWildcard(t *testing.T) {
 	selected, _, _ := selectSigningProfile([]signingProfile{team, narrow}, "com.example.demo")
 	if selected == nil || selected.name != "Narrow" {
 		t.Fatalf("selected = %#v, want narrower wildcard", selected)
+	}
+}
+
+func TestInferSigningPlanIgnoresExpiredProfiles(t *testing.T) {
+	requireStrictSigningPlatform(t)
+	project := writeInferredSigningProject(t)
+	root := t.TempDir()
+	expired := writeSigningTestProfile(t, filepath.Join(root, "Expired.mobileprovision"), "Expired Exact", "55555555-5555-5555-5555-555555555555", "ABCDE12345.com.example.demo", time.Now().Add(-time.Hour))
+	wildcard := writeSigningTestProfile(t, filepath.Join(root, "Wild.mobileprovision"), "Live Wildcard", "66666666-6666-6666-6666-666666666666", "ABCDE12345.com.example.*", time.Now().Add(time.Hour))
+	plan, err := BuildSigningPlan(SigningPlanOptions{
+		ProjectPath:   project,
+		ProfilePaths:  []string{expired, wildcard},
+		Configuration: "Release",
+		StateDir:      filepath.Join(root, "state"),
+	})
+	if err != nil {
+		t.Fatalf("BuildSigningPlan() error = %v", err)
+	}
+	if !plan.Ready {
+		t.Fatalf("expected ready plan, blockers=%v", plan.Blockers)
+	}
+	if !signingPlanSettingEquals(plan, "App", "Release", "PROVISIONING_PROFILE_SPECIFIER", "Live Wildcard") {
+		t.Fatalf("expired exact profile was selected: %#v", plan.Inferences)
+	}
+
+	onlyExpired, err := BuildSigningPlan(SigningPlanOptions{
+		ProjectPath:   project,
+		ProfilePaths:  []string{expired},
+		Configuration: "Release",
+		SkipTargets:   []string{"Widget", "Watch"},
+		StateDir:      filepath.Join(root, "state-expired"),
+	})
+	if err != nil {
+		t.Fatalf("BuildSigningPlan() error = %v", err)
+	}
+	if onlyExpired.Ready {
+		t.Fatalf("plan using only an expired profile must be blocked: %#v", onlyExpired.Inferences)
+	}
+	if !strings.Contains(strings.Join(onlyExpired.Blockers, "\n"), "expired") {
+		t.Fatalf("blockers = %v, want an expired-profile explanation", onlyExpired.Blockers)
 	}
 }

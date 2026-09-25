@@ -88,6 +88,10 @@ func inferSigningSettings(project *structuredVersionProject, opts SigningPlanOpt
 	}
 	sort.Strings(skipTargets)
 
+	// An expired profile can no longer sign or export, so it is never an
+	// inference candidate; it is reported only when nothing else matches.
+	active, expired := partitionExpiredSigningProfiles(profiles, signingProfileNow())
+
 	configurationFilter := strings.TrimSpace(opts.Configuration)
 	scopes := signingInferenceScopes(project, configurationFilter)
 	if configurationFilter != "" && len(scopes) == 0 {
@@ -123,12 +127,16 @@ func inferSigningSettings(project *structuredVersionProject, opts SigningPlanOpt
 			blockers = append(blockers, fmt.Sprintf("unmatched signing target %s/%s: %s", scope.target, scope.name, detail))
 			continue
 		}
-		selected, discarded, match := selectSigningProfile(profiles, bundleID)
+		selected, discarded, match := selectSigningProfile(active, bundleID)
 		if selected == nil {
 			if covered[scope.target+"\x00"+scope.name] {
 				continue
 			}
-			blockers = append(blockers, fmt.Sprintf("unmatched signing target %s/%s bundle ID %s", scope.target, scope.name, bundleID))
+			detail := ""
+			if stale, _, _ := selectSigningProfile(expired, bundleID); stale != nil {
+				detail = fmt.Sprintf("; profile %s expired at %s", stale.name, stale.expires.UTC().Format(time.RFC3339))
+			}
+			blockers = append(blockers, fmt.Sprintf("unmatched signing target %s/%s bundle ID %s%s", scope.target, scope.name, bundleID, detail))
 			continue
 		}
 		if len(discarded) > 0 {
@@ -205,6 +213,22 @@ func inferSigningSettings(project *structuredVersionProject, opts SigningPlanOpt
 		blockers:      blockers,
 		warnings:      warnings,
 	}, nil
+}
+
+// signingProfileNow is the clock used to exclude expired profiles.
+var signingProfileNow = time.Now
+
+func partitionExpiredSigningProfiles(profiles []signingProfile, now time.Time) ([]signingProfile, []signingProfile) {
+	active := make([]signingProfile, 0, len(profiles))
+	expired := make([]signingProfile, 0)
+	for _, profile := range profiles {
+		if !profile.expires.IsZero() && !profile.expires.After(now) {
+			expired = append(expired, profile)
+			continue
+		}
+		active = append(active, profile)
+	}
+	return active, expired
 }
 
 func signingInferenceScopes(project *structuredVersionProject, configuration string) []*versionConfiguration {
