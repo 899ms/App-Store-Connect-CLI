@@ -94,7 +94,7 @@ func xcodeSigningPlanCommand() *ffcli.Command {
 	fs.Var(&skipTargets, "skip-target", "Target that may remain unmatched without blocking the plan (repeatable)")
 	stateDir := fs.String("state-dir", ".asc/xcode/signing", "Directory for plan and receipt artifacts")
 	allowExternalXCConfig := fs.Bool("allow-external-xcconfig", false, "Allow updating xcconfig files outside the project directory")
-	overwrite := fs.Bool("overwrite", false, "Replace an existing plan artifact")
+	overwrite := fs.Bool("overwrite", false, "Replace an existing plan artifact and --export-options-out file")
 	output := shared.BindOutputFlags(fs)
 
 	return &ffcli.Command{
@@ -107,11 +107,15 @@ The settings file must contain schemaVersion 1 and explicit target,
 configuration, and allowlisted signing-setting values. Pass one or more
 --profile files to infer CODE_SIGN_STYLE, DEVELOPMENT_TEAM, CODE_SIGN_IDENTITY,
 and PROVISIONING_PROFILE_SPECIFIER from each target's bundle identifier.
---settings-file overrides inferred values. A representable blocked plan is
-written with ready=false and explains the blocker without changing the
-project. Any unauthorized external xcconfig prevents artifact publication
-because its contents cannot be safely inventoried; pass
---allow-external-xcconfig to authorize reading it.
+Only application and extension targets are inferred, expired profiles are
+never selected, and a macOS target matches only macOS profiles.
+--settings-file overrides inferred values. --configuration, --export-method,
+--export-options-out, and --skip-target require --profile.
+
+A representable blocked plan is written with ready=false and explains the
+blocker without changing the project. Any unauthorized external xcconfig
+prevents artifact publication because its contents cannot be safely
+inventoried; pass --allow-external-xcconfig to authorize reading it.
 
 Examples:
   asc xcode signing plan --project ./App.xcodeproj --settings-file .asc/xcode-signing.json
@@ -128,8 +132,25 @@ Examples:
 				return shared.MissingRequiredUsageError("--project")
 			}
 			if strings.TrimSpace(*settingsFile) == "" && len(profiles) == 0 {
-				fmt.Fprintln(os.Stderr, "Error: --settings-file is required")
+				fmt.Fprintln(os.Stderr, "Error: --settings-file or --profile is required")
 				return shared.MissingRequiredUsageError("--settings-file")
+			}
+			if len(profiles) == 0 {
+				// These flags only shape profile inference; accepting them
+				// with a settings file alone would silently ignore them.
+				for _, item := range []struct {
+					name  string
+					value string
+				}{
+					{"--configuration", *configuration},
+					{"--export-method", *exportMethod},
+					{"--export-options-out", *exportOptionsOut},
+					{"--skip-target", strings.Join(skipTargets, ",")},
+				} {
+					if strings.TrimSpace(item.value) != "" {
+						return shared.UsageErrorf("%s requires --profile", item.name)
+					}
+				}
 			}
 			method, err := normalizeSigningExportMethod(*exportMethod)
 			if err != nil {
@@ -143,6 +164,14 @@ Examples:
 			}
 			if _, err := shared.ValidateOutputFormat(*output.Output, *output.Pretty); err != nil {
 				return shared.UsageError(err.Error())
+			}
+			exportOptionsPath := strings.TrimSpace(*exportOptionsOut)
+			if exportOptionsPath != "" {
+				// Reject an unwritable or existing destination before the plan
+				// artifact is published, so a failure leaves nothing behind.
+				if err := localxcode.CheckSigningExportOptionsDestination(exportOptionsPath, *overwrite); err != nil {
+					return fmt.Errorf("xcode signing plan: %w", err)
+				}
 			}
 			plan, err := runBuildSigningPlan(localxcode.SigningPlanOptions{
 				ProjectPath:           strings.TrimSpace(*project),
@@ -163,8 +192,10 @@ Examples:
 			if err := writeSigningPlanArtifact(plan, *overwrite); err != nil {
 				return fmt.Errorf("xcode signing plan: %w", err)
 			}
-			if strings.TrimSpace(*exportOptionsOut) != "" {
-				if err := localxcode.WriteSigningExportOptions(strings.TrimSpace(*exportOptionsOut), plan.ExportOptions); err != nil {
+			if exportOptionsPath != "" {
+				if plan.ExportOptions == nil {
+					fmt.Fprintf(os.Stderr, "Warning: export options were not written to %s because no provisioning profile was selected\n", exportOptionsPath)
+				} else if err := localxcode.WriteSigningExportOptions(exportOptionsPath, plan.ExportOptions, *overwrite); err != nil {
 					return fmt.Errorf("xcode signing plan: %w", err)
 				}
 			}

@@ -785,8 +785,46 @@ func cloneSigningExportOptions(options *SigningPlanExportOptions) *SigningPlanEx
 	return &cloned
 }
 
-// WriteSigningExportOptions writes an ExportOptions.plist for a planned profile set.
-func WriteSigningExportOptions(path string, options *SigningPlanExportOptions) error {
+// CheckSigningExportOptionsDestination verifies, without writing, that
+// WriteSigningExportOptions can publish path: an existing file is accepted
+// only when overwrite is set.
+func CheckSigningExportOptionsDestination(path string, overwrite bool) error {
+	root, name, err := openSigningExportOptionsRoot(path)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	if overwrite {
+		err = root.CheckWriteFile(name)
+	} else {
+		err = root.CheckCreateNewFile(name)
+	}
+	if err != nil {
+		return fmt.Errorf("export options %s: %w", filepath.Join(root.Path(), name), err)
+	}
+	return nil
+}
+
+func openSigningExportOptionsRoot(path string) (rootfs.Root, string, error) {
+	absolute, err := canonicalSigningPath(path, "export options")
+	if err != nil {
+		return rootfs.Root{}, "", err
+	}
+	parent := filepath.Dir(absolute)
+	parentInfo, statErr := os.Lstat(parent)
+	if statErr == nil && parentInfo.Mode()&os.ModeSymlink != 0 {
+		return rootfs.Root{}, "", fmt.Errorf("export options %s: %w", absolute, rootfs.ErrSymlink)
+	}
+	root, err := rootfs.New(parent)
+	if err != nil {
+		return rootfs.Root{}, "", fmt.Errorf("export options %s: %w", absolute, err)
+	}
+	return root, filepath.Base(absolute), nil
+}
+
+// WriteSigningExportOptions writes an ExportOptions.plist for a planned
+// profile set. An existing file is replaced only when overwrite is set.
+func WriteSigningExportOptions(path string, options *SigningPlanExportOptions, overwrite bool) error {
 	if options == nil || strings.TrimSpace(options.Method) == "" {
 		return fmt.Errorf("export options were not inferred")
 	}
@@ -804,22 +842,18 @@ func WriteSigningExportOptions(path string, options *SigningPlanExportOptions) e
 	if err != nil {
 		return fmt.Errorf("encode export options: %w", err)
 	}
-	absolute, err := canonicalSigningPath(path, "export options")
-	if err != nil {
-		return err
-	}
-	parent := filepath.Dir(absolute)
-	parentInfo, statErr := os.Lstat(parent)
-	if statErr == nil && parentInfo.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("write export options %s: %w", absolute, rootfs.ErrSymlink)
-	}
-	root, err := rootfs.New(parent)
+	root, name, err := openSigningExportOptionsRoot(path)
 	if err != nil {
 		return err
 	}
 	defer root.Close()
-	if err := root.CreateNewFile(filepath.Base(absolute), data, 0o600); err != nil {
-		return fmt.Errorf("write export options %s: %w", absolute, err)
+	if overwrite {
+		err = root.WriteFile(name, data, 0o600)
+	} else {
+		err = root.CreateNewFile(name, data, 0o600)
+	}
+	if err != nil {
+		return fmt.Errorf("write export options %s: %w", filepath.Join(root.Path(), name), err)
 	}
 	return nil
 }

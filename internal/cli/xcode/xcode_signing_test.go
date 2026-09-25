@@ -523,3 +523,118 @@ func TestXcodeSigningPlanRejectsUnknownExportMethod(t *testing.T) {
 		t.Fatalf("expected usage error, got %v", err)
 	}
 }
+
+func stubXcodeSigningPlanSideEffects(t *testing.T) (*bool, *bool) {
+	t.Helper()
+	originalBuild := runBuildSigningPlan
+	originalWrite := writeSigningPlanArtifact
+	t.Cleanup(func() {
+		runBuildSigningPlan = originalBuild
+		writeSigningPlanArtifact = originalWrite
+	})
+	calledBuild := false
+	calledWrite := false
+	runBuildSigningPlan = func(localxcode.SigningPlanOptions) (*localxcode.SigningPlan, error) {
+		calledBuild = true
+		return &localxcode.SigningPlan{
+			Ready:         true,
+			PlanPath:      "plan.json",
+			ExportOptions: &localxcode.SigningPlanExportOptions{Method: "app-store", SigningStyle: "manual"},
+		}, nil
+	}
+	writeSigningPlanArtifact = func(*localxcode.SigningPlan, bool) error {
+		calledWrite = true
+		return nil
+	}
+	return &calledBuild, &calledWrite
+}
+
+func TestXcodeSigningPlanRejectsInferenceFlagsWithoutProfile(t *testing.T) {
+	for _, extra := range [][]string{
+		{"--configuration", "Release"},
+		{"--export-method", "app-store"},
+		{"--export-options-out", "ExportOptions.plist"},
+		{"--skip-target", "Widget"},
+	} {
+		calledBuild, calledWrite := stubXcodeSigningPlanSideEffects(t)
+		command := xcodeSigningPlanCommand()
+		command.FlagSet.SetOutput(io.Discard)
+		args := append([]string{"--project", "App.xcodeproj", "--settings-file", "settings.json"}, extra...)
+		if err := command.FlagSet.Parse(args); err != nil {
+			t.Fatalf("Parse() error = %v", err)
+		}
+		var err error
+		_, stderr := captureCommandOutput(t, func() error { err = command.Exec(context.Background(), nil); return err })
+		if !isUsageError(err) {
+			t.Fatalf("%v: expected usage error, got %v", extra, err)
+		}
+		if !strings.Contains(err.Error()+stderr, extra[0]+" requires --profile") {
+			t.Fatalf("%v: error = %v stderr = %q", extra, err, stderr)
+		}
+		if *calledBuild || *calledWrite {
+			t.Fatalf("%v: plan side effects ran before validation", extra)
+		}
+	}
+}
+
+func TestXcodeSigningPlanMissingInputNamesProfile(t *testing.T) {
+	command := xcodeSigningPlanCommand()
+	command.FlagSet.SetOutput(io.Discard)
+	if err := command.FlagSet.Parse([]string{"--project", "App.xcodeproj"}); err != nil {
+		t.Fatal(err)
+	}
+	var err error
+	_, stderr := captureCommandOutput(t, func() error { err = command.Exec(context.Background(), nil); return err })
+	if !isUsageError(err) {
+		t.Fatalf("expected usage error, got %v", err)
+	}
+	if !strings.Contains(stderr, "--settings-file or --profile is required") {
+		t.Fatalf("stderr = %q", stderr)
+	}
+}
+
+func TestXcodeSigningPlanRejectsExistingExportOptionsBeforeWritingPlan(t *testing.T) {
+	calledBuild, calledWrite := stubXcodeSigningPlanSideEffects(t)
+	existing := filepath.Join(t.TempDir(), "ExportOptions.plist")
+	if err := os.WriteFile(existing, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := xcodeSigningPlanCommand()
+	command.FlagSet.SetOutput(io.Discard)
+	if err := command.FlagSet.Parse([]string{"--project", "App.xcodeproj", "--profile", "App.mobileprovision", "--export-options-out", existing, "--output", "json"}); err != nil {
+		t.Fatal(err)
+	}
+	err := command.Exec(context.Background(), nil)
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("error = %v, want existing export options rejection", err)
+	}
+	if *calledBuild || *calledWrite {
+		t.Fatalf("plan was built or written before the export options destination was validated")
+	}
+	data, readErr := os.ReadFile(existing)
+	if readErr != nil || string(data) != "keep" {
+		t.Fatalf("existing export options changed: %q %v", data, readErr)
+	}
+}
+
+func TestXcodeSigningPlanOverwriteReplacesExportOptions(t *testing.T) {
+	stubXcodeSigningPlanSideEffects(t)
+	existing := filepath.Join(t.TempDir(), "ExportOptions.plist")
+	if err := os.WriteFile(existing, []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := xcodeSigningPlanCommand()
+	command.FlagSet.SetOutput(io.Discard)
+	if err := command.FlagSet.Parse([]string{"--project", "App.xcodeproj", "--profile", "App.mobileprovision", "--export-options-out", existing, "--overwrite", "--output", "json"}); err != nil {
+		t.Fatal(err)
+	}
+	var execErr error
+	captureCommandOutput(t, func() error { execErr = command.Exec(context.Background(), nil); return execErr })
+	if execErr != nil {
+		t.Fatalf("Exec() error = %v", execErr)
+	}
+	data, err := os.ReadFile(existing)
+	if err != nil || !strings.Contains(string(data), "<string>app-store</string>") {
+		t.Fatalf("export options were not replaced: %q %v", data, err)
+	}
+}
