@@ -654,3 +654,38 @@ func TestInferSigningPlanUsesGenericIdentityForMultiCertificateProfiles(t *testi
 		t.Fatalf("identity is not the generic certificate kind: %#v", plan.Desired)
 	}
 }
+
+func TestInferSigningPlanKeepsBlockerForIncompleteOverride(t *testing.T) {
+	requireStrictSigningPlatform(t)
+	project := writeInferredSigningProject(t)
+	root := t.TempDir()
+	profile := writeSigningTestProfile(t, filepath.Join(root, "App.mobileprovision"), "App Profile", "13131313-1313-1313-1313-131313131313", "ABCDE12345.com.example.demo", time.Now().Add(time.Hour))
+	settingsPath := filepath.Join(root, "settings.json")
+	writeSigningSettingsTestFile(t, settingsPath, `{
+		"schemaVersion": 1,
+		"targets": [{
+			"name": "Widget",
+			"configurations": [{"name": "Release", "settings": {"CODE_SIGN_IDENTITY": "Apple Distribution"}}]
+		}, {
+			"name": "Watch",
+			"configurations": [{"name": "Release", "settings": {"CODE_SIGN_STYLE": "Automatic"}}]
+		}]
+	}`)
+	plan, err := BuildSigningPlan(SigningPlanOptions{
+		ProjectPath:      project,
+		SettingsFilePath: settingsPath,
+		ProfilePaths:     []string{profile},
+		Configuration:    "Release",
+		StateDir:         filepath.Join(root, "state"),
+	})
+	if err != nil {
+		t.Fatalf("BuildSigningPlan() error = %v", err)
+	}
+	blockers := strings.Join(plan.Blockers, "\n")
+	if plan.Ready || !strings.Contains(blockers, "Widget/Release") {
+		t.Fatalf("ready=%t blockers=%v, want the Widget blocker kept", plan.Ready, plan.Blockers)
+	}
+	if strings.Contains(blockers, "Watch/Release") {
+		t.Fatalf("blockers=%v, an Automatic signing override should cover Watch", plan.Blockers)
+	}
+}

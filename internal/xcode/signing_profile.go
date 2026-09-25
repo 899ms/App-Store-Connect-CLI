@@ -365,10 +365,31 @@ func signingManifestCoverage(manifest *signingSettingsManifest) map[string]bool 
 	}
 	for _, target := range manifest.Targets {
 		for _, configuration := range target.Configurations {
-			covered[strings.TrimSpace(target.Name)+"\x00"+strings.TrimSpace(configuration.Name)] = true
+			if signingOverrideCoversProfile(configuration.Settings) {
+				covered[strings.TrimSpace(target.Name)+"\x00"+strings.TrimSpace(configuration.Name)] = true
+			}
 		}
 	}
 	return covered
+}
+
+// signingOverrideCoversProfile reports whether a settings-file entry decides
+// how an unmatched target is signed: it names a provisioning profile or
+// switches the target to automatic signing. An entry that only touches an
+// unrelated setting (for example CODE_SIGN_IDENTITY) leaves the target
+// without a profile, so its unmatched blocker must stay.
+func signingOverrideCoversProfile(settings map[string]json.RawMessage) bool {
+	for _, key := range []string{"PROVISIONING_PROFILE_SPECIFIER", "PROVISIONING_PROFILE"} {
+		var value string
+		if raw, ok := settings[key]; ok && json.Unmarshal(raw, &value) == nil && strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	var style string
+	if raw, ok := settings["CODE_SIGN_STYLE"]; ok && json.Unmarshal(raw, &style) == nil {
+		return strings.EqualFold(strings.TrimSpace(style), "Automatic")
+	}
+	return false
 }
 
 func selectSigningProfile(profiles []signingProfile, bundleID string) (*signingProfile, []signingProfile, string) {
