@@ -23,6 +23,10 @@ type PushExecutionOptions struct {
 	AllowDeletes bool
 	Confirm      bool
 	ReviewDir    string
+	// IfExists selects what an apply does when App Store Connect rejects a
+	// localization create because the locale already exists. An empty value
+	// means fail, which is the historical behavior.
+	IfExists string
 }
 
 // ExecutePush computes and optionally applies a metadata push plan.
@@ -54,6 +58,14 @@ func ExecutePushWithWarnings(ctx context.Context, opts PushExecutionOptions) (Pu
 	}
 	if strings.TrimSpace(opts.ReviewDir) != "" && !opts.DryRun && !opts.Confirm {
 		return PushPlanResult{}, nil, shared.UsageError("--confirm is required when applying an approved metadata plan")
+	}
+
+	// Unset means fail: release orchestration builds these options without a
+	// conflict policy. Command code validates the raw flag at its own boundary,
+	// so an explicit --if-exists "" never reaches here as an empty value.
+	ifExistsMode, err := shared.ParseOptionalIfExistsMode(opts.IfExists, shared.IfExistsSkip, shared.IfExistsUpdate)
+	if err != nil {
+		return PushPlanResult{}, nil, err
 	}
 
 	platformValue := strings.TrimSpace(opts.Platform)
@@ -154,8 +166,19 @@ func ExecutePushWithWarnings(ctx context.Context, opts PushExecutionOptions) (Pu
 	if err := validateVersionClearOnlyLocales(localVersion, remoteVersion); err != nil {
 		return PushPlanResult{}, nil, shared.UsageError(err.Error())
 	}
+	lateAppInfoIDs := map[string]string(nil)
 	if err := validateMetadataCreatePrerequisites(localAppInfo, remoteAppInfo); err != nil {
-		return PushPlanResult{}, nil, shared.UsageError(err.Error())
+		if opts.DryRun || ifExistsMode == shared.IfExistsFail {
+			return PushPlanResult{}, nil, shared.UsageError(err.Error())
+		}
+		var missingLocale string
+		lateAppInfoIDs, missingLocale, err = findLateExistingAppInfoLocalizations(ctx, client, appInfoIDValue, localAppInfo, remoteAppInfo)
+		if err != nil {
+			return PushPlanResult{}, nil, fmt.Errorf("%s: %w", errorPrefix, err)
+		}
+		if missingLocale != "" {
+			return PushPlanResult{}, nil, shared.UsageError(fmt.Sprintf("app-info localization %q requires name when creating a new locale", missingLocale))
+		}
 	}
 	warningMode := shared.SubmitReadinessCreateModePlanned
 	if !opts.DryRun {
@@ -232,6 +255,11 @@ func ExecutePushWithWarnings(ctx context.Context, opts PushExecutionOptions) (Pu
 			}
 		}
 	}
+	if ifExistsMode == shared.IfExistsUpdate && !opts.Confirm {
+		if scope, locale, ok := firstPlannedCreateClear(localAppInfo, remoteAppInfo, localVersion, remoteVersion); ok {
+			return PushPlanResult{}, nil, shared.UsageError(fmt.Sprintf("--confirm is required when --if-exists update may apply field clear operations (%s localization %q is planned as a create and clears fields if it already exists)", scope, locale))
+		}
+	}
 
 	actions, applyErr := applyMetadataPlan(
 		ctx,
@@ -244,15 +272,19 @@ func ExecutePushWithWarnings(ctx context.Context, opts PushExecutionOptions) (Pu
 		remoteAppInfoItems,
 		remoteVersionItems,
 		opts.AllowDeletes,
+		metadataIfExistsOptions{mode: ifExistsMode, prefix: errorPrefix, lateAppInfoIDs: lateAppInfoIDs},
 	)
 	result.Actions = actions
 	result.Total = len(actions)
 	for _, action := range actions {
-		if action.Status == "failed" {
+		switch action.Status {
+		case metadataActionStatusFailed:
 			result.Failed++
-			continue
+		case metadataActionStatusSkipped:
+			result.Skipped++
+		default:
+			result.Succeeded++
 		}
-		result.Succeeded++
 	}
 	result.Applied = applyErr == nil && result.Failed == 0
 
@@ -278,6 +310,30 @@ func ExecutePushWithWarnings(ctx context.Context, opts PushExecutionOptions) (Pu
 // being silently treated as a no-op when its version localization is missing.
 // Set fields can still create a localization; a null field on that new resource
 // is already empty and remains omitted from the create payload.
+// firstPlannedCreateClear reports the first locale planned as a create whose
+// file also clears fields. A create cannot carry those clears, so the plan
+// never lists them as "field cleared locally", but --if-exists update applies
+// them when the locale turns out to exist and must be confirmed like any other
+// clear.
+func firstPlannedCreateClear(
+	localAppInfo map[string]appInfoLocalPatch,
+	remoteAppInfo map[string]AppInfoLocalization,
+	localVersion map[string]versionLocalPatch,
+	remoteVersion map[string]VersionLocalization,
+) (string, string, bool) {
+	for _, locale := range sortedKeys(localAppInfo) {
+		if _, exists := remoteAppInfo[locale]; !exists && len(localAppInfo[locale].clearFields) > 0 {
+			return appInfoDirName, locale, true
+		}
+	}
+	for _, locale := range sortedKeys(localVersion) {
+		if _, exists := remoteVersion[locale]; !exists && len(localVersion[locale].clearFields) > 0 {
+			return versionDirName, locale, true
+		}
+	}
+	return "", "", false
+}
+
 func validateVersionClearOnlyLocales(
 	localVersion map[string]versionLocalPatch,
 	remoteVersion map[string]VersionLocalization,

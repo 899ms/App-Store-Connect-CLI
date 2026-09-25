@@ -185,6 +185,18 @@ asc bundle-ids capabilities add --bundle "BUNDLE_ID" \
   --settings '[{"key":"ICLOUD_VERSION","options":[{"key":"XCODE_6","enabled":true}]}]'
 ```
 
+`--if-exists fail|skip|update` (default `fail`) controls a 409 that reports the
+capability as already enabled: `skip` prints the existing capability unchanged
+and exits 0, and `update` applies `--settings` to it (without `--settings` it
+behaves like `skip`). Apple usually accepts a repeated add of an API-creatable
+capability as success, so the flag only engages when Apple reports the
+duplicate as a 409. Other 409s keep failing, including
+`ENTITY_ERROR.ATTRIBUTE.TYPE` for a capability type the API cannot create.
+
+```bash  theme={null}
+asc bundle-ids capabilities add --bundle "BUNDLE_ID" --capability ICLOUD --if-exists skip
+```
+
 ### Common Capability Types
 
 **No settings required:**
