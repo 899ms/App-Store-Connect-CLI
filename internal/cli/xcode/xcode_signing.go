@@ -203,7 +203,7 @@ Examples:
 					// leave a plist that looks usable next to a plan that is not.
 					fmt.Fprintf(os.Stderr, "Warning: export options were not written to %s because the plan is blocked\n", exportOptionsPath)
 				} else if plan.ExportOptions == nil {
-					fmt.Fprintf(os.Stderr, "Warning: export options were not written to %s because no provisioning profile was selected\n", exportOptionsPath)
+					fmt.Fprintf(os.Stderr, "Warning: export options were not written to %s because no target is manually signed with a provisioning profile\n", exportOptionsPath)
 				} else if err := localxcode.WriteSigningExportOptions(exportOptionsPath, plan.ExportOptions, *overwrite); err != nil {
 					return fmt.Errorf("xcode signing plan: %w", err)
 				}

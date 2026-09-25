@@ -623,7 +623,9 @@ func signingExportOptions(method string, assigned, settingsOnly []signingProfile
 		teams = append(teams, team)
 	}
 	sort.Strings(teams)
-	if method == "" || len(assigned) == 0 {
+	// Export options are manual-signing mappings; with no manually signed
+	// target left (all automatic, or none selected) there is nothing to map.
+	if method == "" || len(profiles) == 0 {
 		return nil, teams
 	}
 	options := &SigningPlanExportOptions{

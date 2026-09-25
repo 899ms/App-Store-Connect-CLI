@@ -725,3 +725,57 @@ func TestInferSigningPlanAutomaticOverrideClearsManualSettings(t *testing.T) {
 		t.Fatalf("export options = %#v, want no manual profile for the automatic Widget", plan.ExportOptions)
 	}
 }
+
+func TestInferSigningPlanExportOptionsFollowFinalSigningStyle(t *testing.T) {
+	requireStrictSigningPlatform(t)
+	project := writeInferredSigningProject(t)
+	root := t.TempDir()
+	unrelated := writeSigningTestProfile(t, filepath.Join(root, "Other.mobileprovision"), "Other", "35353535-3535-3535-3535-353535353535", "ABCDE12345.org.other.app", time.Now().Add(time.Hour))
+	settingsOnlyPath := filepath.Join(root, "settings-only.json")
+	writeSigningSettingsTestFile(t, settingsOnlyPath, `{
+		"schemaVersion": 1,
+		"targets": [{
+			"name": "App",
+			"configurations": [{"name": "Release", "settings": {"CODE_SIGN_STYLE": "Manual", "PROVISIONING_PROFILE_SPECIFIER": "App Store", "DEVELOPMENT_TEAM": "ABCDE12345"}}]
+		}]
+	}`)
+	settingsOnly, err := BuildSigningPlan(SigningPlanOptions{
+		ProjectPath:      project,
+		SettingsFilePath: settingsOnlyPath,
+		ProfilePaths:     []string{unrelated},
+		Configuration:    "Release",
+		ExportMethod:     "app-store",
+		SkipTargets:      []string{"Widget", "Watch"},
+		StateDir:         filepath.Join(root, "state-settings"),
+	})
+	if err != nil {
+		t.Fatalf("BuildSigningPlan() error = %v", err)
+	}
+	if !settingsOnly.Ready || settingsOnly.ExportOptions == nil || settingsOnly.ExportOptions.ProvisioningProfiles["com.example.demo"] != "App Store" {
+		t.Fatalf("ready=%t blockers=%v export=%#v, want settings-only export options", settingsOnly.Ready, settingsOnly.Blockers, settingsOnly.ExportOptions)
+	}
+
+	matching := writeSigningTestProfile(t, filepath.Join(root, "App.mobileprovision"), "App Profile", "46464646-4646-4646-4646-464646464646", "ABCDE12345.com.example.demo", time.Now().Add(time.Hour))
+	automaticPath := filepath.Join(root, "automatic.json")
+	writeSigningSettingsTestFile(t, automaticPath, `{
+		"schemaVersion": 1,
+		"targets": [{
+			"name": "App",
+			"configurations": [{"name": "Release", "settings": {"CODE_SIGN_STYLE": "Automatic"}}]
+		}]
+	}`)
+	automatic, err := BuildSigningPlan(SigningPlanOptions{
+		ProjectPath:      project,
+		SettingsFilePath: automaticPath,
+		ProfilePaths:     []string{matching},
+		Configuration:    "Release",
+		SkipTargets:      []string{"Widget", "Watch"},
+		StateDir:         filepath.Join(root, "state-automatic"),
+	})
+	if err != nil {
+		t.Fatalf("BuildSigningPlan() error = %v", err)
+	}
+	if automatic.ExportOptions != nil {
+		t.Fatalf("export options = %#v, want none when every target signs automatically", automatic.ExportOptions)
+	}
+}
