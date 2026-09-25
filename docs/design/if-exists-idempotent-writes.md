@@ -70,7 +70,7 @@ Error codes keyed on, per command:
 | `versions create` | `GET /v1/apps/{id}/appStoreVersions?filter[versionString]=&filter[platform]=` | `ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE` (source pointer `/data/attributes/versionString`, detail "The version number has been previously used.") | **Verified live** against app `6759231657` on 2026-09-15: re-creating the existing version string returns two errors, `errors[0]` = `ENTITY_ERROR.RELATIONSHIP.INVALID` ("You cannot create a new version of the App in the current state.", pointer `/data/relationships/app`) and `errors[1]` = the duplicate code above. A 409 carrying only the relationship rejection (a genuinely new version string the app cannot accept yet) has no duplicate code and keeps failing. |
 | `review details-create` | `GET /v1/appStoreVersions/{id}/appStoreReviewDetail` | `STATE_ERROR.ALREADY_EXISTS`, `ENTITY_ERROR.RELATIONSHIP.INVALID`, `ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE`, `ENTITY_ERROR.ATTRIBUTE.INVALID.ALREADY_EXISTS` | **Verified live** against app `6759231657` on 2026-09-15: creating a detail for a version that already has one returns 409 `STATE_ERROR.ALREADY_EXISTS` ("Resource already exists." / "The given app version already has an existing review."). The relationship and duplicate-attribute codes are kept as defensive alternates; every other `STATE_ERROR.*` keeps failing, and the read-back is the decisive check. |
 | `localizations create` | `GET /v1/appStoreVersions/{id}/appStoreVersionLocalizations` matched on locale, then `GET /v1/appStoreVersionLocalizations/{id}` so Apple's own single-resource envelope is what gets printed | `ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE` (pointer `/data/attributes/locale`, detail "Entity with locale: ... already exists. Try updating.") | **Verified live** against disposable app `6759231657` on 2026-09-15: re-creating an existing `en-US` locale returned HTTP 409 with this code and pointer. The exact-locale read-back found the existing resource; `skip` and `update` with no metadata both exited 0 without a PATCH. |
-| `pricing availability create` | `GET /v1/apps/{id}/appAvailabilityV2` | `ENTITY_ERROR.RELATIONSHIP.INVALID`, `ENTITY_ERROR.ATTRIBUTE.INVALID.ALREADY_EXISTS` | To be confirmed with the PR3 fixture; the CLI already maps this conflict to "app availability already exists" in `web apps availability create`. |
+| `pricing availability create` | `GET /v1/apps/{id}/appAvailabilityV2` | `ENTITY_ERROR.RELATIONSHIP.INVALID` (pointer `/data/relationships/app`, detail "An 'appAvailabilities' with a relationship to 'apps' with id '...' already exists."), `ENTITY_ERROR.ATTRIBUTE.INVALID.ALREADY_EXISTS` (defensive alternate, not observed) | **Verified live** against app `6759231657` on 2026-09-15 and 2026-09-25: re-creating the existing availability returns 409 with the relationship code and detail above in `errors[0]`; when the request omits catalog territories Apple appends one bootstrap-style "expects an included resource with type 'territories'" error per omitted territory after it. **This code is ambiguous on this endpoint**: Apple also returns it for the public-API bootstrap rejection, which is classified first (by the `territoryAvailabilities.territory` detail in `errors[0]`) and keeps its own remediation. The read-back is decisive either way, since the bootstrap rejection creates nothing. A create with no `territoryAvailabilities` at all is `ENTITY_ERROR.RELATIONSHIP.REQUIRED`, not an existence conflict, and keeps failing. |
 | `bundle-ids capabilities add` | `GET /v1/bundleIds/{id}/bundleIdCapabilities` filtered by capability type | `ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE`, `ENTITY_ERROR.ATTRIBUTE.INVALID.ALREADY_EXISTS` | To be confirmed with the PR4 fixture. `ENTITY_ERROR.ATTRIBUTE.TYPE` (unsupported capability) is also a 409 and must keep failing. |
 | `review items add` | `GET /v1/reviewSubmissions/{id}/items` filtered by the linked resource | `ENTITY_ERROR.RELATIONSHIP.INVALID`, `ENTITY_ERROR.ATTRIBUTE.INVALID.ALREADY_EXISTS` | To be confirmed with the PR4 fixture. `STATE_ERROR.*` (submission not editable) must keep failing. |
 
@@ -239,8 +239,15 @@ their hash and stay approvable.
    already resolves the localization by locale and fails with its own
    non-HTTP "no existing localization found" error when the locale is absent,
    so its remaining 409s are state conflicts with nothing to key on.
-3. `if-exists-pricing`: `pricing availability create` (`update` routes to the
-   availability edit path).
+3. `if-exists-pricing`: `pricing availability create`. `update` routes to the
+   same code path as `pricing availability edit`, through the exported
+   `shared.ApplyTerritoryAvailabilityUpdate`. Apple exposes no update operation
+   for `availableInNewTerritories`, so on `update` that flag is only verified
+   against the existing policy and a mismatch fails; `--territory` and
+   `--available` are applied. When every requested territory already matches,
+   `update` issues no PATCH and its diagnostic says the record was left
+   unchanged. `skip` still pays for the territory-catalog fetch the create
+   performs before the POST.
 4. `if-exists-capabilities`: `bundle-ids capabilities add` and `review items
    add` (`skip` only).
 

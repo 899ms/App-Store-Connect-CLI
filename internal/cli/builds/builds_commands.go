@@ -189,6 +189,11 @@ Examples:
 				if err := shared.ValidateBuildLocalizationLocale(localeValue); err != nil {
 					return fmt.Errorf("builds upload: %w", err)
 				}
+				normalizedNotes, normalizeErr := shared.NormalizeTestNotesForCommand(os.Stderr, testNotesValue)
+				if normalizeErr != nil {
+					return fmt.Errorf("builds upload: %w", normalizeErr)
+				}
+				testNotesValue = normalizedNotes
 			}
 			if (*wait || testNotesValue != "") && *pollInterval <= 0 {
 				return fmt.Errorf("builds upload: --poll-interval must be greater than 0")
@@ -365,14 +370,15 @@ Examples:
 
 					if testNotesValue != "" {
 						fmt.Fprintf(os.Stderr, "Build %s discovered; setting What to Test notes...\n", buildResp.Data.ID)
-						if _, err := shared.UpsertBetaBuildLocalization(requestCtx, client, buildResp.Data.ID, localeValue, testNotesValue); err != nil {
+						upsertOpts := shared.UpsertBetaBuildLocalizationOptions{AppID: resolvedAppID, Diagnostics: os.Stderr}
+						if _, err := shared.UpsertBetaBuildLocalization(requestCtx, client, buildResp.Data.ID, localeValue, testNotesValue, upsertOpts); err != nil {
 							return fmt.Errorf("builds upload: %w", shared.NewTestNotesRecoveryError(buildResp.Data.ID, localeValue, testNotesValue, err))
 						}
 					}
 
 					if *wait {
 						fmt.Fprintf(os.Stderr, "Build %s discovered; waiting for processing...\n", buildResp.Data.ID)
-						if _, err := client.WaitForBuildProcessing(requestCtx, buildResp.Data.ID, *pollInterval); err != nil {
+						if _, err := shared.WaitForBuildProcessingWithDetails(requestCtx, client, resolvedAppID, buildResp.Data.ID, *pollInterval); err != nil {
 							return fmt.Errorf("builds upload: %w", err)
 						}
 					}
