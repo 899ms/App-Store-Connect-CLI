@@ -274,6 +274,12 @@ the App Store Connect web-client source captured for issue #2299:
 - When `POST /v1/builds/{id}/relationships/betaGroups` returns HTTP 422, `asc builds add-groups` preserves Apple's error and exit status, then makes bounded, best-effort reads of the build and, for external groups, its beta detail. The resulting diagnostic reports the current state without claiming which state caused Apple's rejection. Successful assignments and non-422 failures do not make these diagnostic reads.
 - `asc builds add-groups --dry-run` is an explicit no-mutation preview: it resolves the build and groups, then may read the build and external beta detail, but never sends the relationship POST or submits beta app review. There is no documented validation-only App Store Connect endpoint, so the state shown by dry-run is observational and advisory rather than proof that a later assignment will succeed. `--submit` cannot be combined with `--dry-run`.
 
+## TestFlight text validation (What to Test)
+
+- A live probe on 2026-09-25 against `betaAppLocalizations` `description` on a disposable app (the app had no builds, so `betaBuildLocalizations` `whatsNew` could not be written directly) rejected the write with `An attribute value has invalid text.: Text contains invalid characters/formats.` for: any `<` (including `a<b` and `x < y`); decomposed `Cafe` + U+0301 that NFC would compose; U+0301 after `q` or at the start of the text; U+1AB0; U+20D7; and every tested emoji (`❤`, `❤️`, U+FE0E, keycap, ZWJ family, skin tone, `😀`).
+- The same probe accepted `>`, `&`, the literal text `&lt;`, newlines, precomposed Vietnamese, and script-specific combining marks: Devanagari (`हिंदी में परीक्षण करें`, including a leading U+0902), Thai tone marks, Hebrew niqqud, Arabic harakat, and the Cyrillic titlo U+0483.
+- `asc builds test-notes create|update`, `asc builds upload --test-notes`, and `asc publish testflight --test-notes` therefore NFC-normalize What to Test notes, then remove `<` and nonspacing marks from the generic combining-diacritic blocks (U+0300–036F, U+1AB0–1AFF, U+1DC0–1DFF, U+20D0–20FF, U+FE20–FE2F) that NFC could not compose. Script-specific marks and emoji are never modified. A one-line stderr notice names what was removed without echoing the notes. Emoji rejection was observed only on the beta app description field and is not applied to What to Test.
+
 ## Game Center
 
 - Most Game Center endpoints require a Game Center detail ID, resolved via `/v1/apps/{id}/gameCenterDetail`.
