@@ -13,8 +13,17 @@ import (
 // before the POST so every territory gets an entry.
 const territoryCatalog = `{"data":[{"type":"territories","id":"USA"},{"type":"territories","id":"GBR"}],"links":{}}`
 
-// Apple's 409 body when the app already has an appAvailability.
-const availabilityExists409 = `{"errors":[{"id":"8d2f1c6b-5a4e-4b7c-9e3d-1f0a2b3c4d5e","status":"409","code":"ENTITY_ERROR.RELATIONSHIP.INVALID","title":"The provided entity includes a relationship with an invalid value","detail":"An appAvailability already exists for this app.","source":{"pointer":"/data/relationships/app"}}]}`
+// Apple's 409 body when the app already has an appAvailability, recorded live
+// against app 6759231657 on 2026-09-15 (POST /v2/appAvailabilities), with the
+// app ID swapped for the fixture's.
+const availabilityExists409 = `{"errors":[{"id":"bf11b24f-795a-4d9e-a553-7015d4c934aa","status":"409","code":"ENTITY_ERROR.RELATIONSHIP.INVALID","title":"The provided entity includes a relationship with an invalid value","detail":"An 'appAvailabilities' with a relationship to 'apps' with id 'app-1' already exists.","source":{"pointer":"/data/relationships/app"}}]}`
+
+// The same live conflict when the request carried fewer territories than the
+// catalog: Apple reports the existence error first, followed by one
+// bootstrap-style "expects an included resource" error per omitted territory
+// (174 of them live, abbreviated here). The existence error in errors[0] must
+// win over the later bootstrap-style entries.
+const availabilityExistsWithIncludeErrors409 = `{"errors":[{"id":"bf11b24f-795a-4d9e-a553-7015d4c934aa","status":"409","code":"ENTITY_ERROR.RELATIONSHIP.INVALID","title":"The provided entity includes a relationship with an invalid value","detail":"An 'appAvailabilities' with a relationship to 'apps' with id 'app-1' already exists.","source":{"pointer":"/data/relationships/app"}},{"status":"409","code":"ENTITY_ERROR.RELATIONSHIP.INVALID","title":"The provided entity includes a relationship with an invalid value","detail":"The relationship 'territoryAvailabilities.territory' expects an included resource with type 'territories' but no matching resource was included in the request."}]}`
 
 // Apple's public-API bootstrap rejection. It carries the same 409 code as the
 // existence conflict, so the command must keep classifying it first.
@@ -112,6 +121,31 @@ func TestPricingAvailabilityCreateIfExistsUpdateRoutesToTheEditPath(t *testing.T
 	}
 }
 
+// Live, a create that omits catalog territories returns the existence error
+// first plus bootstrap-style include errors after it. The existence error wins.
+func TestPricingAvailabilityCreateIfExistsSkipHandlesExistenceWithTrailingIncludeErrors(t *testing.T) {
+	stdout, stderr, _, runErr := runIfExistsCommand(t, availabilityCreateArgs("--if-exists", "skip"),
+		func(req ifExistsRequest) (*http.Response, error) {
+			switch {
+			case req.Method == http.MethodGet && req.Path == "/v1/territories":
+				return jsonResponse(http.StatusOK, territoryCatalog)
+			case req.Method == http.MethodPost && req.Path == "/v2/appAvailabilities":
+				return jsonResponse(http.StatusConflict, availabilityExistsWithIncludeErrors409)
+			case req.Method == http.MethodGet && req.Path == "/v1/apps/app-1/appAvailabilityV2":
+				return jsonResponse(http.StatusOK, existingAvailability)
+			default:
+				t.Fatalf("unexpected request %s %s", req.Method, req.Path)
+				return nil, nil
+			}
+		})
+	if runErr != nil {
+		t.Fatalf("run error: %v", runErr)
+	}
+	if !strings.Contains(stdout, `"id":"availability-1"`) || !strings.Contains(stderr, "left unchanged (--if-exists skip)") {
+		t.Fatalf("stdout = %q stderr = %q, want the existing record", stdout, stderr)
+	}
+}
+
 func TestPricingAvailabilityCreateDefaultIfExistsFailPreservesConflict(t *testing.T) {
 	stdout, _, seen, runErr := runIfExistsCommand(t, availabilityCreateArgs(),
 		func(req ifExistsRequest) (*http.Response, error) {
@@ -128,7 +162,7 @@ func TestPricingAvailabilityCreateDefaultIfExistsFailPreservesConflict(t *testin
 	if runErr == nil || !errors.Is(runErr, asc.ErrConflict) {
 		t.Fatalf("run error = %v, want the 409 conflict", runErr)
 	}
-	if !strings.Contains(runErr.Error(), "An appAvailability already exists for this app.") {
+	if !strings.Contains(runErr.Error(), "An 'appAvailabilities' with a relationship to 'apps' with id 'app-1' already exists.") {
 		t.Fatalf("run error = %v, want Apple's detail preserved", runErr)
 	}
 	if stdout != "" {
