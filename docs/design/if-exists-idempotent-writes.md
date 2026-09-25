@@ -29,9 +29,10 @@ Create-style commands gain one shared flag:
   update call can carry (`versions create` without `--copyright` or
   `--release-type`, `localizations create` with only `--locale`), `update`
   resolves like `skip` instead of sending an empty PATCH that a non-editable
-  resource could reject. Commands without a meaningful update
-  (`bundle-ids capabilities add`, `review items add`) reject `update` as a
-  usage error (exit 2) and document `skip` as the idempotent form.
+  resource could reject. `bundle-ids capabilities add` routes `update` to
+  the capability PATCH with `--settings`, the only input it can carry. A
+  command without a meaningful update (`review items add`) rejects `update` as
+  a usage error (exit 2) and documents `skip` as the idempotent form.
 
 Unknown values are usage errors (exit 2), validated before any HTTP request.
 
@@ -71,8 +72,8 @@ Error codes keyed on, per command:
 | `review details-create` | `GET /v1/appStoreVersions/{id}/appStoreReviewDetail` | `STATE_ERROR.ALREADY_EXISTS`, `ENTITY_ERROR.RELATIONSHIP.INVALID`, `ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE`, `ENTITY_ERROR.ATTRIBUTE.INVALID.ALREADY_EXISTS` | **Verified live** against app `6759231657` on 2026-09-15: creating a detail for a version that already has one returns 409 `STATE_ERROR.ALREADY_EXISTS` ("Resource already exists." / "The given app version already has an existing review."). The relationship and duplicate-attribute codes are kept as defensive alternates; every other `STATE_ERROR.*` keeps failing, and the read-back is the decisive check. |
 | `localizations create` | `GET /v1/appStoreVersions/{id}/appStoreVersionLocalizations` matched on locale, then `GET /v1/appStoreVersionLocalizations/{id}` so Apple's own single-resource envelope is what gets printed | `ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE` (pointer `/data/attributes/locale`, detail "Entity with locale: ... already exists. Try updating.") | **Verified live** against disposable app `6759231657` on 2026-09-15: re-creating an existing `en-US` locale returned HTTP 409 with this code and pointer. The exact-locale read-back found the existing resource; `skip` and `update` with no metadata both exited 0 without a PATCH. |
 | `pricing availability create` | `GET /v1/apps/{id}/appAvailabilityV2` | `ENTITY_ERROR.RELATIONSHIP.INVALID` (pointer `/data/relationships/app`, detail "An 'appAvailabilities' with a relationship to 'apps' with id '...' already exists."), `ENTITY_ERROR.ATTRIBUTE.INVALID.ALREADY_EXISTS` (defensive alternate, not observed) | **Verified live** against app `6759231657` on 2026-09-15 and 2026-09-25: re-creating the existing availability returns 409 with the relationship code and detail above in `errors[0]`; when the request omits catalog territories Apple appends one bootstrap-style "expects an included resource with type 'territories'" error per omitted territory after it. **This code is ambiguous on this endpoint**: Apple also returns it for the public-API bootstrap rejection, which is classified first (by the `territoryAvailabilities.territory` detail in `errors[0]`) and keeps its own remediation. The read-back is decisive either way, since the bootstrap rejection creates nothing. A create with no `territoryAvailabilities` at all is `ENTITY_ERROR.RELATIONSHIP.REQUIRED`, not an existence conflict, and keeps failing. |
-| `bundle-ids capabilities add` | `GET /v1/bundleIds/{id}/bundleIdCapabilities` filtered by capability type | `ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE`, `ENTITY_ERROR.ATTRIBUTE.INVALID.ALREADY_EXISTS` | To be confirmed with the PR4 fixture. `ENTITY_ERROR.ATTRIBUTE.TYPE` (unsupported capability) is also a 409 and must keep failing. |
-| `review items add` | `GET /v1/reviewSubmissions/{id}/items` filtered by the linked resource | `ENTITY_ERROR.RELATIONSHIP.INVALID`, `ENTITY_ERROR.ATTRIBUTE.INVALID.ALREADY_EXISTS` | To be confirmed with the PR4 fixture. `STATE_ERROR.*` (submission not editable) must keep failing. |
+| `bundle-ids capabilities add` | `GET /v1/bundleIds/{id}/bundleIdCapabilities`, paginated, matched case-insensitively on `capabilityType` | `ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE`, `ENTITY_ERROR.ATTRIBUTE.INVALID.ALREADY_EXISTS` (both defensive, not observed) | **Checked live** against app `6759231657`'s bundle ID on 2026-09-15 and 2026-09-25: re-adding an enabled API-creatable capability (`IN_APP_PURCHASE`) returns HTTP 201 with the existing resource (id `<bundleId>_<capabilityType>`) and changes nothing, so no existence 409 could be reproduced and `--if-exists` does not engage there. The read-back is the decisive check if Apple ever reports one. `ENTITY_ERROR.ATTRIBUTE.TYPE` (recorded live for `PRIVATE_CLOUD_COMPUTE`, which the API cannot create even though it was already enabled through the portal) is also a 409, is not on the list, and keeps failing: `--if-exists skip` does not rescue it. |
+| `review items add` | `GET /v1/reviewSubmissions/{id}/items?include=<relationship>`, paginated, matched on the linked resource ID | `ENTITY_ERROR.RELATIONSHIP.INVALID`, `ENTITY_ERROR.ATTRIBUTE.INVALID.ALREADY_EXISTS`, `ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE` (defensive, not observed) | **Not reproducible live**: a review submission created for the test cannot be canceled while `READY_FOR_REVIEW` ("Resource is not in cancellable state"), and the disposable app has no reviewable item to attach. Live on 2026-09-25 an unreviewable version returned 409 `STATE_ERROR.ENTITY_STATE_INVALID`, which is not on the list and keeps failing without a read-back. `include=` is required, not `fields[]`: with `fields[]` alone Apple returns items carrying `links` only and no `relationships` key, as `internal/cli/submit/submit_create.go` already documents. A relationship pointer can also be non-nil with `"data":null`, so a real ID must match, and an item whose `state` is `REMOVED` is historical (the resource is detached) so it is skipped rather than taken as proof of presence. `STATE_ERROR.*` (submission not editable or already submitted) keeps failing. |
 
 Other Apple existence codes seen in this repository's fixtures, kept for
 reference when a later command needs them: bare `ENTITY_ERROR` with detail
@@ -248,8 +249,19 @@ their hash and stay approvable.
    `update` issues no PATCH and its diagnostic says the record was left
    unchanged. `skip` still pays for the territory-catalog fetch the create
    performs before the POST.
-4. `if-exists-capabilities`: `bundle-ids capabilities add` and `review items
-   add` (`skip` only).
+4. `if-exists-capabilities`: `bundle-ids capabilities add` (`skip`, and
+   `update` routing `--settings` to `PATCH /v1/bundleIdCapabilities/{id}`;
+   with no `--settings` there is nothing to apply, so `update` behaves like
+   `skip`) and `review items add` (`skip` only, because a submission item
+   carries no inputs to re-apply, so `update` is rejected as a usage error).
+
+   Neither resource has a detail endpoint: the OpenAPI snapshot exposes only
+   POST, PATCH and DELETE for `/v1/bundleIdCapabilities/{id}` and
+   `/v1/reviewSubmissionItems/{id}`. The collection item is therefore the only
+   representation Apple offers, and the printed single-resource envelope is
+   built around Apple's own resource object rather than re-read. Where a detail
+   endpoint does exist (`localizations create`, `review details-create`) the
+   convention re-reads instead of building an envelope.
 
 `metadata push` moved to follow-up: every mutation in `push.go` already runs
 through `shared.RunReconciledMutation` with a field-matching read-back, so a
