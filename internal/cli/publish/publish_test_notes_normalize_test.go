@@ -58,18 +58,17 @@ func TestPublishTestFlightNormalizesTestNotesAndRecoveryPayload(t *testing.T) {
 	originalTransport := http.DefaultTransport
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })
 	payload := ""
-	requestCount := 0
 	http.DefaultTransport = publishCommandRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		requestCount++
-		switch requestCount {
-		case 1:
+		switch {
+		case req.Method == http.MethodGet && strings.Contains(req.URL.Path, "betaGroups"):
 			return publishCommandJSONResponse(http.StatusOK, `{"data":[{"type":"betaGroups","id":"group-1","attributes":{"name":"External","isInternalGroup":false}}]}`)
-		case 2:
+		case req.Method == http.MethodGet && strings.Contains(req.URL.Path, "betaAppLocalizations"):
 			return publishCommandJSONResponse(http.StatusOK, `{"data":[]}`)
-		case 3:
-			if req.Method != http.MethodPost || req.URL.Path != "/v1/betaBuildLocalizations" {
-				t.Fatalf("request %d = %s %s, want POST /v1/betaBuildLocalizations", requestCount, req.Method, req.URL.Path)
-			}
+		case req.Method == http.MethodPost && req.URL.Path == "/v1/betaAppLocalizations":
+			return publishCommandJSONResponse(http.StatusCreated, `{"data":{"type":"betaAppLocalizations","id":"bal-1","attributes":{"locale":"en-US"}}}`)
+		case req.Method == http.MethodGet && strings.Contains(req.URL.Path, "betaBuildLocalizations"):
+			return publishCommandJSONResponse(http.StatusOK, `{"data":[]}`)
+		case req.Method == http.MethodPost && req.URL.Path == "/v1/betaBuildLocalizations":
 			body, err := io.ReadAll(req.Body)
 			if err != nil {
 				t.Fatalf("read request body: %v", err)
@@ -77,7 +76,7 @@ func TestPublishTestFlightNormalizesTestNotesAndRecoveryPayload(t *testing.T) {
 			payload = string(body)
 			return publishCommandJSONResponse(http.StatusUnprocessableEntity, `{"errors":[{"status":"422","code":"ENTITY_ERROR.ATTRIBUTE.INVALID","title":"The provided entity has an invalid attribute","detail":"What to Test was rejected by the server"}]}`)
 		default:
-			t.Fatalf("unexpected request %d: %s %s", requestCount, req.Method, req.URL.String())
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
 			return nil, nil
 		}
 	})

@@ -38,8 +38,13 @@ func assertNormalizedTestNotesNotice(t *testing.T, stderr string) {
 	if !strings.Contains(stderr, "normalized") {
 		t.Fatalf("stderr = %q, want a normalization notice", stderr)
 	}
-	if strings.Count(strings.TrimSpace(stderr), "\n") != 0 {
-		t.Fatalf("stderr = %q, want a single-line notice", stderr)
+	if got := strings.Count(stderr, "What to Test notes were normalized"); got != 1 {
+		t.Fatalf("stderr = %q, want exactly one normalization notice line", stderr)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(stderr), "\n") {
+		if !strings.HasPrefix(line, "Notice: ") {
+			t.Fatalf("stderr = %q, want only one-line notices", stderr)
+		}
 	}
 	if strings.Contains(stderr, "Caf") {
 		t.Fatalf("stderr = %q, must not echo the notes", stderr)
@@ -51,24 +56,21 @@ func TestBuildsTestNotesCreateNormalizesNotesBeforeSending(t *testing.T) {
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
 	payload := ""
-	requestCount := 0
+	notesPosts := 0
 	stubTransport(t, func(req *http.Request) (*http.Response, error) {
-		requestCount++
-		switch requestCount {
-		case 1:
-			if req.Method != http.MethodGet || req.URL.Path != "/v1/builds/build-1" {
-				t.Fatalf("request %d = %s %s, want GET /v1/builds/build-1", requestCount, req.Method, req.URL.Path)
-			}
-			return jsonResponse(http.StatusOK, `{"data":{"type":"builds","id":"build-1","attributes":{"version":"42","processingState":"VALID"}}}`)
-		case 2:
-			if req.Method != http.MethodGet || req.URL.Path != "/v1/builds/build-1/betaBuildLocalizations" {
-				t.Fatalf("request %d = %s %s, want GET /v1/builds/build-1/betaBuildLocalizations", requestCount, req.Method, req.URL.Path)
-			}
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/builds/build-1":
+			return jsonResponse(http.StatusOK, `{"data":{"type":"builds","id":"build-1","attributes":{"version":"42","processingState":"VALID"},"relationships":{"app":{"data":{"type":"apps","id":"app-1"}}}}}`)
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/builds/build-1/app":
+			return jsonResponse(http.StatusOK, `{"data":{"type":"apps","id":"app-1"}}`)
+		case req.Method == http.MethodGet && strings.Contains(req.URL.Path, "betaAppLocalizations"):
 			return jsonResponse(http.StatusOK, `{"data":[]}`)
-		case 3:
-			if req.Method != http.MethodPost || req.URL.Path != "/v1/betaBuildLocalizations" {
-				t.Fatalf("request %d = %s %s, want POST /v1/betaBuildLocalizations", requestCount, req.Method, req.URL.Path)
-			}
+		case req.Method == http.MethodPost && req.URL.Path == "/v1/betaAppLocalizations":
+			return jsonResponse(http.StatusCreated, `{"data":{"type":"betaAppLocalizations","id":"bal-1","attributes":{"locale":"en-US"}}}`)
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/builds/build-1/betaBuildLocalizations":
+			return jsonResponse(http.StatusOK, `{"data":[]}`)
+		case req.Method == http.MethodPost && req.URL.Path == "/v1/betaBuildLocalizations":
+			notesPosts++
 			body, err := io.ReadAll(req.Body)
 			if err != nil {
 				t.Fatalf("read request body: %v", err)
@@ -76,7 +78,7 @@ func TestBuildsTestNotesCreateNormalizesNotesBeforeSending(t *testing.T) {
 			payload = string(body)
 			return jsonResponse(http.StatusCreated, `{"data":{"type":"betaBuildLocalizations","id":"loc-1","attributes":{"locale":"en-US","whatsNew":"Caf\u00e9 b q"}}}`)
 		default:
-			t.Fatalf("unexpected request %d: %s %s", requestCount, req.Method, req.URL.Path)
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.Path)
 			return nil, nil
 		}
 	})
@@ -98,11 +100,14 @@ func TestBuildsTestNotesCreateNormalizesNotesBeforeSending(t *testing.T) {
 		}
 	})
 
-	if requestCount != 3 {
-		t.Fatalf("request count = %d, want 3", requestCount)
+	if notesPosts != 1 {
+		t.Fatalf("notes create requests = %d, want 1", notesPosts)
 	}
 	assertNormalizedTestNotesPayload(t, payload)
 	assertNormalizedTestNotesNotice(t, stderr)
+	if !strings.Contains(stderr, `Notice: created TestFlight app localization for locale "en-US" on app "app-1"`) {
+		t.Fatalf("stderr = %q, want a notice for the created TestFlight app localization", stderr)
+	}
 	if !strings.Contains(stdout, `"id":"loc-1"`) {
 		t.Fatalf("stdout = %q, want the created localization", stdout)
 	}
@@ -215,15 +220,18 @@ func TestBuildsTestNotesCreateAcceptedNotesPrintNoNotice(t *testing.T) {
 	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
-	requestCount := 0
 	stubTransport(t, func(req *http.Request) (*http.Response, error) {
-		requestCount++
-		switch requestCount {
-		case 1:
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/builds/build-1":
 			return jsonResponse(http.StatusOK, `{"data":{"type":"builds","id":"build-1","attributes":{"version":"42","processingState":"VALID"}}}`)
-		case 2:
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/builds/build-1/app":
+			return jsonResponse(http.StatusOK, `{"data":{"type":"apps","id":"app-1"}}`)
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/betaAppLocalizations":
+			// The locale already exists, so no creation notice is expected either.
+			return jsonResponse(http.StatusOK, `{"data":[{"type":"betaAppLocalizations","id":"bal-1","attributes":{"locale":"en-US"}}]}`)
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/builds/build-1/betaBuildLocalizations":
 			return jsonResponse(http.StatusOK, `{"data":[]}`)
-		case 3:
+		case req.Method == http.MethodPost && req.URL.Path == "/v1/betaBuildLocalizations":
 			body, err := io.ReadAll(req.Body)
 			if err != nil {
 				t.Fatalf("read request body: %v", err)
@@ -233,7 +241,7 @@ func TestBuildsTestNotesCreateAcceptedNotesPrintNoNotice(t *testing.T) {
 			}
 			return jsonResponse(http.StatusCreated, `{"data":{"type":"betaBuildLocalizations","id":"loc-1","attributes":{"locale":"en-US","whatsNew":"Test the new export flow"}}}`)
 		default:
-			t.Fatalf("unexpected request %d: %s %s", requestCount, req.Method, req.URL.Path)
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.Path)
 			return nil, nil
 		}
 	})
