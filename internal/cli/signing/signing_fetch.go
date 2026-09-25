@@ -246,6 +246,14 @@ Examples:
 					fmt.Fprintf(os.Stderr, "Dry run: would delete %d stale profile(s); nothing was deleted, created, or written\n", len(planned))
 					return emit()
 				}
+				// The output directory is the one deterministic local check that
+				// does not depend on which profile is later resolved, so it runs
+				// before the irreversible deletions.
+				if len(planned) > 0 {
+					if err := prepareOutputDir(); err != nil {
+						return fmt.Errorf("signing fetch: %w; no stale profiles were deleted", err)
+					}
+				}
 				deleteStaleSigningProfiles(requestCtx, client, result.StaleProfiles)
 				if failed := len(result.StaleProfiles.Failed); failed > 0 {
 					_ = emit()

@@ -367,3 +367,24 @@ func TestSigningFetchDeleteStaleRejectsUnsupportedTypesBeforeRequests(t *testing
 		})
 	}
 }
+
+func TestSigningFetchDeleteStaleChecksOutputDirBeforeDeleting(t *testing.T) {
+	stub := startStaleProfilesStub(t, staleProfilesStubConfig{
+		profilePages: []string{staleProfileJSON("stale-1", "ACTIVE", "2000-01-01T00:00:00Z")},
+	})
+	outputPath := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(outputPath, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	code, _, stderr := runStaleSigningFetch(t, "--delete-stale-profiles", "--confirm", "--output", outputPath)
+	if code == rootcmd.ExitSuccess {
+		t.Fatal("expected failure for an unusable output directory")
+	}
+	if !strings.Contains(stderr, "no stale profiles were deleted") {
+		t.Fatalf("stderr = %q", stderr)
+	}
+	if n := stub.count("DELETE"); n != 0 {
+		t.Fatalf("delete requests = %d, want 0", n)
+	}
+}
