@@ -87,7 +87,7 @@ func TestBuildsUploadVerifyTimeoutReportsLinkedBuildID(t *testing.T) {
 	if !strings.Contains(stdout, `"uploadId":"upload-1"`) || !strings.Contains(stdout, `"buildId":"build-1"`) {
 		t.Fatalf("expected receipt with uploadId and buildId, got %q", stdout)
 	}
-	if strings.Contains(stderr, "did not appear") {
+	if strings.Contains(stderr, "is not available yet") {
 		t.Fatalf("did not expect an unresolved build notice, got %q", stderr)
 	}
 }
@@ -121,7 +121,7 @@ func TestBuildsUploadVerifyTimeoutReportsUnresolvedBuildOnStderr(t *testing.T) {
 	if !strings.Contains(stdout, `"uploadId":"upload-1"`) {
 		t.Fatalf("expected receipt with uploadId, got %q", stdout)
 	}
-	want := `Build for upload upload-1 did not appear within the 20ms verification window; look it up later with: asc builds info --app "123456789" --build-number "42" --version "1.0.0" --platform IOS`
+	want := `Build ID for upload upload-1 is not available yet: verification ended before App Store Connect exposed the build; look it up later with: asc builds info --app "123456789" --build-number "42" --version "1.0.0" --platform IOS`
 	if !strings.Contains(stderr, want) {
 		t.Fatalf("expected unresolved build notice %q on stderr, got %q", want, stderr)
 	}
@@ -150,7 +150,7 @@ func TestBuildsUploadDefaultOmitsBuildID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected builds upload to succeed, got %v", err)
 	}
-	if strings.Contains(stdout, `"buildId"`) || strings.Contains(stderr, "did not appear") {
+	if strings.Contains(stdout, `"buildId"`) || strings.Contains(stderr, "is not available yet") {
 		t.Fatalf("expected default mode to stay unchanged, got stdout %q stderr %q", stdout, stderr)
 	}
 }

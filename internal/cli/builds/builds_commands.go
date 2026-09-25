@@ -52,8 +52,8 @@ the file immediately. Use --verify-timeout to briefly watch for immediate
 post-commit processing failures, or --wait for full build discovery and
 processing.
 When --wait, --test-notes, or --verify-timeout sees the build App Store Connect
-created from the upload, the receipt includes its buildId. If --verify-timeout
-ends before the build appears, a notice on stderr explains how to look it up.
+created from the upload, the receipt includes its buildId. If verification
+ends before the build is visible, a notice on stderr explains how to look it up.
 When --test-notes is set, the command waits only until the build appears, then
 creates or updates the requested localization. Add --wait when the invocation
 must also wait for processing to complete.
@@ -395,7 +395,7 @@ Examples:
 					if buildID != "" {
 						result.BuildID = buildID
 					} else {
-						fmt.Fprintf(os.Stderr, "Build for upload %s did not appear within the %s verification window; look it up later with: asc builds info --app %q --build-number %q --version %q --platform %s\n", uploadResp.Data.ID, verifyTimeout.String(), resolvedAppID, buildNumberValue, versionValue, platformValue)
+						fmt.Fprintf(os.Stderr, "Build ID for upload %s is not available yet: verification ended before App Store Connect exposed the build; look it up later with: asc builds info --app %q --build-number %q --version %q --platform %s\n", uploadResp.Data.ID, resolvedAppID, buildNumberValue, versionValue, platformValue)
 					}
 				}
 			}
