@@ -139,12 +139,15 @@ Examples:
   asc bundle-ids capabilities add --bundle "BUNDLE_ID" --capability ICLOUD --if-exists skip
 
 --if-exists controls what happens when App Store Connect answers 409 because
-the capability is already enabled on the bundle ID. fail (default) returns the
-error. skip reads the existing capability back, prints it, and exits 0 without
-changing it. update applies --settings to the existing capability with
-PATCH /v1/bundleIdCapabilities/{id}; with no --settings there is nothing to
-apply, so update behaves like skip. Any other 409, including a rejected
-capability type, keeps failing.`,
+the capability is already enabled on the bundle ID. Apple usually accepts a
+repeated add of an API-creatable capability as success and returns the
+existing capability, so the flag engages only when Apple reports the duplicate
+as a 409. fail (default) returns the error. skip reads the existing capability
+back, prints it, and exits 0 without changing it. update applies --settings to
+the existing capability with PATCH /v1/bundleIdCapabilities/{id}; with no
+--settings there is nothing to apply, so update behaves like skip. Any other
+409 keeps failing, including ENTITY_ERROR.ATTRIBUTE.TYPE for a capability type
+the API cannot create, even when that capability is already enabled.`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
