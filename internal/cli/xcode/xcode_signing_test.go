@@ -638,3 +638,32 @@ func TestXcodeSigningPlanOverwriteReplacesExportOptions(t *testing.T) {
 		t.Fatalf("export options were not replaced: %q %v", data, err)
 	}
 }
+
+func TestXcodeSigningPlanDoesNotWriteExportOptionsForBlockedPlan(t *testing.T) {
+	stubXcodeSigningPlanSideEffects(t)
+	runBuildSigningPlan = func(localxcode.SigningPlanOptions) (*localxcode.SigningPlan, error) {
+		return &localxcode.SigningPlan{
+			Ready:         false,
+			PlanPath:      "plan.json",
+			Blockers:      []string{"unmatched signing target Widget/Release"},
+			ExportOptions: &localxcode.SigningPlanExportOptions{Method: "app-store", SigningStyle: "manual"},
+		}, nil
+	}
+	destination := filepath.Join(t.TempDir(), "ExportOptions.plist")
+	command := xcodeSigningPlanCommand()
+	command.FlagSet.SetOutput(io.Discard)
+	if err := command.FlagSet.Parse([]string{"--project", "App.xcodeproj", "--profile", "App.mobileprovision", "--export-options-out", destination, "--output", "json"}); err != nil {
+		t.Fatal(err)
+	}
+	var execErr error
+	_, stderr := captureCommandOutput(t, func() error { execErr = command.Exec(context.Background(), nil); return execErr })
+	if execErr != nil {
+		t.Fatalf("Exec() error = %v", execErr)
+	}
+	if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("export options were written for a blocked plan: %v", err)
+	}
+	if !strings.Contains(stderr, "export options were not written") {
+		t.Fatalf("stderr = %q, want a not-written warning", stderr)
+	}
+}

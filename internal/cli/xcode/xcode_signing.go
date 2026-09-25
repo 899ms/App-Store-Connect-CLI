@@ -193,7 +193,11 @@ Examples:
 				return fmt.Errorf("xcode signing plan: %w", err)
 			}
 			if exportOptionsPath != "" {
-				if plan.ExportOptions == nil {
+				if !plan.Ready {
+					// A blocked plan's export options may omit targets; do not
+					// leave a plist that looks usable next to a plan that is not.
+					fmt.Fprintf(os.Stderr, "Warning: export options were not written to %s because the plan is blocked\n", exportOptionsPath)
+				} else if plan.ExportOptions == nil {
 					fmt.Fprintf(os.Stderr, "Warning: export options were not written to %s because no provisioning profile was selected\n", exportOptionsPath)
 				} else if err := localxcode.WriteSigningExportOptions(exportOptionsPath, plan.ExportOptions, *overwrite); err != nil {
 					return fmt.Errorf("xcode signing plan: %w", err)
