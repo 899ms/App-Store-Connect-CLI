@@ -63,6 +63,9 @@ func signingKeychainActionRows(result *SigningKeychainActionResult) ([]string, [
 	if result == nil {
 		return headers, nil
 	}
+	if result.Partition != "" {
+		return append(headers, "Partition"), [][]string{{result.Action, result.KeychainPath, result.Partition}}
+	}
 	return headers, [][]string{{result.Action, result.KeychainPath}}
 }
 
