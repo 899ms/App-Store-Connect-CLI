@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -59,23 +61,37 @@ func (n TestNotesNormalization) Notice() string {
 // NormalizeTestNotes rewrites What to Test notes into the form App Store
 // Connect accepts: NFC-composed text without "<" characters or leftover
 // generic combining diacritics (see isRejectedTestNotesMark). Script-specific
-// marks such as Devanagari, Thai, Hebrew, and Arabic vowel signs, and emoji
-// variation selectors are kept. Notes that keep no usable character are a
-// usage failure so the caller never sends a request Apple is certain to reject.
+// marks such as Devanagari, Thai, Hebrew, and Arabic vowel signs are kept.
+// Characters App Store Connect refuses in whatsNew, such as emoji, pictographic
+// symbols, and variation selectors (see rejectedTestNotesRunes), are a usage
+// failure that names them instead of silently changing the operator's text.
+// Notes that keep no usable character are also a usage failure, so the caller
+// never sends a request Apple is certain to reject.
 func NormalizeTestNotes(notes string) (TestNotesNormalization, error) {
 	trimmed := strings.TrimSpace(notes)
 
 	var builder strings.Builder
 	builder.Grow(len(trimmed))
 	var normalization TestNotesNormalization
+	var refused []rune
 	for _, r := range norm.NFC.String(trimmed) {
 		switch {
 		case r == '<':
 			normalization.RemovedAngleBrackets = true
 		case isRejectedTestNotesMark(r):
 			normalization.RemovedCombiningMarks = true
+		case isRefusedTestNotesRune(r):
+			if !slices.Contains(refused, r) {
+				refused = append(refused, r)
+			}
 		default:
 			builder.WriteRune(r)
+		}
+	}
+	if len(refused) > 0 {
+		return TestNotesNormalization{}, classifiedUsageError{
+			kind:    UsageErrorInvalidValue,
+			message: refusedTestNotesMessage(refused),
 		}
 	}
 
@@ -109,6 +125,65 @@ var rejectedTestNotesMarks = &unicode.RangeTable{
 
 func isRejectedTestNotesMark(r rune) bool {
 	return unicode.Is(unicode.Mn, r) && unicode.Is(rejectedTestNotesMarks, r)
+}
+
+// rejectedTestNotesRunes lists the code points App Store Connect refuses in
+// betaBuildLocalizations whatsNew with "Text for whatsNew contains invalid
+// characters". Every range was probed live, including its edges where noted in
+// docs/API_NOTES.md; neighboring blocks that App Store Connect accepts, such as
+// Arrows, Letterlike Symbols, Miscellaneous Technical, Enclosed Alphanumerics,
+// and Geometric Shapes, are deliberately absent.
+var rejectedTestNotesRunes = &unicode.RangeTable{
+	R16: []unicode.Range16{
+		{Lo: 0x20d0, Hi: 0x20ff, Stride: 1}, // Combining Marks for Symbols (enclosing marks such as keycap U+20E3)
+		{Lo: 0x2400, Hi: 0x245f, Stride: 1}, // Control Pictures, Optical Character Recognition
+		{Lo: 0x2500, Hi: 0x259f, Stride: 1}, // Box Drawing, Block Elements
+		{Lo: 0x2600, Hi: 0x27ef, Stride: 1}, // Miscellaneous Symbols, Dingbats, Miscellaneous Mathematical Symbols-A
+		{Lo: 0x2800, Hi: 0x28ff, Stride: 1}, // Braille Patterns
+		{Lo: 0x2980, Hi: 0x2bff, Stride: 1}, // Miscellaneous Mathematical Symbols-B through Miscellaneous Symbols and Arrows
+		{Lo: 0xe000, Hi: 0xf8ff, Stride: 1}, // Private Use Area
+		{Lo: 0xfe00, Hi: 0xfe0f, Stride: 1}, // Variation Selectors, including emoji VS16 and text VS15
+		{Lo: 0xfffd, Hi: 0xfffd, Stride: 1}, // Replacement Character
+	},
+	R32: []unicode.Range32{
+		{Lo: 0x10000, Hi: 0x10ffff, Stride: 1}, // Every supplementary-plane character, including most emoji
+	},
+}
+
+func isRefusedTestNotesRune(r rune) bool {
+	return unicode.Is(rejectedTestNotesRunes, r)
+}
+
+// maxReportedTestNotesRunes bounds how many distinct refused characters a usage
+// error lists so that long notes cannot produce an unbounded diagnostic.
+const maxReportedTestNotesRunes = 8
+
+func refusedTestNotesMessage(refused []rune) string {
+	listed := refused
+	if len(listed) > maxReportedTestNotesRunes {
+		listed = listed[:maxReportedTestNotesRunes]
+	}
+	names := make([]string, 0, len(listed))
+	for _, r := range listed {
+		names = append(names, describeTestNotesRune(r))
+	}
+	list := strings.Join(names, ", ")
+	if remaining := len(refused) - len(listed); remaining > 0 {
+		list += fmt.Sprintf(", and %d more", remaining)
+	}
+	return "What to Test notes contain characters App Store Connect rejects as invalid in whatsNew: " + list +
+		"; remove emoji, pictographic symbols, variation selectors, and private-use characters and retry"
+}
+
+// describeTestNotesRune names a refused character by code point, adding the
+// glyph only when it is visible on its own so that marks, selectors, and
+// private-use characters cannot garble the diagnostic.
+func describeTestNotesRune(r rune) string {
+	name := fmt.Sprintf("U+%04X", r)
+	if unicode.IsGraphic(r) && !unicode.IsMark(r) && !unicode.Is(unicode.Co, r) && !unicode.Is(unicode.Sk, r) {
+		name += " " + strconv.Quote(string(r))
+	}
+	return name
 }
 
 // NormalizeTestNotesForCommand normalizes What to Test notes for a command,
