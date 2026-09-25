@@ -125,6 +125,11 @@
     "icon": "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/51/a2/ba/51a2babe-ae87-6425-508c-fb303753debb/AppIcon-0-0-1x_U007ephone-0-1-85-220.png/512x512bb.jpg"
   },
   {
+    "app": "BananaSplit: Split Expenses",
+    "link": "https://apps.apple.com/us/app/bananasplit-split-expenses/id6752376267?uo=4",
+    "icon": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/ec/4a/d1/ec4ad10e-6a0e-166d-3cf5-f22826a5d6a7/app-0-0-1x_U007ephone-0-1-sRGB-85-220.png/512x512bb.jpg"
+  },
+  {
     "app": "Beauty Fonts - Font Keyboard",
     "link": "https://apps.apple.com/us/app/beauty-fonts-font-keyboard/id1438854446?uo=4",
     "icon": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/ce/85/c5/ce85c50d-e009-34b8-96f1-924e6881a364/AppIcon-0-0-1x_U007epad-0-1-0-85-220-0.png/512x512bb.jpg"
@@ -1478,6 +1483,11 @@
     "app": "RecipeBee: Recipes & Meal Plan",
     "link": "https://apps.apple.com/us/app/recipebee-recipes-meal-plan/id6757370845?uo=4",
     "icon": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/86/0e/52/860e52e1-9c23-7868-1f43-b43739700fae/AppIcon-0-0-1x_U007epad-0-1-85-220.png/512x512bb.jpg"
+  },
+  {
+    "app": "Recurred: Subscription Manager",
+    "link": "https://apps.apple.com/us/app/recurred-subscription-manager/id6783705092?uo=4",
+    "icon": "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/0c/2b/c3/0c2bc310-a846-bc32-781b-1593b5086b60/recurred-icon-0-0-1x_U007epad-0-1-85-220.png/512x512bb.jpg"
   },
   {
     "app": "Reed: Breathwork & Pranayama",
