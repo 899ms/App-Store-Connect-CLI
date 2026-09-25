@@ -409,3 +409,32 @@ func assertBetaAppLocalizationCreateBody(t *testing.T, body, wantLocale, wantApp
 		t.Fatalf("create attributes must contain only the locale, got %s", strings.Join(keys, ","))
 	}
 }
+
+func TestUpsertBetaBuildLocalizationRejectsRefusedCharactersBeforeAnyRequest(t *testing.T) {
+	recorder := &testNotesRecorder{}
+	client := newTestNotesServerClient(t, recorder, func(recordedTestNotesRequest) (int, string) {
+		return 0, ""
+	})
+
+	var diagnostics bytes.Buffer
+	resp, err := UpsertBetaBuildLocalization(
+		context.Background(), client,
+		"build-1", "en-US", "Roll the die \u2764\ufe0f",
+		UpsertBetaBuildLocalizationOptions{Diagnostics: &diagnostics},
+	)
+	if err == nil {
+		t.Fatalf("UpsertBetaBuildLocalization() = %#v, want a usage failure", resp)
+	}
+	if got := ClassifyUsageError(err); got != UsageErrorInvalidValue {
+		t.Fatalf("ClassifyUsageError() = %q, want %q", got, UsageErrorInvalidValue)
+	}
+	recorder.mu.Lock()
+	requests := len(recorder.requests)
+	recorder.mu.Unlock()
+	if requests != 0 {
+		t.Fatalf("requests = %d, want none before the notes are accepted locally", requests)
+	}
+	if diagnostics.Len() != 0 {
+		t.Fatalf("diagnostics = %q, want no localization side-effect notice", diagnostics.String())
+	}
+}
