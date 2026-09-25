@@ -52,6 +52,9 @@ func SigningFetchCommand() *ffcli.Command {
 	certType := fs.String("certificate-type", "", "Certificate type filter (optional)")
 	outputPath := fs.String("output", "./signing", "Output directory for signing files")
 	createMissing := fs.Bool("create-missing", false, "Create missing profiles")
+	deleteStale := fs.Bool("delete-stale-profiles", false, "Delete expired or invalid profiles for this bundle ID and profile type before matching (requires --confirm or --dry-run)")
+	confirm := fs.Bool("confirm", false, "Confirm --delete-stale-profiles deletions")
+	dryRun := fs.Bool("dry-run", false, "With --delete-stale-profiles, print the stale-profile plan and exit without deleting, creating, or writing anything")
 	createMissingCertificate := fs.Bool("create-missing-certificate", false, "Create a certificate when none are active, then create the profile")
 	identityPasswordFile := fs.String("identity-password-file", "", "Protected 0600 file containing the PKCS#12 password")
 	keyOut := fs.String("key-out", "", "Private key output path (default: <output>/<type>.key)")
@@ -79,13 +82,23 @@ creates, so --device without --create-missing is rejected with a usage error.
 password-protected .p12 when no active certificate exists. It requires
 --create-missing and --identity-password-file.
 
+Active profiles whose expiration date has passed are never selected.
+--delete-stale-profiles deletes expired or INVALID profiles for this bundle ID
+and profile type before matching; it requires --confirm. Every stale profile is
+listed before any deletion, and staleProfiles in the output separates planned,
+deleted, and failed profiles. If any deletion fails, the command stops before
+fetching or creating anything. --dry-run (only with --delete-stale-profiles)
+prints the plan and exits without deleting, creating, or writing files.
+
 Examples:
   asc signing fetch --bundle-id com.example.app --profile-type IOS_APP_STORE --output ./signing
   asc signing fetch --bundle-id com.example.app --profile-type IOS_APP_DEVELOPMENT --create-missing --device "DEVICE1,DEVICE2"
-  asc signing fetch --bundle-id com.example.app --profile-type IOS_APP_STORE --create-missing --create-missing-certificate --identity-password-file ./secrets/p12-password`,
+  asc signing fetch --bundle-id com.example.app --profile-type IOS_APP_STORE --create-missing --create-missing-certificate --identity-password-file ./secrets/p12-password
+  asc signing fetch --bundle-id com.example.app --profile-type IOS_APP_STORE --delete-stale-profiles --dry-run
+  asc signing fetch --bundle-id com.example.app --profile-type IOS_APP_STORE --delete-stale-profiles --confirm --create-missing`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
-		Exec: func(ctx context.Context, args []string) error {
+		Exec: func(ctx context.Context, args []string) (runErr error) {
 			bundle := strings.TrimSpace(*bundleID)
 			if bundle == "" {
 				fmt.Fprintln(os.Stderr, "Error: --bundle-id is required")
@@ -98,6 +111,31 @@ Examples:
 				return shared.MissingRequiredUsageError("--profile-type")
 			}
 			profType = strings.ToUpper(profType)
+			if !*deleteStale {
+				for _, dependent := range []struct {
+					name string
+					set  bool
+				}{{"--confirm", *confirm}, {"--dry-run", *dryRun}} {
+					if dependent.set {
+						message := dependent.name + " requires --delete-stale-profiles"
+						fmt.Fprintln(os.Stderr, "Error: "+message)
+						return shared.NewReportedUsageError(shared.UsageErrorInvalidValue, message)
+					}
+				}
+			}
+			if *deleteStale && !*confirm && !*dryRun {
+				fmt.Fprintln(os.Stderr, "Error: --confirm is required with --delete-stale-profiles")
+				return shared.MissingRequiredUsageError("--confirm")
+			}
+			if *deleteStale {
+				// Deletions are irreversible, so every value that would make the
+				// later fetch fail deterministically is rejected before them.
+				if _, err := resolveSigningCertificateTypes(profType, *certType); err != nil {
+					message := fmt.Sprintf("--delete-stale-profiles: %v", err)
+					fmt.Fprintln(os.Stderr, "Error: "+message)
+					return shared.NewReportedUsageError(shared.UsageErrorInvalidValue, message)
+				}
+			}
 			if err := rejectDeviceWithoutCreateMissing(*deviceIDs, *createMissing); err != nil {
 				return err
 			}
@@ -152,6 +190,21 @@ Examples:
 			certificateOutputs := &signingCertificateOutputs{BasePath: outputDir}
 			defer func() { _ = certificateOutputs.Close() }()
 
+			var result *asc.SigningFetchResult
+			emitted := false
+			emit := func() error {
+				emitted = true
+				return shared.PrintOutput(result, *output.Output, *output.Pretty)
+			}
+			// Stale-profile deletions are irreversible, so their receipt is
+			// printed even when a later step of the fetch fails.
+			defer func() {
+				if runErr == nil || emitted || result == nil || result.StaleProfiles == nil || len(result.StaleProfiles.Deleted) == 0 {
+					return
+				}
+				_ = emit()
+			}()
+
 			client, err := shared.GetASCClient()
 			if err != nil {
 				return fmt.Errorf("signing fetch: %w", err)
@@ -167,7 +220,7 @@ Examples:
 				}
 			}
 
-			result := &asc.SigningFetchResult{
+			result = &asc.SigningFetchResult{
 				BundleID:    bundle,
 				ProfileType: profType,
 				OutputPath:  outputDir,
@@ -178,6 +231,35 @@ Examples:
 				return fmt.Errorf("signing fetch: %w", err)
 			}
 			result.BundleIDResource = bundleIDResp.Data.ID
+
+			if *deleteStale {
+				planned, err := findStaleSigningProfiles(requestCtx, client, bundleIDResp.Data.ID, profType)
+				if err != nil {
+					return fmt.Errorf("signing fetch: list stale profiles: %w", err)
+				}
+				result.StaleProfiles = &asc.SigningFetchStaleProfiles{
+					DryRun:  *dryRun,
+					Planned: planned,
+					Deleted: []asc.SigningStaleProfile{},
+				}
+				if *dryRun {
+					fmt.Fprintf(os.Stderr, "Dry run: would delete %d stale profile(s); nothing was deleted, created, or written\n", len(planned))
+					return emit()
+				}
+				// The output directory is the one deterministic local check that
+				// does not depend on which profile is later resolved, so it runs
+				// before the irreversible deletions.
+				if len(planned) > 0 {
+					if err := prepareOutputDir(); err != nil {
+						return fmt.Errorf("signing fetch: %w; no stale profiles were deleted", err)
+					}
+				}
+				deleteStaleSigningProfiles(requestCtx, client, result.StaleProfiles)
+				if failed := len(result.StaleProfiles.Failed); failed > 0 {
+					_ = emit()
+					return fmt.Errorf("signing fetch: failed to delete %d of %d stale profile(s); nothing was fetched or created", failed, len(planned))
+				}
+			}
 
 			var createdIdentity createdSigningIdentity
 			createdFlag := false
@@ -257,7 +339,7 @@ Examples:
 							result.ProfilesMetadataPath = metadataPath
 						}
 					}
-					_ = shared.PrintOutput(result, *output.Output, *output.Pretty)
+					_ = emit()
 				}
 				return fmt.Errorf("signing fetch: %w", err)
 			}
@@ -285,7 +367,7 @@ Examples:
 					result.ProfileCreationState = "created"
 				}
 				applyCreatedIdentity(result, createdIdentity, createdFlag)
-				_ = shared.PrintOutput(result, *output.Output, *output.Pretty)
+				_ = emit()
 				return fmt.Errorf("signing fetch: %w", primary)
 			}
 
@@ -333,7 +415,7 @@ Examples:
 				result.ProfilesMetadataPath = metadataPath
 			}
 
-			return shared.PrintOutput(result, *output.Output, *output.Pretty)
+			return emit()
 		},
 	}
 }
@@ -677,6 +759,66 @@ func resolveSigningCertificateTypes(profileType, raw string) (string, error) {
 	return strings.Join(certificateTypes, ","), nil
 }
 
+func profileIsStale(profile asc.Resource[asc.ProfileAttributes], profileType string, now time.Time) bool {
+	if !strings.EqualFold(strings.TrimSpace(profile.Attributes.ProfileType), profileType) {
+		return false
+	}
+	return asc.ProfileIsStale(profile.Attributes, now)
+}
+
+// findStaleSigningProfiles collects every expired or INVALID profile of the
+// given type for a bundle ID. It reads all pages before anything is deleted so
+// deletions cannot shift pages and hide profiles from the plan.
+func findStaleSigningProfiles(ctx context.Context, client *asc.Client, bundleIDResourceID, profileType string) ([]asc.SigningStaleProfile, error) {
+	stale := []asc.SigningStaleProfile{}
+	next := ""
+	page := 1
+	seenNext := make(map[string]struct{})
+	now := signingFetchNowFn()
+	for {
+		profiles, err := client.GetBundleIDProfiles(ctx, bundleIDResourceID, asc.WithBundleIDProfilesNextURL(next))
+		if err != nil {
+			return nil, err
+		}
+		for _, profile := range profiles.Data {
+			if !profileIsStale(profile, profileType, now) {
+				continue
+			}
+			stale = append(stale, asc.SigningStaleProfile{
+				ID:             profile.ID,
+				Name:           profile.Attributes.Name,
+				ExpirationDate: profile.Attributes.ExpirationDate,
+				State:          string(profile.Attributes.ProfileState),
+			})
+		}
+		if strings.TrimSpace(profiles.Links.Next) == "" {
+			return stale, nil
+		}
+		if _, ok := seenNext[profiles.Links.Next]; ok {
+			return nil, fmt.Errorf("page %d: %w", page+1, asc.ErrRepeatedPaginationURL)
+		}
+		seenNext[profiles.Links.Next] = struct{}{}
+		page++
+		next = profiles.Links.Next
+	}
+}
+
+// deleteStaleSigningProfiles deletes every planned profile, recording a
+// profile as deleted only after Apple confirms the deletion.
+func deleteStaleSigningProfiles(ctx context.Context, client *asc.Client, report *asc.SigningFetchStaleProfiles) {
+	for _, profile := range report.Planned {
+		if err := client.DeleteProfile(ctx, profile.ID); err != nil {
+			report.Failed = append(report.Failed, asc.SigningStaleProfileFailure{
+				ID:    profile.ID,
+				Name:  profile.Name,
+				Error: err.Error(),
+			})
+			continue
+		}
+		report.Deleted = append(report.Deleted, profile)
+	}
+}
+
 func findActiveProfiles(ctx context.Context, client *asc.Client, bundleIDResourceID, profileType string) ([]asc.Resource[asc.ProfileAttributes], error) {
 	var matches []asc.Resource[asc.ProfileAttributes]
 	next := ""
@@ -694,6 +836,9 @@ func findActiveProfiles(ctx context.Context, client *asc.Client, bundleIDResourc
 
 		for _, profile := range profiles.Data {
 			if profile.Attributes.ProfileState != asc.ProfileStateActive {
+				continue
+			}
+			if asc.ProfileExpirationPassed(profile.Attributes.ExpirationDate, signingFetchNowFn()) {
 				continue
 			}
 			if strings.EqualFold(strings.TrimSpace(profile.Attributes.ProfileType), profileType) {
