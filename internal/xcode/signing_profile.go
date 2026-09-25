@@ -330,21 +330,26 @@ func signingTargetSDK(project *structuredVersionProject, configuration *versionC
 }
 
 // signingProfilesForSDK keeps the profiles usable for a target's SDK. A
-// universal-purchase app can share one bundle ID across an iOS profile and a
-// macOS profile, so a macOS target must only consider OSX profiles and an
-// iOS-family target must not pick a macOS-only profile. An unknown SDK (for
-// example SDKROOT=auto on a multiplatform target) or a profile without a
-// Platform entry is not filtered.
+// universal-purchase app can share one bundle ID across iOS, tvOS, and macOS
+// profiles, so each target only considers profiles whose Platform list
+// covers its SDK family. watchOS apps are signed with iOS-platform profiles
+// and visionOS apps with iOS profiles that list xrOS/visionOS, so those
+// families accept either. An unknown SDK (for example SDKROOT=auto on a
+// multiplatform target) or a profile without a Platform entry is not
+// filtered.
 func signingProfilesForSDK(profiles []signingProfile, sdk string) []signingProfile {
-	if sdk == "" || sdk == "auto" {
+	accepted := signingSDKProfilePlatforms(sdk)
+	if accepted == nil {
 		return profiles
 	}
-	mac := strings.HasPrefix(sdk, "macosx")
 	filtered := make([]signingProfile, 0, len(profiles))
 	for _, profile := range profiles {
-		keep := !signingProfileMacOnly(profile)
-		if mac {
-			keep = len(profile.platforms) == 0 || signingProfileSupportsMac(profile)
+		keep := len(profile.platforms) == 0
+		for _, platform := range profile.platforms {
+			if accepted[strings.ToLower(strings.TrimSpace(platform))] {
+				keep = true
+				break
+			}
 		}
 		if keep {
 			filtered = append(filtered, profile)
@@ -353,13 +358,23 @@ func signingProfilesForSDK(profiles []signingProfile, sdk string) []signingProfi
 	return filtered
 }
 
-func signingProfileSupportsMac(profile signingProfile) bool {
-	for _, platform := range profile.platforms {
-		if strings.EqualFold(platform, "OSX") {
-			return true
-		}
+// signingSDKProfilePlatforms maps an SDKROOT to the lowercase profile
+// Platform values that can sign it, or nil when the SDK is not recognized.
+func signingSDKProfilePlatforms(sdk string) map[string]bool {
+	switch {
+	case strings.HasPrefix(sdk, "macosx"):
+		return map[string]bool{"osx": true}
+	case strings.HasPrefix(sdk, "iphoneos"):
+		return map[string]bool{"ios": true}
+	case strings.HasPrefix(sdk, "appletvos"):
+		return map[string]bool{"tvos": true}
+	case strings.HasPrefix(sdk, "watchos"):
+		return map[string]bool{"ios": true, "watchos": true}
+	case strings.HasPrefix(sdk, "xros"):
+		return map[string]bool{"xros": true, "visionos": true, "ios": true}
+	default:
+		return nil
 	}
-	return false
 }
 
 func signingProfileMacOnly(profile signingProfile) bool {

@@ -835,3 +835,33 @@ func TestInferSigningPlanExportOptionsAcceptProfileUUIDOverrides(t *testing.T) {
 		t.Fatalf("ready=%t blockers=%v export=%#v, want the UUID mapping", plan.Ready, plan.Blockers, plan.ExportOptions)
 	}
 }
+
+func TestInferSigningPlanMatchesProfilesByTargetPlatform(t *testing.T) {
+	requireStrictSigningPlatform(t)
+	project := writeSigningProjectFixture(t, "333333333333333333333333, 444444444444444444444444", `
+		333333333333333333333333 /* Phone */ = {isa = PBXNativeTarget; buildConfigurationList = 555555555555555555555555; buildPhases = (); dependencies = (); name = Phone; productName = Phone; productType = "com.apple.product-type.application"; };
+		444444444444444444444444 /* TV */ = {isa = PBXNativeTarget; buildConfigurationList = 777777777777777777777777; buildPhases = (); dependencies = (); name = TV; productName = TV; productType = "com.apple.product-type.application"; };
+		999999999999999999999994 /* Phone Release */ = {isa = XCBuildConfiguration; buildSettings = { PRODUCT_BUNDLE_IDENTIFIER = com.example.demo; SDKROOT = iphoneos; }; name = Release; };
+		999999999999999999999996 /* TV Release */ = {isa = XCBuildConfiguration; buildSettings = { PRODUCT_BUNDLE_IDENTIFIER = com.example.demo; SDKROOT = appletvos; }; name = Release; };
+		555555555555555555555555 = {isa = XCConfigurationList; buildConfigurations = (999999999999999999999994); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		777777777777777777777777 = {isa = XCConfigurationList; buildConfigurations = (999999999999999999999996); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };`)
+	root := t.TempDir()
+	ios := writeSigningTestProfileWith(t, filepath.Join(root, "iOS.mobileprovision"), "iOS Profile", "9b9b9b9b-9b9b-9b9b-9b9b-9b9b9b9b9b9b", "ABCDE12345.com.example.demo", time.Now().Add(time.Hour), func(payload map[string]any) {
+		payload["Platform"] = []string{"iOS", "xrOS", "visionOS"}
+	})
+	tvos := writeSigningTestProfileWith(t, filepath.Join(root, "tvOS.mobileprovision"), "tvOS Profile", "acacacac-acac-acac-acac-acacacacacac", "ABCDE12345.com.example.demo", time.Now().Add(48*time.Hour), func(payload map[string]any) {
+		payload["Platform"] = []string{"tvOS"}
+	})
+	plan, err := BuildSigningPlan(SigningPlanOptions{
+		ProjectPath:  project,
+		ProfilePaths: []string{ios, tvos},
+		StateDir:     filepath.Join(root, "state"),
+	})
+	if err != nil {
+		t.Fatalf("BuildSigningPlan() error = %v", err)
+	}
+	if !signingPlanSettingEquals(plan, "Phone", "Release", "PROVISIONING_PROFILE_SPECIFIER", "iOS Profile") ||
+		!signingPlanSettingEquals(plan, "TV", "Release", "PROVISIONING_PROFILE_SPECIFIER", "tvOS Profile") {
+		t.Fatalf("profiles were not matched by platform: %#v", plan.Inferences)
+	}
+}
