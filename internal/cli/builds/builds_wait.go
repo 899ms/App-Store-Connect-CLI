@@ -370,47 +370,9 @@ func buildProcessingFailureError(
 	failure shared.BuildProcessingFailureContext,
 ) error {
 	baseErr := fmt.Errorf("build processing failed with state %s", state)
-	failure.BuildID = strings.TrimSpace(buildID)
+	failure.BuildID = buildID
 	if buildResp != nil {
-		failure.BundleVersion = strings.TrimSpace(buildResp.Data.Attributes.Version)
+		failure.BundleVersion = buildResp.Data.Attributes.Version
 	}
-	resolveBuildProcessingFailureContext(ctx, client, buildID, &failure)
-
 	return shared.EnrichBuildProcessingFailure(ctx, client, failure, baseErr)
-}
-
-// resolveBuildProcessingFailureContext describes the failed build from App
-// Store Connect itself, so --build-id waits can match the upload the build
-// came from and selectors cannot mismatch it. Every lookup is best effort: an
-// unresolved field only means the wait reports the processing state without
-// added details.
-func resolveBuildProcessingFailureContext(
-	ctx context.Context,
-	client *asc.Client,
-	buildID string,
-	failure *shared.BuildProcessingFailureContext,
-) {
-	if client == nil {
-		return
-	}
-
-	if strings.TrimSpace(failure.AppID) == "" {
-		if app, err := client.GetBuildApp(ctx, buildID); err == nil && app != nil {
-			failure.AppID = strings.TrimSpace(app.Data.ID)
-		}
-	}
-
-	// App Store Connect treats spellings such as "1.2" and "1.2.0" as the same
-	// train but stores only the uploaded one, so the build's own pre-release
-	// version wins over the spelling the selector asked for.
-	preRelease, err := client.GetBuildPreReleaseVersion(ctx, buildID)
-	if err != nil || preRelease == nil {
-		return
-	}
-	if version := strings.TrimSpace(preRelease.Data.Attributes.Version); version != "" {
-		failure.ShortVersion = version
-	}
-	if platform := strings.TrimSpace(string(preRelease.Data.Attributes.Platform)); platform != "" {
-		failure.Platform = platform
-	}
 }

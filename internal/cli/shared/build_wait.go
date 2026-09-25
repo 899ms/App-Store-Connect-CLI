@@ -425,6 +425,24 @@ type BuildProcessingFailureContext struct {
 	Platform      string
 }
 
+// WaitForBuildProcessingWithDetails waits for a build to finish processing
+// like asc.Client.WaitForBuildProcessing, and appends the App Store Connect
+// processing details of the originating upload when the build ends FAILED or
+// INVALID. appID may be empty; it is then resolved from the build. The state
+// error is returned unchanged when no details can be resolved.
+func WaitForBuildProcessingWithDetails(ctx context.Context, client *asc.Client, appID, buildID string, pollInterval time.Duration) (*asc.BuildResponse, error) {
+	build, err := client.WaitForBuildProcessing(ctx, buildID, pollInterval)
+	if err == nil || !asc.IsBuildProcessingFailure(err) {
+		return build, err
+	}
+
+	failure := BuildProcessingFailureContext{AppID: appID, BuildID: buildID}
+	if build != nil {
+		failure.BundleVersion = build.Data.Attributes.Version
+	}
+	return build, EnrichBuildProcessingFailure(ctx, client, failure, err)
+}
+
 // EnrichBuildProcessingFailure appends the App Store Connect processing
 // details of the originating build upload to a terminal build-processing
 // error. The base error is returned unchanged when no upload matches or no
@@ -434,11 +452,56 @@ func EnrichBuildProcessingFailure(ctx context.Context, client *asc.Client, failu
 		return nil
 	}
 
+	failure = normalizeBuildProcessingFailureContext(failure)
+	if client == nil || failure.BundleVersion == "" {
+		return baseErr
+	}
+	resolveBuildProcessingFailureContext(ctx, client, &failure)
+
 	upload, err := findBuildUploadForProcessingFailure(ctx, client, failure)
 	if err != nil || upload == nil {
 		return baseErr
 	}
-	return enrichBuildUploadFailure(ctx, client, strings.TrimSpace(failure.AppID), upload, baseErr)
+	return enrichBuildUploadFailure(ctx, client, failure.AppID, upload, baseErr)
+}
+
+func normalizeBuildProcessingFailureContext(failure BuildProcessingFailureContext) BuildProcessingFailureContext {
+	failure.AppID = strings.TrimSpace(failure.AppID)
+	failure.BuildID = strings.TrimSpace(failure.BuildID)
+	failure.BundleVersion = strings.TrimSpace(failure.BundleVersion)
+	failure.ShortVersion = strings.TrimSpace(failure.ShortVersion)
+	failure.Platform = strings.TrimSpace(failure.Platform)
+	return failure
+}
+
+// resolveBuildProcessingFailureContext describes the failed build from App
+// Store Connect itself, so waits by build ID can match the upload the build
+// came from and selectors cannot mismatch it. Every lookup is best effort: an
+// unresolved field only means the failure is reported without added details.
+func resolveBuildProcessingFailureContext(ctx context.Context, client *asc.Client, failure *BuildProcessingFailureContext) {
+	if failure.BuildID == "" {
+		return
+	}
+
+	if failure.AppID == "" {
+		if app, err := client.GetBuildApp(ctx, failure.BuildID); err == nil && app != nil {
+			failure.AppID = strings.TrimSpace(app.Data.ID)
+		}
+	}
+
+	// App Store Connect treats spellings such as "1.2" and "1.2.0" as the same
+	// train but stores only the uploaded one, so the build's own pre-release
+	// version wins over the spelling the selector asked for.
+	preRelease, err := client.GetBuildPreReleaseVersion(ctx, failure.BuildID)
+	if err != nil || preRelease == nil {
+		return
+	}
+	if version := strings.TrimSpace(preRelease.Data.Attributes.Version); version != "" {
+		failure.ShortVersion = version
+	}
+	if platform := strings.TrimSpace(string(preRelease.Data.Attributes.Platform)); platform != "" {
+		failure.Platform = platform
+	}
 }
 
 const buildProcessingFailureLookupLimit = 200
