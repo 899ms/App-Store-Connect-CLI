@@ -70,8 +70,14 @@ asc screenshots sizes --all
     asc screenshots upload \
       --version-localization "LOCALIZATION_ID" \
       --path "./screenshots/iphone" \
-      --device-type "IPHONE_65"
+      --device-type "IPHONE_65" \
+      --concurrency 4
     ```
+
+    Uploads within one screenshot set are bounded to four concurrent requests
+    by default. Use `--concurrency 1` for serial uploads or any value through
+    `8` when the API and network can sustain more fan-out; output ordering stays
+    deterministic.
   </Step>
 
   <Step title="Upload iPad screenshots">

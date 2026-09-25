@@ -18,6 +18,11 @@ var (
 	ErrRepeatedPaginationURL = errors.New("detected repeated pagination URL")
 )
 
+var (
+	ErrMissingPaginationFetcher = errors.New("pagination fetch function is required")
+	ErrNilPaginationPage        = errors.New("pagination page is nil")
+)
+
 type responseBodyReadError struct {
 	err error
 }
@@ -74,6 +79,10 @@ type APIError struct {
 	// after the first is not lost. It is empty when the body carried no
 	// parsable errors[] array.
 	AllCodes []string
+	// AllDetails lists every detail from Apple's errors[] array in response
+	// order, including empty details. Callers that classify a response by its
+	// diagnostic text must consult this slice so a later cause is not lost.
+	AllDetails []string
 	// Remediation is operator guidance for error codes whose cause is an
 	// account-level state that no API key permission can satisfy. It is
 	// appended to Error() so the guidance travels with the error itself.

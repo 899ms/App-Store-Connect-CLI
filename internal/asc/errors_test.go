@@ -120,6 +120,26 @@ func TestParseErrorWithStatus_RetainsEveryErrorCode(t *testing.T) {
 	}
 }
 
+func TestParseErrorWithStatus_RetainsEveryErrorDetail(t *testing.T) {
+	payload := `{"errors":[{"code":"FIRST","detail":"first detail"},{"code":"SECOND","detail":"second detail"},{"code":"THIRD","detail":""}]}`
+
+	err := ParseErrorWithStatus([]byte(payload), 409)
+
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("ParseErrorWithStatus returned %T, want *APIError", err)
+	}
+	want := []string{"first detail", "second detail", ""}
+	if len(apiErr.AllDetails) != len(want) {
+		t.Fatalf("AllDetails = %v, want %v", apiErr.AllDetails, want)
+	}
+	for i, detail := range want {
+		if apiErr.AllDetails[i] != detail {
+			t.Fatalf("AllDetails = %v, want %v", apiErr.AllDetails, want)
+		}
+	}
+}
+
 func TestIsMissingResourceOfType(t *testing.T) {
 	const missingAvailability = `{"errors":[{"id":"b8a2b802-0512-4f42-b46a-cb444c0dc8db","status":"404","code":"NOT_FOUND","title":"The specified resource does not exist","detail":"There is no resource of type 'appAvailabilities' with id '6807733044'"}]}`
 	const missingApp = `{"errors":[{"id":"1c5bfc66-b18d-46ce-9863-635985130e62","status":"404","code":"NOT_FOUND","title":"The specified resource does not exist","detail":"There is no resource of type 'apps' with id '999999999999'"}]}`
