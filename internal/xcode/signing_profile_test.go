@@ -449,3 +449,40 @@ func TestInferSigningPlanBlocksMixedExportMethods(t *testing.T) {
 		t.Fatalf("explicit method plan ready=%t blockers=%v export=%#v", explicit.Ready, explicit.Blockers, explicit.ExportOptions)
 	}
 }
+
+func TestInferSigningPlanExportOptionsFollowSettingsOverrides(t *testing.T) {
+	requireStrictSigningPlatform(t)
+	project := writeInferredSigningProject(t)
+	root := t.TempDir()
+	profile := writeSigningTestProfile(t, filepath.Join(root, "App.mobileprovision"), "App Profile", "56565656-5656-5656-5656-565656565656", "ABCDE12345.com.example.demo", time.Now().Add(time.Hour))
+	settingsPath := filepath.Join(root, "settings.json")
+	writeSigningSettingsTestFile(t, settingsPath, `{
+		"schemaVersion": 1,
+		"targets": [{
+			"name": "App",
+			"configurations": [{
+				"name": "Release",
+				"settings": {"PROVISIONING_PROFILE_SPECIFIER": "Custom App Profile", "DEVELOPMENT_TEAM": "ZYXWV98765"}
+			}]
+		}]
+	}`)
+	plan, err := BuildSigningPlan(SigningPlanOptions{
+		ProjectPath:      project,
+		SettingsFilePath: settingsPath,
+		ProfilePaths:     []string{profile},
+		Configuration:    "Release",
+		SkipTargets:      []string{"Widget", "Watch"},
+		StateDir:         filepath.Join(root, "state"),
+	})
+	if err != nil {
+		t.Fatalf("BuildSigningPlan() error = %v", err)
+	}
+	if !plan.Ready {
+		t.Fatalf("expected ready plan, blockers=%v", plan.Blockers)
+	}
+	if plan.ExportOptions == nil ||
+		plan.ExportOptions.ProvisioningProfiles["com.example.demo"] != "Custom App Profile" ||
+		plan.ExportOptions.TeamID != "ZYXWV98765" {
+		t.Fatalf("export options = %#v, want the settings-file overrides", plan.ExportOptions)
+	}
+}

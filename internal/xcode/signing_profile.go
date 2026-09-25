@@ -197,15 +197,9 @@ func inferSigningSettings(project *structuredVersionProject, opts SigningPlanOpt
 			blockers = append(blockers, methodBlocker)
 		}
 	}
-	exportOptions := signingExportOptions(method, assigned)
-	if len(assigned) > 1 {
-		teams := make(map[string]struct{})
-		for _, item := range assigned {
-			teams[item.profile.teamID] = struct{}{}
-		}
-		if len(teams) > 1 {
-			blockers = append(blockers, "selected profiles use more than one development team")
-		}
+	exportOptions, teams := signingExportOptions(method, assigned, manifest)
+	if len(teams) > 1 {
+		blockers = append(blockers, "selected profiles use more than one development team")
 	}
 	if manifest != nil && len(manifest.Targets) == 0 {
 		manifest = nil
@@ -535,21 +529,81 @@ func inferSigningExportMethod(assigned []signingProfileAssignment) (string, stri
 	return names[0], fmt.Sprintf("selected profiles imply different export methods (%s); pass --export-method to choose one", strings.Join(names, ", "))
 }
 
-func signingExportOptions(method string, assigned []signingProfileAssignment) *SigningPlanExportOptions {
-	if method == "" || len(assigned) == 0 {
-		return nil
-	}
+// signingExportOptions builds export options from the final settings, after
+// any --settings-file override, so the plist names the same bundle ID,
+// profile, and team that the plan writes into the project. It also returns
+// the distinct development teams those settings use.
+func signingExportOptions(method string, assigned []signingProfileAssignment, manifest *signingSettingsManifest) (*SigningPlanExportOptions, []string) {
 	profiles := make(map[string]string)
-	teamID := assigned[0].profile.teamID
+	teamSet := make(map[string]bool)
 	for _, item := range assigned {
-		profiles[item.bundleID] = item.profile.name
+		bundleID := item.bundleID
+		if value, found := signingManifestString(manifest, item.target, item.configuration, "PRODUCT_BUNDLE_IDENTIFIER"); found && value != "" {
+			bundleID = value
+		}
+		name := item.profile.name
+		if value, found := signingManifestString(manifest, item.target, item.configuration, "PROVISIONING_PROFILE_SPECIFIER"); found {
+			name = value
+		}
+		team := item.profile.teamID
+		if value, found := signingManifestString(manifest, item.target, item.configuration, "DEVELOPMENT_TEAM"); found {
+			team = value
+		}
+		if name != "" {
+			profiles[bundleID] = name
+		}
+		if team != "" {
+			teamSet[team] = true
+		}
 	}
-	return &SigningPlanExportOptions{
+	teams := make([]string, 0, len(teamSet))
+	for team := range teamSet {
+		teams = append(teams, team)
+	}
+	sort.Strings(teams)
+	if method == "" || len(assigned) == 0 {
+		return nil, teams
+	}
+	options := &SigningPlanExportOptions{
 		Method:               method,
 		SigningStyle:         "manual",
-		TeamID:               teamID,
 		ProvisioningProfiles: profiles,
 	}
+	if len(teams) > 0 {
+		options.TeamID = teams[0]
+	}
+	return options, teams
+}
+
+// signingManifestString returns a string setting from the final manifest. A
+// JSON null (a removal) is reported as found with an empty value.
+func signingManifestString(manifest *signingSettingsManifest, target, configuration, key string) (string, bool) {
+	if manifest == nil {
+		return "", false
+	}
+	for _, item := range manifest.Targets {
+		if strings.TrimSpace(item.Name) != target {
+			continue
+		}
+		for _, config := range item.Configurations {
+			if strings.TrimSpace(config.Name) != configuration {
+				continue
+			}
+			raw, ok := config.Settings[key]
+			if !ok {
+				continue
+			}
+			var value *string
+			if err := json.Unmarshal(raw, &value); err != nil {
+				continue
+			}
+			if value == nil {
+				return "", true
+			}
+			return strings.TrimSpace(*value), true
+		}
+	}
+	return "", false
 }
 
 func readSigningProfiles(paths []string) ([]signingProfile, []string, error) {
