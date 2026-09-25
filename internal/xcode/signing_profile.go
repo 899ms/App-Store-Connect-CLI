@@ -50,6 +50,7 @@ type signingProfile struct {
 	identity   string
 	certSHA256 string
 	method     string
+	platforms  []string
 }
 
 type signingProfileAssignment struct {
@@ -128,13 +129,14 @@ func inferSigningSettings(project *structuredVersionProject, opts SigningPlanOpt
 			blockers = append(blockers, fmt.Sprintf("unmatched signing target %s/%s: %s", scope.target, scope.name, detail))
 			continue
 		}
-		selected, discarded, match := selectSigningProfile(active, bundleID)
+		sdk := signingTargetSDK(project, scope)
+		selected, discarded, match := selectSigningProfile(signingProfilesForSDK(active, sdk), bundleID)
 		if selected == nil {
 			if covered[scope.target+"\x00"+scope.name] {
 				continue
 			}
 			detail := ""
-			if stale, _, _ := selectSigningProfile(expired, bundleID); stale != nil {
+			if stale, _, _ := selectSigningProfile(signingProfilesForSDK(expired, sdk), bundleID); stale != nil {
 				detail = fmt.Sprintf("; profile %s expired at %s", stale.name, stale.expires.UTC().Format(time.RFC3339))
 			}
 			blockers = append(blockers, fmt.Sprintf("unmatched signing target %s/%s bundle ID %s%s", scope.target, scope.name, bundleID, detail))
@@ -281,6 +283,56 @@ func signingProductEmbedsProfile(productType string) bool {
 	default:
 		return false
 	}
+}
+
+func signingTargetSDK(project *structuredVersionProject, configuration *versionConfiguration) string {
+	value, _, err := project.resolveSetting(configuration, "SDKROOT")
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+// signingProfilesForSDK keeps the profiles usable for a target's SDK. A
+// universal-purchase app can share one bundle ID across an iOS profile and a
+// macOS profile, so a macOS target must only consider OSX profiles and an
+// iOS-family target must not pick a macOS-only profile. An unknown SDK (for
+// example SDKROOT=auto on a multiplatform target) or a profile without a
+// Platform entry is not filtered.
+func signingProfilesForSDK(profiles []signingProfile, sdk string) []signingProfile {
+	if sdk == "" || sdk == "auto" {
+		return profiles
+	}
+	mac := strings.HasPrefix(sdk, "macosx")
+	filtered := make([]signingProfile, 0, len(profiles))
+	for _, profile := range profiles {
+		keep := !signingProfileMacOnly(profile)
+		if mac {
+			keep = len(profile.platforms) == 0 || signingProfileSupportsMac(profile)
+		}
+		if keep {
+			filtered = append(filtered, profile)
+		}
+	}
+	return filtered
+}
+
+func signingProfileSupportsMac(profile signingProfile) bool {
+	for _, platform := range profile.platforms {
+		if strings.EqualFold(platform, "OSX") {
+			return true
+		}
+	}
+	return false
+}
+
+func signingProfileMacOnly(profile signingProfile) bool {
+	for _, platform := range profile.platforms {
+		if !strings.EqualFold(platform, "OSX") {
+			return false
+		}
+	}
+	return len(profile.platforms) > 0
 }
 
 func signingBundleID(project *structuredVersionProject, configuration *versionConfiguration) (string, error) {
@@ -536,13 +588,22 @@ func parseSigningProfile(path string) (signingProfile, error) {
 		DeveloperCertificates       [][]byte       `plist:"DeveloperCertificates"`
 		ProvisionsAllDevices        bool           `plist:"ProvisionsAllDevices"`
 		ProvisionedDevices          []string       `plist:"ProvisionedDevices"`
+		Platform                    []string       `plist:"Platform"`
 	}
 	if _, err := plist.Unmarshal(signed.Content, &payload); err != nil {
 		return signingProfile{}, fmt.Errorf("decode profile %s: %w", path, err)
 	}
 	teamID := firstSigningProfileString(payload.TeamIdentifier)
 	prefix := firstSigningProfileString(payload.ApplicationIdentifierPrefix)
+	if prefix == "" {
+		prefix = teamID
+	}
+	// macOS profiles carry com.apple.application-identifier instead of the
+	// iOS-family application-identifier key.
 	applicationID, _ := payload.Entitlements["application-identifier"].(string)
+	if strings.TrimSpace(applicationID) == "" {
+		applicationID, _ = payload.Entitlements["com.apple.application-identifier"].(string)
+	}
 	pattern, wildcard, err := signingProfilePattern(applicationID, prefix)
 	if err != nil {
 		return signingProfile{}, fmt.Errorf("profile %s: %w", path, err)
@@ -557,7 +618,7 @@ func parseSigningProfile(path string) (signingProfile, error) {
 	if err != nil {
 		return signingProfile{}, fmt.Errorf("profile %s: %w", path, err)
 	}
-	return signingProfile{
+	profile := signingProfile{
 		path:       path,
 		name:       strings.TrimSpace(payload.Name),
 		uuid:       strings.TrimSpace(payload.UUID),
@@ -567,8 +628,10 @@ func parseSigningProfile(path string) (signingProfile, error) {
 		expires:    payload.ExpirationDate,
 		identity:   identity,
 		certSHA256: certSHA,
-		method:     signingProfileExportMethod(payload.ProvisionsAllDevices, len(payload.ProvisionedDevices) > 0, entitlementBool(payload.Entitlements["get-task-allow"])),
-	}, nil
+		platforms:  append([]string(nil), payload.Platform...),
+	}
+	profile.method = signingProfileExportMethod(signingProfileMacOnly(profile), payload.ProvisionsAllDevices, len(payload.ProvisionedDevices) > 0, entitlementBool(payload.Entitlements["get-task-allow"]))
+	return profile, nil
 }
 
 func signingProfilePattern(applicationID, prefix string) (string, bool, error) {
@@ -609,7 +672,20 @@ func signingProfileIdentity(certificates [][]byte) (string, string, error) {
 	return identity, hex.EncodeToString(sum[:]), nil
 }
 
-func signingProfileExportMethod(enterprise, hasDevices, debuggable bool) string {
+func signingProfileExportMethod(mac, allDevices, hasDevices, debuggable bool) string {
+	if mac {
+		// macOS has no ad-hoc or enterprise distribution: a profile that
+		// provisions all devices is Developer ID, a device list is development.
+		switch {
+		case allDevices:
+			return "developer-id"
+		case hasDevices:
+			return "development"
+		default:
+			return "app-store"
+		}
+	}
+	enterprise := allDevices
 	switch {
 	case enterprise:
 		return "enterprise"

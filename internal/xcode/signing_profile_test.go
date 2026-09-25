@@ -376,3 +376,42 @@ func writeSigningProjectFixture(t *testing.T, targetIDs, objects string) string 
 	}
 	return projectPath
 }
+
+func TestInferSigningPlanMatchesMacOSProfilesByPlatform(t *testing.T) {
+	requireStrictSigningPlatform(t)
+	project := writeSigningProjectFixture(t, "333333333333333333333333", `
+		333333333333333333333333 /* Mac */ = {isa = PBXNativeTarget; buildConfigurationList = 555555555555555555555555; buildPhases = (); dependencies = (); name = Mac; productName = Mac; productType = "com.apple.product-type.application"; };
+		999999999999999999999994 /* Mac Release */ = {isa = XCBuildConfiguration; buildSettings = { PRODUCT_BUNDLE_IDENTIFIER = com.example.demo; SDKROOT = macosx; }; name = Release; };
+		555555555555555555555555 = {isa = XCConfigurationList; buildConfigurations = (999999999999999999999994); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };`)
+	root := t.TempDir()
+	ios := writeSigningTestProfileWith(t, filepath.Join(root, "iOS.mobileprovision"), "iOS Store", "88888888-8888-8888-8888-888888888888", "ABCDE12345.com.example.demo", time.Now().Add(48*time.Hour), func(payload map[string]any) {
+		payload["Platform"] = []string{"iOS", "xrOS", "visionOS"}
+		delete(payload, "ProvisionedDevices")
+	})
+	mac := writeSigningTestProfileWith(t, filepath.Join(root, "Mac.provisionprofile"), "Mac Developer ID", "99999999-9999-9999-9999-999999999999", "", time.Now().Add(time.Hour), func(payload map[string]any) {
+		payload["Platform"] = []string{"OSX"}
+		payload["ProvisionsAllDevices"] = true
+		delete(payload, "ProvisionedDevices")
+		payload["Entitlements"] = map[string]any{
+			"com.apple.application-identifier":    "ABCDE12345.com.example.demo",
+			"com.apple.developer.team-identifier": "ABCDE12345",
+		}
+	})
+	plan, err := BuildSigningPlan(SigningPlanOptions{
+		ProjectPath:  project,
+		ProfilePaths: []string{ios, mac},
+		StateDir:     filepath.Join(root, "state"),
+	})
+	if err != nil {
+		t.Fatalf("BuildSigningPlan() error = %v", err)
+	}
+	if !plan.Ready {
+		t.Fatalf("expected ready plan, blockers=%v", plan.Blockers)
+	}
+	if !signingPlanSettingEquals(plan, "Mac", "Release", "PROVISIONING_PROFILE_SPECIFIER", "Mac Developer ID") {
+		t.Fatalf("macOS target did not select the macOS profile: %#v", plan.Inferences)
+	}
+	if plan.ExportOptions == nil || plan.ExportOptions.Method != "developer-id" {
+		t.Fatalf("export options = %#v, want developer-id", plan.ExportOptions)
+	}
+}
