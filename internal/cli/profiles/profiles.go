@@ -3,9 +3,11 @@ package profiles
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -99,7 +101,9 @@ Examples:
 --stale-only always reads every page, then keeps profiles that are INVALID or
 whose expiration date has passed. Its JSON keeps Apple's envelope shape, but it
 is a computed view: meta and pagination links are dropped because they describe
-the unfiltered list. It cannot be combined with --next.
+the unfiltered list, and included resources are limited to those the stale
+profiles reference. It cannot be combined with --next. With --fields, both
+--stale-only and --include-stale need profileState and expirationDate.
 --include-stale adds a Stale column to table and markdown output only.`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
@@ -162,6 +166,12 @@ the unfiltered list. It cannot be combined with --next.
 			profileFields, err := normalizeProfileFields(*fields, "--fields")
 			if err != nil {
 				return shared.UsageError(fmt.Sprintf("profiles list: %v", err))
+			}
+			if (*staleOnly || *includeStale) && len(profileFields) > 0 &&
+				(!slices.Contains(profileFields, "profileState") || !slices.Contains(profileFields, "expirationDate")) {
+				const message = "--stale-only and --include-stale require --fields to include profileState and expirationDate"
+				fmt.Fprintln(os.Stderr, "Error: "+message)
+				return shared.NewReportedUsageError(shared.UsageErrorInvalidValue, message)
 			}
 			bundleIDFieldsValue, err := normalizeProfileFieldsSelection(*bundleIDFields, profileBundleIDFieldsList(), "--bundle-id-fields")
 			if err != nil {
@@ -316,8 +326,64 @@ func staleProfilesView(profiles *asc.ProfilesResponse, now time.Time) *asc.Profi
 	return &asc.ProfilesResponse{
 		Data:     filtered,
 		Links:    asc.Links{Self: profiles.Links.Self},
-		Included: profiles.Included,
+		Included: includedReferencedBy(filtered, profiles.Included),
 	}
+}
+
+// includedReferencedBy keeps only the included resources that a retained
+// profile references, so the filtered view carries no orphaned entries.
+func includedReferencedBy(profiles []asc.Resource[asc.ProfileAttributes], included json.RawMessage) json.RawMessage {
+	if len(included) == 0 {
+		return nil
+	}
+	type linkage struct {
+		Type string `json:"type"`
+		ID   string `json:"id"`
+	}
+	referenced := make(map[linkage]struct{})
+	for _, profile := range profiles {
+		var relationships map[string]struct {
+			Data json.RawMessage `json:"data"`
+		}
+		if len(profile.Relationships) == 0 || json.Unmarshal(profile.Relationships, &relationships) != nil {
+			continue
+		}
+		for _, relationship := range relationships {
+			var many []linkage
+			if json.Unmarshal(relationship.Data, &many) == nil {
+				for _, item := range many {
+					referenced[item] = struct{}{}
+				}
+				continue
+			}
+			var one linkage
+			if json.Unmarshal(relationship.Data, &one) == nil && one.ID != "" {
+				referenced[one] = struct{}{}
+			}
+		}
+	}
+	var resources []json.RawMessage
+	if json.Unmarshal(included, &resources) != nil {
+		return nil
+	}
+	kept := make([]json.RawMessage, 0, len(resources))
+	for _, resource := range resources {
+		var key linkage
+		if json.Unmarshal(resource, &key) != nil {
+			continue
+		}
+		if _, ok := referenced[key]; ok {
+			kept = append(kept, resource)
+		}
+	}
+	if len(kept) == 0 {
+		return nil
+	}
+	data, err := json.Marshal(kept)
+	if err != nil {
+		return nil
+	}
+	return data
 }
 
 func printProfilesStaleTable(resp *asc.ProfilesResponse) error {
