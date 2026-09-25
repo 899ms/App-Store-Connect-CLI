@@ -1227,7 +1227,7 @@ func TestVerifyBuildUploadAfterCommitIgnoresRetryableLookupErrorsUntilBuildLinks
 		}`)
 	})
 
-	err := VerifyBuildUploadAfterCommit(context.Background(), client, "app-1", "upload-current", time.Millisecond, 50*time.Millisecond)
+	_, err := VerifyBuildUploadAfterCommit(context.Background(), client, "app-1", "upload-current", time.Millisecond, 50*time.Millisecond)
 	if err != nil {
 		t.Fatalf("VerifyBuildUploadAfterCommit() error: %v", err)
 	}
@@ -1273,7 +1273,7 @@ func TestVerifyBuildUploadAfterCommitIgnoresRetryDelayBeyondVerificationBudget(t
 	})
 
 	verifyTimeout := 30 * time.Millisecond
-	err = VerifyBuildUploadAfterCommit(context.Background(), client, "app-1", "upload-current", time.Millisecond, verifyTimeout)
+	_, err = VerifyBuildUploadAfterCommit(context.Background(), client, "app-1", "upload-current", time.Millisecond, verifyTimeout)
 	if err != nil {
 		t.Fatalf("VerifyBuildUploadAfterCommit() error: %v", err)
 	}
@@ -1307,7 +1307,7 @@ func TestVerifyBuildUploadAfterCommitStopsAfterExhaustedBuildUploadNotFound(t *t
 
 	verifyTimeout := 150 * time.Millisecond
 	started := time.Now()
-	err := VerifyBuildUploadAfterCommit(context.Background(), client, "app-1", "upload-current", time.Millisecond, verifyTimeout)
+	_, err := VerifyBuildUploadAfterCommit(context.Background(), client, "app-1", "upload-current", time.Millisecond, verifyTimeout)
 	elapsed := time.Since(started)
 	if err != nil {
 		t.Fatalf("VerifyBuildUploadAfterCommit() error: %v", err)
