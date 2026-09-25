@@ -131,6 +131,11 @@ type localMetadataBundle struct {
 	version        map[string]versionLocalPatch
 	defaultAppInfo *appInfoLocalPatch
 	defaultVersion *versionLocalPatch
+	// appInfoManaged and versionManaged report whether the scope directory
+	// exists locally. An absent scope directory leaves that scope unmanaged:
+	// its remote localizations are neither planned nor mutated.
+	appInfoManaged bool
+	versionManaged bool
 }
 
 type localPlanFields struct {
@@ -197,6 +202,8 @@ Examples:
 Notes:
   - default.json fallback is applied only when --allow-deletes is not set.
   - with --allow-deletes, remote locales missing locally are planned as deletes.
+  - a missing app-info/ or version/<version>/ directory leaves that scope unmanaged;
+    an existing directory manages every locale in that scope.
   - applying an explicit null field clear requires --confirm.
   - omitted fields are treated as no-op; they do not imply deletion.`,
 			cfg.verbTitle,
@@ -378,7 +385,8 @@ func loadLocalMetadata(dir, version string) (localMetadataBundle, error) {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return localMetadataBundle{}, fmt.Errorf("failed to read %s: %w", appInfoDir, err)
 	}
-	if err == nil {
+	appInfoManaged := err == nil
+	if appInfoManaged {
 		seenAppInfoLocales := make(map[string]string)
 		for _, entry := range appInfoEntries {
 			if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
@@ -417,7 +425,8 @@ func loadLocalMetadata(dir, version string) (localMetadataBundle, error) {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return localMetadataBundle{}, fmt.Errorf("failed to read %s: %w", versionDir, err)
 	}
-	if err == nil {
+	versionManaged := err == nil
+	if versionManaged {
 		seenVersionLocales := make(map[string]string)
 		for _, entry := range versionEntries {
 			if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
@@ -455,6 +464,8 @@ func loadLocalMetadata(dir, version string) (localMetadataBundle, error) {
 		version:        localVersion,
 		defaultAppInfo: defaultAppInfo,
 		defaultVersion: defaultVersion,
+		appInfoManaged: appInfoManaged,
+		versionManaged: versionManaged,
 	}, nil
 }
 

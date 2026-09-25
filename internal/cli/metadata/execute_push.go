@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
@@ -135,13 +136,21 @@ func ExecutePushWithWarnings(ctx context.Context, opts PushExecutionOptions) (Pu
 		return PushPlanResult{}, nil, fmt.Errorf("%s: %w", errorPrefix, err)
 	}
 
-	remoteAppInfoItems, err := fetchAppInfoLocalizations(ctx, client, appInfoIDValue)
-	if err != nil {
-		return PushPlanResult{}, nil, fmt.Errorf("%s: %w", errorPrefix, err)
+	// An absent scope directory leaves that scope unmanaged, so its remote
+	// localizations are not fetched and can never be planned as deletes.
+	var remoteAppInfoItems []asc.Resource[asc.AppInfoLocalizationAttributes]
+	if localBundle.appInfoManaged {
+		remoteAppInfoItems, err = fetchAppInfoLocalizations(ctx, client, appInfoIDValue)
+		if err != nil {
+			return PushPlanResult{}, nil, fmt.Errorf("%s: %w", errorPrefix, err)
+		}
 	}
-	remoteVersionItems, err := fetchVersionLocalizations(ctx, client, versionIDValue)
-	if err != nil {
-		return PushPlanResult{}, nil, fmt.Errorf("%s: %w", errorPrefix, err)
+	var remoteVersionItems []asc.Resource[asc.AppStoreVersionLocalizationAttributes]
+	if localBundle.versionManaged {
+		remoteVersionItems, err = fetchVersionLocalizations(ctx, client, versionIDValue)
+		if err != nil {
+			return PushPlanResult{}, nil, fmt.Errorf("%s: %w", errorPrefix, err)
+		}
 	}
 
 	remoteAppInfo := make(map[string]AppInfoLocalization, len(remoteAppInfoItems))
