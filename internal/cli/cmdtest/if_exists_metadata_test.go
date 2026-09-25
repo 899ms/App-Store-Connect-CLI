@@ -11,18 +11,20 @@ import (
 	"testing"
 )
 
-// Apple's 409 body for a duplicate locale on
-// POST /v1/appStoreVersions/{id}/appStoreVersionLocalizations. metadata push
-// only reaches it when the locale appeared after the plan read, or when a
+// Apple's 409 body for a duplicate locale on POST /v1/appStoreVersionLocalizations,
+// recorded verbatim against disposable app 6759231657 on 2026-09-25. metadata
+// push only reaches it when the locale appeared after the plan read, or when a
 // previous attempt created it and the CLI never saw the response.
-const metadataVersionLocaleDuplicate409 = `{"errors":[{"id":"9f3c1d75-4a62-4d1b-8f0e-6c5b2a9d4e31","status":"409","code":"ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE","title":"The provided entity includes an attribute with a value that has already been used","detail":"Entity with locale: 'ja' already exists. Try updating.","source":{"pointer":"/data/attributes/locale"}}]}`
+const metadataVersionLocaleDuplicate409 = `{"errors":[{"id":"ca643fcd-402d-4120-9e8b-db867fc15a83","status":"409","code":"ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE","title":"The provided entity includes an attribute with a value that has already been used","detail":"Entity with locale: ja already exists. Try updating.","source":{"pointer":"/data/attributes/locale"}}]}`
 
-// Apple's 409 body for a duplicate locale on
-// POST /v1/appInfos/{id}/appInfoLocalizations.
-const metadataAppInfoLocaleDuplicate409 = `{"errors":[{"id":"1c7e5b28-6d94-4f0a-9b3d-8e2a4c6f1d09","status":"409","code":"ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE","title":"The provided entity includes an attribute with a value that has already been used","detail":"Entity with locale: 'ja' already exists. Try updating.","source":{"pointer":"/data/attributes/locale"}}]}`
+// Apple's 409 body for a duplicate locale on POST /v1/appInfoLocalizations,
+// recorded verbatim against disposable app 6759231657 on 2026-09-25. The code
+// and pointer match the version scope; the detail text differs.
+const metadataAppInfoLocaleDuplicate409 = `{"errors":[{"id":"922f3559-8b92-46da-a2cd-96001fbaab5d","status":"409","code":"ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE","title":"The provided entity includes an attribute with a value that has already been used","detail":"An 'appInfoLocalizations' with a 'locale' of 'ja' already exists.","source":{"pointer":"/data/attributes/locale"}}]}`
 
 // A 409 that is not an existence conflict and must keep failing without a
-// read-back.
+// read-back. Representative rather than recorded: the disposable app's only
+// version is editable, so a state conflict cannot be triggered there.
 const metadataLocalizationState409 = `{"errors":[{"status":"409","code":"STATE_ERROR","title":"The request cannot be fulfilled because of the state of another resource.","detail":"The version is not editable in its current state."}]}`
 
 const metadataPushVersionsList = `{"data":[{"type":"appStoreVersions","id":"version-1","attributes":{"versionString":"1.2.3","platform":"IOS","appStoreState":"PREPARE_FOR_SUBMISSION"}}],"links":{"next":""}}`
@@ -784,10 +786,12 @@ func TestMetadataPushIfExistsReusesMatchingDuplicateReadBack(t *testing.T) {
 	}
 }
 
-// Apple can report several causes for one 409, with the duplicate-locale code
-// after a relationship rejection rather than first. Only the shared matcher's
-// walk over every errors[] entry catches this.
-const metadataVersionLocaleDuplicateSecondEntry409 = `{"errors":[{"id":"4d2b8e17-3a95-4c60-b1f7-5e8c9a0d2b43","status":"409","code":"ENTITY_ERROR.RELATIONSHIP.INVALID","title":"The provided entity includes a relationship with an invalid value","detail":"The relationship 'appStoreVersion' is not valid for this request.","source":{"pointer":"/data/relationships/appStoreVersion"}},{"id":"9f3c1d75-4a62-4d1b-8f0e-6c5b2a9d4e31","status":"409","code":"ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE","title":"The provided entity includes an attribute with a value that has already been used","detail":"Entity with locale: 'ja' already exists. Try updating.","source":{"pointer":"/data/attributes/locale"}}]}`
+// Apple can report several causes for one 409: a live duplicate-locale create
+// with a too-short description returned the duplicate code followed by
+// ENTITY_ERROR.ATTRIBUTE.INVALID.TOO_SHORT. This synthetic body puts the
+// duplicate code after another cause, which only the shared matcher's walk over
+// every errors[] entry catches; the duplicate entry is the recorded one.
+const metadataVersionLocaleDuplicateSecondEntry409 = `{"errors":[{"id":"4d2b8e17-3a95-4c60-b1f7-5e8c9a0d2b43","status":"409","code":"ENTITY_ERROR.RELATIONSHIP.INVALID","title":"The provided entity includes a relationship with an invalid value","detail":"The relationship 'appStoreVersion' is not valid for this request.","source":{"pointer":"/data/relationships/appStoreVersion"}},{"id":"ca643fcd-402d-4120-9e8b-db867fc15a83","status":"409","code":"ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE","title":"The provided entity includes an attribute with a value that has already been used","detail":"Entity with locale: ja already exists. Try updating.","source":{"pointer":"/data/attributes/locale"}}]}`
 
 func TestMetadataPushIfExistsSkipMatchesDuplicateCodeAfterTheFirstError(t *testing.T) {
 	dir := writeMetadataVersionFixture(t, `{"description":"Planned JA description","whatsNew":"Planned JA release notes"}`)

@@ -162,6 +162,16 @@ matched. Each resolved conflict writes one stderr line, for example
 `metadata push: version localization loc-ja for locale ja already exists;
 updated in place (--if-exists update)`.
 
+Both conflict bodies were **verified live** against disposable app
+`6759231657` on 2026-09-25, and the test fixtures replay them verbatim. Both
+creates return HTTP 409 `ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE` with pointer
+`/data/attributes/locale`; only the detail differs. The version scope says
+"Entity with locale: ja already exists. Try updating.", and the app-info scope
+says "An 'appInfoLocalizations' with a 'locale' of 'ja' already exists." A
+duplicate version create whose body also fails validation carries a second
+code, for example `ENTITY_ERROR.ATTRIBUTE.INVALID.TOO_SHORT`, after the
+duplicate code.
+
 This section is the authority on the code for `metadata push`; it settles the
 "code to be confirmed with the PR2 fixture" note left on the shared
 `localizations create` / `update` / `metadata push` table row above, which the
