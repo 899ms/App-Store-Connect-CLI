@@ -370,7 +370,7 @@ Examples:
 
 					if testNotesValue != "" {
 						fmt.Fprintf(os.Stderr, "Build %s discovered; setting What to Test notes...\n", buildResp.Data.ID)
-						upsertOpts := shared.UpsertBetaBuildLocalizationOptions{AppID: resolvedAppID}
+						upsertOpts := shared.UpsertBetaBuildLocalizationOptions{AppID: resolvedAppID, Diagnostics: os.Stderr}
 						if _, err := shared.UpsertBetaBuildLocalization(requestCtx, client, buildResp.Data.ID, localeValue, testNotesValue, upsertOpts); err != nil {
 							return fmt.Errorf("builds upload: %w", shared.NewTestNotesRecoveryError(buildResp.Data.ID, localeValue, testNotesValue, err))
 						}

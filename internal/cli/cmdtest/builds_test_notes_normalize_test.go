@@ -38,8 +38,13 @@ func assertNormalizedTestNotesNotice(t *testing.T, stderr string) {
 	if !strings.Contains(stderr, "normalized") {
 		t.Fatalf("stderr = %q, want a normalization notice", stderr)
 	}
-	if strings.Count(strings.TrimSpace(stderr), "\n") != 0 {
-		t.Fatalf("stderr = %q, want a single-line notice", stderr)
+	if got := strings.Count(stderr, "What to Test notes were normalized"); got != 1 {
+		t.Fatalf("stderr = %q, want exactly one normalization notice line", stderr)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(stderr), "\n") {
+		if !strings.HasPrefix(line, "Notice: ") {
+			t.Fatalf("stderr = %q, want only one-line notices", stderr)
+		}
 	}
 	if strings.Contains(stderr, "Caf") {
 		t.Fatalf("stderr = %q, must not echo the notes", stderr)
@@ -100,6 +105,9 @@ func TestBuildsTestNotesCreateNormalizesNotesBeforeSending(t *testing.T) {
 	}
 	assertNormalizedTestNotesPayload(t, payload)
 	assertNormalizedTestNotesNotice(t, stderr)
+	if !strings.Contains(stderr, `Notice: created TestFlight app localization for locale "en-US" on app "app-1"`) {
+		t.Fatalf("stderr = %q, want a notice for the created TestFlight app localization", stderr)
+	}
 	if !strings.Contains(stdout, `"id":"loc-1"`) {
 		t.Fatalf("stdout = %q, want the created localization", stdout)
 	}
@@ -218,10 +226,11 @@ func TestBuildsTestNotesCreateAcceptedNotesPrintNoNotice(t *testing.T) {
 			return jsonResponse(http.StatusOK, `{"data":{"type":"builds","id":"build-1","attributes":{"version":"42","processingState":"VALID"}}}`)
 		case req.Method == http.MethodGet && req.URL.Path == "/v1/builds/build-1/app":
 			return jsonResponse(http.StatusOK, `{"data":{"type":"apps","id":"app-1"}}`)
-		case req.Method == http.MethodGet && (strings.Contains(req.URL.Path, "betaAppLocalizations") || strings.Contains(req.URL.Path, "betaBuildLocalizations")):
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/betaAppLocalizations":
+			// The locale already exists, so no creation notice is expected either.
+			return jsonResponse(http.StatusOK, `{"data":[{"type":"betaAppLocalizations","id":"bal-1","attributes":{"locale":"en-US"}}]}`)
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/builds/build-1/betaBuildLocalizations":
 			return jsonResponse(http.StatusOK, `{"data":[]}`)
-		case req.Method == http.MethodPost && req.URL.Path == "/v1/betaAppLocalizations":
-			return jsonResponse(http.StatusCreated, `{"data":{"type":"betaAppLocalizations","id":"bal-1","attributes":{"locale":"en-US"}}}`)
 		case req.Method == http.MethodPost && req.URL.Path == "/v1/betaBuildLocalizations":
 			body, err := io.ReadAll(req.Body)
 			if err != nil {

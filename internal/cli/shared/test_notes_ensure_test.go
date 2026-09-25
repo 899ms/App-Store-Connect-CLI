@@ -1,6 +1,7 @@
 package shared
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -286,6 +287,37 @@ func TestUpsertBetaBuildLocalizationTreatsConcurrentCreateConflictAsEnsured(t *t
 	}
 	if count := recorder.count(http.MethodPost, "/v1/betaBuildLocalizations"); count != 1 {
 		t.Fatalf("expected exactly one What to Test write, got %d", count)
+	}
+}
+
+func TestUpsertBetaBuildLocalizationReportsCreatedBetaAppLocalization(t *testing.T) {
+	recorder := &testNotesRecorder{}
+	client := newTestNotesServerClient(t, recorder, func(request recordedTestNotesRequest) (int, string) {
+		switch {
+		case request.Method == http.MethodGet && request.Path == "/v1/betaAppLocalizations":
+			return http.StatusOK, `{"data":[],"links":{}}`
+		case request.Method == http.MethodPost && request.Path == "/v1/betaAppLocalizations":
+			return http.StatusCreated, testNotesAppLocCreated
+		case request.Method == http.MethodGet && request.Path == "/v1/builds/build-1/betaBuildLocalizations":
+			return http.StatusOK, `{"data":[],"links":{}}`
+		case request.Method == http.MethodPost && request.Path == "/v1/betaBuildLocalizations":
+			return http.StatusCreated, testNotesNotesCreated
+		default:
+			return 0, ""
+		}
+	})
+
+	var diagnostics bytes.Buffer
+	if _, err := UpsertBetaBuildLocalization(
+		context.Background(), client,
+		"build-1", "en-US", "Check the new tab",
+		UpsertBetaBuildLocalizationOptions{AppID: "app-9", Diagnostics: &diagnostics},
+	); err != nil {
+		t.Fatalf("UpsertBetaBuildLocalization() error: %v", err)
+	}
+	want := "Notice: created TestFlight app localization for locale \"en-US\" on app \"app-9\" so What to Test notes can be saved.\n"
+	if diagnostics.String() != want {
+		t.Fatalf("diagnostics = %q, want %q", diagnostics.String(), want)
 	}
 }
 

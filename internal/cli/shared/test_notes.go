@@ -20,6 +20,9 @@ type UpsertBetaBuildLocalizationOptions struct {
 	// AppID identifies the build's app. When empty, the app is resolved from
 	// the build so the locale's TestFlight app localization can be ensured.
 	AppID string
+	// Diagnostics receives a one-line notice when a missing TestFlight app
+	// localization is created as a side effect. Nil discards the notice.
+	Diagnostics io.Writer
 }
 
 // TestNotesNormalization reports the What to Test text that will be stored and
@@ -138,7 +141,7 @@ func UpsertBetaBuildLocalization(ctx context.Context, client *asc.Client, buildI
 	}
 	notesValue = normalization.Notes
 
-	if err := ensureBetaAppLocalization(ctx, client, buildID, opts.AppID, localeValue); err != nil {
+	if err := ensureBetaAppLocalization(ctx, client, buildID, opts.AppID, localeValue, opts.Diagnostics); err != nil {
 		return nil, err
 	}
 
@@ -183,7 +186,7 @@ func UpsertBetaBuildLocalization(ctx context.Context, client *asc.Client, buildI
 // creating the app's beta app localization when it is missing. Existing
 // records are left untouched, and a concurrent creator that wins the race
 // satisfies the same requirement.
-func ensureBetaAppLocalization(ctx context.Context, client *asc.Client, buildID, appID, locale string) error {
+func ensureBetaAppLocalization(ctx context.Context, client *asc.Client, buildID, appID, locale string, diagnostics io.Writer) error {
 	resolvedAppID, err := resolveBetaAppLocalizationAppID(ctx, client, buildID, appID)
 	if err != nil {
 		return err
@@ -205,6 +208,9 @@ func ensureBetaAppLocalization(ctx context.Context, client *asc.Client, buildID,
 			return nil
 		}
 		return fmt.Errorf("failed to create TestFlight app localization for locale %q: %w", locale, err)
+	}
+	if diagnostics != nil {
+		fmt.Fprintf(diagnostics, "Notice: created TestFlight app localization for locale %q on app %q so What to Test notes can be saved.\n", locale, resolvedAppID)
 	}
 	return nil
 }
