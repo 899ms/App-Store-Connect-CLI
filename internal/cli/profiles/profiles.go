@@ -64,8 +64,8 @@ func ProfilesListCommand() *ffcli.Command {
 	ids := fs.String("id", "", "Filter by profile ID(s), comma-separated")
 	profileType := fs.String("profile-type", "", "Filter by profile type(s), comma-separated")
 	profileState := fs.String("profile-state", "", "Filter by profile state(s): ACTIVE, INVALID (default: ACTIVE,INVALID)")
-	includeStale := fs.Bool("include-stale", false, "Annotate expired profiles in table and markdown output")
-	staleOnly := fs.Bool("stale-only", false, "Show only expired or invalid profiles")
+	includeStale := fs.Bool("include-stale", false, "Add a Stale column to table or markdown output (not supported with JSON)")
+	staleOnly := fs.Bool("stale-only", false, "Read every page and show only expired or invalid profiles (computed view)")
 	sort := fs.String("sort", "", "Sort by: "+strings.Join(profileSortList(), ", "))
 	fields := fs.String("fields", "", "Fields to include: "+strings.Join(profileFieldsList(), ", "))
 	bundleIDFields := fs.String("bundle-id-fields", "", "Bundle ID fields to include: "+strings.Join(profileBundleIDFieldsList(), ", "))
@@ -92,7 +92,15 @@ Examples:
   asc profiles list --profile-type IOS_APP_DEVELOPMENT
   asc profiles list --profile-state INVALID
   asc profiles list --include devices --device-fields name,udid --limit-devices 25
-  asc profiles list --paginate`,
+  asc profiles list --paginate
+  asc profiles list --stale-only
+  asc profiles list --include-stale --output table
+
+--stale-only always reads every page, then keeps profiles that are INVALID or
+whose expiration date has passed. Its JSON keeps Apple's envelope shape, but it
+is a computed view: meta and pagination links are dropped because they describe
+the unfiltered list. It cannot be combined with --next.
+--include-stale adds a Stale column to table and markdown output only.`,
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
@@ -103,9 +111,16 @@ Examples:
 				fs,
 				*next,
 				"profiles list",
-				"name", "id", "profile-type", "profile-state", "sort", "fields", "bundle-id-fields", "device-fields", "certificate-fields", "include", "limit-devices", "limit-certificates", "limit",
+				"name", "id", "profile-type", "profile-state", "sort", "fields", "bundle-id-fields", "device-fields", "certificate-fields", "include", "limit-devices", "limit-certificates", "limit", "stale-only",
 			); err != nil {
 				return err
+			}
+			if *includeStale {
+				if normalized := shared.NormalizeOutputFormat(*output.Output); normalized != "table" && normalized != "markdown" {
+					const message = "--include-stale requires --output table or markdown"
+					fmt.Fprintln(os.Stderr, "Error: "+message)
+					return shared.NewReportedUsageError(shared.UsageErrorInvalidValue, message)
+				}
 			}
 			provided := map[string]bool{}
 			fs.Visit(func(parsed *flag.Flag) {
@@ -243,7 +258,7 @@ Examples:
 				opts = append(opts, asc.WithProfilesCertificatesLimit(*certificatesLimit))
 			}
 
-			if *paginate {
+			if *paginate || *staleOnly {
 				paginateOpts := append(opts, asc.WithProfilesLimit(200))
 				paginated, err := shared.PaginateWithSpinner(
 					requestCtx,
@@ -274,17 +289,11 @@ Examples:
 func printProfilesList(resp asc.PaginatedResponse, format string, pretty, includeStale, staleOnly bool) error {
 	profiles, ok := resp.(*asc.ProfilesResponse)
 	if ok && profiles != nil && staleOnly {
-		now := time.Now()
-		filtered := make([]asc.Resource[asc.ProfileAttributes], 0, len(profiles.Data))
-		for _, item := range profiles.Data {
-			if signingProfileIsStale(item, now) {
-				filtered = append(filtered, item)
-			}
-		}
-		profiles.Data = filtered
+		profiles = staleProfilesView(profiles, time.Now())
+		resp = profiles
 	}
 	normalized := shared.NormalizeOutputFormat(format)
-	if includeStale && (normalized == "table" || normalized == "markdown" || normalized == "md") && profiles != nil {
+	if includeStale && (normalized == "table" || normalized == "markdown") && profiles != nil {
 		return shared.PrintOutputWithRenderers(profiles, format, pretty, func() error {
 			return printProfilesStaleTable(profiles)
 		}, func() error {
@@ -294,26 +303,21 @@ func printProfilesList(resp asc.PaginatedResponse, format string, pretty, includ
 	return shared.PrintOutput(resp, format, pretty)
 }
 
-func signingProfileIsStale(profile asc.Resource[asc.ProfileAttributes], now time.Time) bool {
-	if profile.Attributes.ProfileState == asc.ProfileStateInvalid {
-		return true
-	}
-	return profileExpirationPassed(profile.Attributes.ExpirationDate, now)
-}
-
-func profileExpirationPassed(value string, now time.Time) bool {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return false
-	}
-	parsed, err := time.Parse(time.RFC3339, value)
-	if err != nil {
-		parsed, err = time.Parse("2006-01-02", value)
-		if err != nil {
-			return false
+// staleProfilesView is the computed --stale-only view: the complete profile
+// list filtered to expired or INVALID profiles. Apple's paging metadata and
+// pagination links describe the unfiltered list, so they are dropped.
+func staleProfilesView(profiles *asc.ProfilesResponse, now time.Time) *asc.ProfilesResponse {
+	filtered := make([]asc.Resource[asc.ProfileAttributes], 0, len(profiles.Data))
+	for _, item := range profiles.Data {
+		if asc.ProfileIsStale(item.Attributes, now) {
+			filtered = append(filtered, item)
 		}
 	}
-	return parsed.Before(now)
+	return &asc.ProfilesResponse{
+		Data:     filtered,
+		Links:    asc.Links{Self: profiles.Links.Self},
+		Included: profiles.Included,
+	}
 }
 
 func printProfilesStaleTable(resp *asc.ProfilesResponse) error {
@@ -340,7 +344,7 @@ func profileStaleRows(resp *asc.ProfilesResponse) [][]string {
 			item.Attributes.ProfileType,
 			string(item.Attributes.ProfileState),
 			item.Attributes.ExpirationDate,
-			fmt.Sprintf("%t", signingProfileIsStale(item, now)),
+			fmt.Sprintf("%t", asc.ProfileIsStale(item.Attributes, now)),
 		})
 	}
 	return rows

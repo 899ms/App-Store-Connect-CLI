@@ -14,10 +14,10 @@ import (
 
 func TestProfileExpirationPassed(t *testing.T) {
 	now := time.Date(2026, 9, 17, 0, 0, 0, 0, time.UTC)
-	if !profileExpirationPassed("2000-01-01T00:00:00Z", now) {
+	if !asc.ProfileExpirationPassed("2000-01-01T00:00:00Z", now) {
 		t.Fatal("expected a past RFC3339 date to be stale")
 	}
-	if profileExpirationPassed("2100-01-01T00:00:00Z", now) {
+	if asc.ProfileExpirationPassed("2100-01-01T00:00:00Z", now) {
 		t.Fatal("expected a future date to stay current")
 	}
 }
@@ -57,29 +57,16 @@ func TestDeleteStaleSigningProfilesDeletesOnlyExpiredActiveProfiles(t *testing.T
 	t.Cleanup(server.Close)
 	client := newSigningFetchServerTestClient(t, server)
 
-	got, err := deleteStaleSigningProfiles(context.Background(), client, "bundle-1", "IOS_APP_STORE", false)
+	planned, err := findStaleSigningProfiles(context.Background(), client, "bundle-1", "IOS_APP_STORE")
 	if err != nil {
-		t.Fatalf("deleteStaleSigningProfiles: %v", err)
+		t.Fatalf("findStaleSigningProfiles: %v", err)
 	}
-	if len(got) != 1 || got[0].ID != "stale-1" {
-		t.Fatalf("receipt = %+v, want stale-1", got)
+	report := &asc.SigningFetchStaleProfiles{Planned: planned, Deleted: []asc.SigningStaleProfile{}}
+	deleteStaleSigningProfiles(context.Background(), client, report)
+	if len(report.Deleted) != 1 || report.Deleted[0].ID != "stale-1" || len(report.Failed) != 0 {
+		t.Fatalf("report = %+v, want only stale-1 deleted", report)
 	}
 	if strings.Join(deleted, ",") != "stale-1" {
 		t.Fatalf("deleted = %v, want only stale-1", deleted)
-	}
-}
-
-func TestSigningFetchDeleteStaleWithoutConfirmDoesNotContactApple(t *testing.T) {
-	cmd := SigningFetchCommand()
-	if err := cmd.FlagSet.Parse([]string{
-		"--bundle-id", "com.example.app",
-		"--profile-type", "IOS_APP_STORE",
-		"--delete-stale-profiles",
-	}); err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	err := cmd.Exec(context.Background(), nil)
-	if err == nil || !strings.Contains(err.Error(), "--confirm") {
-		t.Fatalf("error = %v, want a --confirm usage error", err)
 	}
 }

@@ -181,6 +181,27 @@ the JSON receipt is partial and reports `certificateCreationState: "unknown"`;
 do not replace the preserved key or CSR until the account is checked for a
 matching certificate.
 
+### Stale profiles
+
+`asc signing fetch` never selects an active profile whose expiration date has passed. To remove expired or `INVALID` profiles for the bundle ID and profile type before matching, preview the plan first, then confirm:
+
+```bash  theme={null}
+asc signing fetch \
+  --bundle-id com.example.app \
+  --profile-type IOS_APP_STORE \
+  --delete-stale-profiles \
+  --dry-run
+
+asc signing fetch \
+  --bundle-id com.example.app \
+  --profile-type IOS_APP_STORE \
+  --delete-stale-profiles \
+  --confirm \
+  --create-missing
+```
+
+`--dry-run` prints the plan and exits without deleting, creating, or writing anything. `--confirm` and `--dry-run` require `--delete-stale-profiles`, and `--delete-stale-profiles` requires one of them; each rule is a usage error (exit 2) checked before any request. Every page of profiles is read before the first deletion. The JSON receipt's `staleProfiles` lists `planned`, `deleted` (only profiles Apple confirmed deleted), and `failed` with each error. If any deletion fails, the command stops before fetching or creating anything. The receipt is printed even when a later step of the fetch fails, because deletions cannot be undone.
+
 ### Common profile types
 
 | Profile type | Use | Inferred certificate type | Devices when creating |
