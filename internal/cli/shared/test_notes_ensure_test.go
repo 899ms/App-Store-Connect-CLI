@@ -183,15 +183,12 @@ func TestUpsertBetaBuildLocalizationSkipsExistingBetaAppLocalization(t *testing.
 	}
 }
 
-func TestUpsertBetaBuildLocalizationFindsExistingLocaleOnLaterPage(t *testing.T) {
+func TestUpsertBetaBuildLocalizationLooksUpOnlyTheRequestedLocale(t *testing.T) {
 	recorder := &testNotesRecorder{}
 	client := newTestNotesServerClient(t, recorder, func(request recordedTestNotesRequest) (int, string) {
 		switch {
 		case request.Method == http.MethodGet && request.Path == "/v1/betaAppLocalizations":
-			if request.Query.Get("cursor") == "page-2" {
-				return http.StatusOK, `{"data":[{"type":"betaAppLocalizations","id":"bal-2","attributes":{"locale":"en-US"}}],"links":{}}`
-			}
-			return http.StatusOK, `{"data":[{"type":"betaAppLocalizations","id":"bal-1","attributes":{"locale":"ja"}}],"links":{"next":"/v1/betaAppLocalizations?cursor=page-2"}}`
+			return http.StatusOK, `{"data":[{"type":"betaAppLocalizations","id":"bal-2","attributes":{"locale":"en-US"}}],"links":{}}`
 		case request.Method == http.MethodGet && request.Path == "/v1/builds/build-1/betaBuildLocalizations":
 			return http.StatusOK, `{"data":[],"links":{}}`
 		case request.Method == http.MethodPost && request.Path == "/v1/betaBuildLocalizations":
@@ -209,8 +206,15 @@ func TestUpsertBetaBuildLocalizationFindsExistingLocaleOnLaterPage(t *testing.T)
 		t.Fatalf("UpsertBetaBuildLocalization() error: %v", err)
 	}
 
-	if count := recorder.count(http.MethodGet, "/v1/betaAppLocalizations"); count != 2 {
-		t.Fatalf("expected both localization pages to be read, got %d requests", count)
+	lists := recorder.matching(http.MethodGet, "/v1/betaAppLocalizations")
+	if len(lists) != 1 {
+		t.Fatalf("expected one filtered localization lookup, got %d requests", len(lists))
+	}
+	if got := lists[0].Query.Get("filter[locale]"); got != "en-US" {
+		t.Fatalf("lookup filter[locale] = %q, want en-US", got)
+	}
+	if got := lists[0].Query.Get("filter[app]"); got != "app-9" {
+		t.Fatalf("lookup filter[app] = %q, want app-9", got)
 	}
 	if count := recorder.count(http.MethodPost, "/v1/betaAppLocalizations"); count != 0 {
 		t.Fatalf("expected no betaAppLocalizations create, got %d", count)

@@ -230,42 +230,21 @@ func resolveBetaAppLocalizationAppID(ctx context.Context, client *asc.Client, bu
 }
 
 func hasBetaAppLocalization(ctx context.Context, client *asc.Client, appID, locale string) (bool, error) {
-	firstPage, err := client.GetBetaAppLocalizations(
+	// App Store Connect matches filter[locale] case-insensitively, so one app
+	// and locale yield at most one record and no pagination is needed.
+	resp, err := client.GetBetaAppLocalizations(
 		ctx,
 		asc.WithBetaAppLocalizationAppIDs([]string{appID}),
+		asc.WithBetaAppLocalizationLocales([]string{locale}),
 		asc.WithBetaAppLocalizationsLimit(200),
 	)
 	if err != nil {
-		return false, fmt.Errorf("failed to list TestFlight app localizations for app %q: %w", appID, err)
+		return false, fmt.Errorf("failed to look up TestFlight app localization %q for app %q: %w", locale, appID, err)
 	}
-	if firstPage == nil {
+	if resp == nil {
 		return false, fmt.Errorf("empty TestFlight app localization response for app %q", appID)
 	}
-	if containsBetaAppLocalizationLocale(firstPage.Data, locale) {
-		return true, nil
-	}
-	if strings.TrimSpace(firstPage.Links.Next) == "" {
-		return false, nil
-	}
-
-	paginated, err := asc.PaginateAll(ctx, firstPage, func(pageCtx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-		nextPage, err := client.GetBetaAppLocalizations(pageCtx, asc.WithBetaAppLocalizationsNextURL(nextURL))
-		if err != nil {
-			return nil, err
-		}
-		if nextPage == nil {
-			return nil, fmt.Errorf("empty TestFlight app localization response for app %q", appID)
-		}
-		return nextPage, nil
-	})
-	if err != nil {
-		return false, fmt.Errorf("failed to list TestFlight app localizations for app %q: %w", appID, err)
-	}
-	allPages, ok := paginated.(*asc.BetaAppLocalizationsResponse)
-	if !ok {
-		return false, fmt.Errorf("unexpected TestFlight app localization pagination response type")
-	}
-	return containsBetaAppLocalizationLocale(allPages.Data, locale), nil
+	return containsBetaAppLocalizationLocale(resp.Data, locale), nil
 }
 
 func containsBetaAppLocalizationLocale(localizations []asc.Resource[asc.BetaAppLocalizationAttributes], locale string) bool {
