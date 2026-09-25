@@ -689,3 +689,39 @@ func TestInferSigningPlanKeepsBlockerForIncompleteOverride(t *testing.T) {
 		t.Fatalf("blockers=%v, an Automatic signing override should cover Watch", plan.Blockers)
 	}
 }
+
+func TestInferSigningPlanAutomaticOverrideClearsManualSettings(t *testing.T) {
+	requireStrictSigningPlatform(t)
+	project := writeInferredSigningProject(t)
+	root := t.TempDir()
+	profile := writeSigningTestProfile(t, filepath.Join(root, "Wild.mobileprovision"), "Wildcard", "24242424-2424-2424-2424-242424242424", "ABCDE12345.com.example.*", time.Now().Add(time.Hour))
+	settingsPath := filepath.Join(root, "settings.json")
+	writeSigningSettingsTestFile(t, settingsPath, `{
+		"schemaVersion": 1,
+		"targets": [{
+			"name": "Widget",
+			"configurations": [{"name": "Release", "settings": {"CODE_SIGN_STYLE": "Automatic"}}]
+		}]
+	}`)
+	plan, err := BuildSigningPlan(SigningPlanOptions{
+		ProjectPath:      project,
+		SettingsFilePath: settingsPath,
+		ProfilePaths:     []string{profile},
+		Configuration:    "Release",
+		SkipTargets:      []string{"Watch"},
+		StateDir:         filepath.Join(root, "state"),
+	})
+	if err != nil {
+		t.Fatalf("BuildSigningPlan() error = %v", err)
+	}
+	if !plan.Ready {
+		t.Fatalf("expected ready plan, blockers=%v", plan.Blockers)
+	}
+	if signingPlanSettingEquals(plan, "Widget", "Release", "PROVISIONING_PROFILE_SPECIFIER", "Wildcard") ||
+		signingPlanSettingEquals(plan, "Widget", "Release", "CODE_SIGN_IDENTITY", "Apple Development") {
+		t.Fatalf("automatic override kept inferred manual settings: %#v", plan.Desired)
+	}
+	if plan.ExportOptions == nil || plan.ExportOptions.ProvisioningProfiles["com.example.demo.widget"] != "" {
+		t.Fatalf("export options = %#v, want no manual profile for the automatic Widget", plan.ExportOptions)
+	}
+}

@@ -385,6 +385,10 @@ func signingOverrideCoversProfile(settings map[string]json.RawMessage) bool {
 			return true
 		}
 	}
+	return signingSettingsAutomatic(settings)
+}
+
+func signingSettingsAutomatic(settings map[string]json.RawMessage) bool {
 	var style string
 	if raw, ok := settings["CODE_SIGN_STYLE"]; ok && json.Unmarshal(raw, &style) == nil {
 		return strings.EqualFold(strings.TrimSpace(style), "Automatic")
@@ -506,6 +510,16 @@ func overlaySigningManifest(inferred, overrides *signingSettingsManifest) []stri
 				copy(cloned, value)
 				existing[key] = cloned
 			}
+			if signingSettingsAutomatic(configuration.Settings) {
+				// Automatic signing picks its own profile and identity, so the
+				// inferred manual profile and certificate are removed unless
+				// the settings file sets them explicitly.
+				for _, key := range []string{"PROVISIONING_PROFILE_SPECIFIER", "CODE_SIGN_IDENTITY"} {
+					if _, explicit := configuration.Settings[key]; !explicit {
+						existing[key] = json.RawMessage("null")
+					}
+				}
+			}
 		}
 	}
 	sort.Strings(warnings)
@@ -581,6 +595,11 @@ func signingExportOptions(method string, assigned, settingsOnly []signingProfile
 		bundleID := item.bundleID
 		if value, found := signingManifestString(manifest, item.target, item.configuration, "PRODUCT_BUNDLE_IDENTIFIER"); found && value != "" {
 			bundleID = value
+		}
+		if style, found := signingManifestString(manifest, item.target, item.configuration, "CODE_SIGN_STYLE"); found && strings.EqualFold(style, "Automatic") {
+			// Automatic signing resolves its own profile; a manual export
+			// options entry would contradict it.
+			continue
 		}
 		name, team := "", ""
 		if item.profile != nil {
