@@ -573,3 +573,22 @@ func TestSigningFetchMatchExtensionsDeleteStaleFailureStopsEveryTarget(t *testin
 		t.Fatalf("stderr = %q", stderr)
 	}
 }
+
+func TestSigningFetchMatchExtensionsDeleteStaleChecksOutputDirBeforeDeleting(t *testing.T) {
+	stub := startMatchStaleStub(t, "")
+	outputPath := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(outputPath, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	code, _, stderr := runMatchStaleFetch(t, outputPath, "--confirm")
+	if code == rootcmd.ExitSuccess {
+		t.Fatal("expected failure for an unusable output directory")
+	}
+	if !strings.Contains(stderr, "no stale profiles were deleted") {
+		t.Fatalf("stderr = %q", stderr)
+	}
+	if n := stub.count("DELETE"); n != 0 {
+		t.Fatalf("delete requests = %d, want 0", n)
+	}
+}

@@ -291,6 +291,14 @@ Examples:
 					fmt.Fprintf(os.Stderr, "Dry run: would delete %d stale profile(s); nothing was deleted, created, or written\n", len(planned))
 					return emit()
 				}
+				// The output directory is the one deterministic local check that
+				// does not depend on which profile is later resolved, so it runs
+				// before the irreversible deletions.
+				if len(planned) > 0 {
+					if err := prepareOutputDir(); err != nil {
+						return fmt.Errorf("signing fetch: %w; no stale profiles were deleted", err)
+					}
+				}
 				deleteStaleSigningProfiles(requestCtx, client, result.StaleProfiles)
 				if failed := len(result.StaleProfiles.Failed); failed > 0 {
 					_ = emit()
@@ -555,6 +563,17 @@ func deleteMatchedStaleProfiles(
 			})
 		}
 		return true, nil
+	}
+	for _, plan := range stale {
+		if len(plan.Planned) == 0 {
+			continue
+		}
+		// Check the output directory before the irreversible deletions.
+		if err := opts.PrepareOutput(); err != nil {
+			batch.Failures = append(batch.Failures, asc.SigningFetchBatchFailure{BundleID: identifiers[0], Error: err.Error()})
+			return true, fmt.Errorf("signing fetch: %w; no stale profiles were deleted", err)
+		}
+		break
 	}
 	failed, planned := 0, 0
 	for i := range bundleIDs {
