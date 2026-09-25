@@ -101,6 +101,11 @@ func inferSigningSettings(project *structuredVersionProject, opts SigningPlanOpt
 	// inference candidate; it is reported only when nothing else matches.
 	active, expired := partitionExpiredSigningProfiles(profiles, signingProfileNow())
 
+	// An explicit --export-method limits candidates to profiles that can
+	// export that way, so a development profile never backs an App Store
+	// export (or the reverse).
+	requestedMethod := strings.TrimSpace(opts.ExportMethod)
+
 	configurationFilter := strings.TrimSpace(opts.Configuration)
 	scopes := signingInferenceScopes(project, configurationFilter)
 	if configurationFilter != "" && len(scopes) == 0 {
@@ -143,14 +148,17 @@ func inferSigningSettings(project *structuredVersionProject, opts SigningPlanOpt
 			continue
 		}
 		sdk := signingTargetSDK(project, scope)
-		selected, discarded, match := selectSigningProfile(signingProfilesForSDK(active, sdk), bundleID)
+		platformProfiles := signingProfilesForSDK(active, sdk)
+		selected, discarded, match := selectSigningProfile(signingProfilesForMethod(platformProfiles, requestedMethod), bundleID)
 		if selected == nil {
 			if covered[scope.target+"\x00"+scope.name] {
 				settingsOnly = append(settingsOnly, signingProfileAssignment{target: scope.target, configuration: scope.name, bundleID: bundleID})
 				continue
 			}
 			detail := ""
-			if stale, _, _ := selectSigningProfile(signingProfilesForSDK(expired, sdk), bundleID); stale != nil {
+			if other, _, _ := selectSigningProfile(platformProfiles, bundleID); other != nil {
+				detail = fmt.Sprintf("; profile %s is for %s, not --export-method %s", other.name, other.method, requestedMethod)
+			} else if stale, _, _ := selectSigningProfile(signingProfilesForSDK(expired, sdk), bundleID); stale != nil {
 				detail = fmt.Sprintf("; profile %s expired at %s", stale.name, stale.expires.UTC().Format(time.RFC3339))
 				if stale.expires.After(signingProfileNow()) {
 					detail = fmt.Sprintf("; profile %s has no currently valid signing certificate", stale.name)
@@ -247,6 +255,19 @@ func partitionExpiredSigningProfiles(profiles []signingProfile, now time.Time) (
 		active = append(active, profile)
 	}
 	return active, expired
+}
+
+func signingProfilesForMethod(profiles []signingProfile, method string) []signingProfile {
+	if method == "" {
+		return profiles
+	}
+	filtered := make([]signingProfile, 0, len(profiles))
+	for _, profile := range profiles {
+		if profile.method == method {
+			filtered = append(filtered, profile)
+		}
+	}
+	return filtered
 }
 
 func signingInferenceScopes(project *structuredVersionProject, configuration string) []*versionConfiguration {

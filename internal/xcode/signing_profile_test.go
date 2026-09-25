@@ -439,14 +439,40 @@ func TestInferSigningPlanBlocksMixedExportMethods(t *testing.T) {
 		t.Fatalf("ready=%t blockers=%v, want a mixed export method blocker", plan.Ready, plan.Blockers)
 	}
 
+	// An explicit method only considers profiles of that method, so the App
+	// Store profile cannot sign the app for a development export.
 	options.ExportMethod = "development"
 	options.StateDir = filepath.Join(root, "state-explicit")
 	explicit, err := BuildSigningPlan(options)
 	if err != nil {
 		t.Fatalf("BuildSigningPlan() error = %v", err)
 	}
-	if !explicit.Ready || explicit.ExportOptions == nil || explicit.ExportOptions.Method != "development" {
-		t.Fatalf("explicit method plan ready=%t blockers=%v export=%#v", explicit.Ready, explicit.Blockers, explicit.ExportOptions)
+	if explicit.Ready || !strings.Contains(strings.Join(explicit.Blockers, "\n"), "App/Release") {
+		t.Fatalf("explicit method plan ready=%t blockers=%v, want the App Store-only App blocked", explicit.Ready, explicit.Blockers)
+	}
+}
+
+func TestInferSigningPlanFiltersProfilesByExportMethod(t *testing.T) {
+	requireStrictSigningPlatform(t)
+	project := writeInferredSigningProject(t)
+	root := t.TempDir()
+	store := writeSigningTestProfileWith(t, filepath.Join(root, "Store.mobileprovision"), "App Store", "57575757-5757-5757-5757-575757575757", "ABCDE12345.com.example.demo", time.Now().Add(time.Hour), func(payload map[string]any) {
+		delete(payload, "ProvisionedDevices")
+	})
+	development := writeSigningTestProfile(t, filepath.Join(root, "Dev.mobileprovision"), "App Development", "68686868-6868-6868-6868-686868686868", "ABCDE12345.com.example.demo", time.Now().Add(48*time.Hour))
+	plan, err := BuildSigningPlan(SigningPlanOptions{
+		ProjectPath:   project,
+		ProfilePaths:  []string{store, development},
+		Configuration: "Release",
+		ExportMethod:  "app-store",
+		SkipTargets:   []string{"Widget", "Watch"},
+		StateDir:      filepath.Join(root, "state"),
+	})
+	if err != nil {
+		t.Fatalf("BuildSigningPlan() error = %v", err)
+	}
+	if !plan.Ready || !signingPlanSettingEquals(plan, "App", "Release", "PROVISIONING_PROFILE_SPECIFIER", "App Store") {
+		t.Fatalf("ready=%t blockers=%v desired=%#v, want the App Store profile for app-store", plan.Ready, plan.Blockers, plan.Desired)
 	}
 }
 
