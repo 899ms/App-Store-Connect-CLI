@@ -1482,3 +1482,50 @@ func testInstalledIdentityCertificate(t *testing.T, commonName string) (certific
 	}
 	return certificateutil.NewCertificateInfo(*certificate, nil), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
+
+func TestGenerateManualExportOptionsReportsResolverReasonWhenNoProfileMatches(t *testing.T) {
+	archivePath := writeExportOptionsTestArchive(t, "TEAM123")
+	originalReader := readArchiveExportInfoFn
+	originalGenerator := generateBitriseApplicationExportOptionsFn
+	readArchiveExportInfoFn = func(string) (exportoptionsgenerator.ArchiveInfo, error) {
+		return exportoptionsgenerator.ArchiveInfo{
+			AppBundleID: "com.example.demo",
+			EntitlementsByBundleID: map[string]plistutil.PlistData{
+				"com.example.demo.widget": {},
+				"com.example.demo":        {},
+			},
+		}, nil
+	}
+	generateBitriseApplicationExportOptionsFn = func(exportoptionsgenerator.ArchiveInfo, legacyexportoptions.Method, exportoptionsgenerator.Opts) (legacyexportoptions.ExportOptions, error) {
+		fmt.Fprintln(os.Stdout, "Resolving code signing groups...")
+		fmt.Fprintln(os.Stdout, "\x1b[33;1mNo profile available to sign (com.example.demo) target!\x1b[0m")
+		fmt.Fprintln(os.Stdout, "\x1b[31;1mFailed to find code signing groups\x1b[0m")
+		return legacyexportoptions.NewAppStoreOptions(), nil
+	}
+	t.Cleanup(func() {
+		readArchiveExportInfoFn = originalReader
+		generateBitriseApplicationExportOptionsFn = originalGenerator
+	})
+
+	_, err := generateManualExportOptions(t.Context(), archivePath, "TEAM123", exportOptionsMethodAppStoreConnect)
+	if err == nil {
+		t.Fatal("expected missing profile mapping error")
+	}
+	message := err.Error()
+	for _, want := range []string{
+		"manual export options require provisioning profile mappings",
+		"com.example.demo, com.example.demo.widget",
+		`method "app-store-connect"`,
+		`team "TEAM123"`,
+		"No profile available to sign (com.example.demo) target!",
+		"Failed to find code signing groups",
+		"--export-options",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("error %q does not contain %q", message, want)
+		}
+	}
+	if strings.Contains(message, "\x1b[") || strings.Contains(message, "Resolving code signing groups") {
+		t.Fatalf("error should contain only sanitized resolver warnings and errors: %q", message)
+	}
+}
