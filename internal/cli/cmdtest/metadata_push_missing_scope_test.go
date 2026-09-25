@@ -167,6 +167,20 @@ func TestMetadataPushAbsentAppInfoDirLeavesAppInfoScopeUnmanaged(t *testing.T) {
 		if got := fixture.seen("GET /v1/appInfos/appinfo-1/appInfoLocalizations"); len(got) != 0 {
 			t.Fatalf("expected unmanaged app-info localizations not to be fetched, got %v", got)
 		}
+		// Resolving the app info could fail as ambiguous for apps with several
+		// app infos, so an unmanaged app-info scope must not resolve it.
+		if got := fixture.seen("GET /v1/apps/app-1/appInfos"); len(got) != 0 {
+			t.Fatalf("expected unmanaged app-info scope not to resolve the app info, got %v", got)
+		}
+		var identity struct {
+			AppInfoID string `json:"appInfoId"`
+		}
+		if err := json.Unmarshal([]byte(stdout), &identity); err != nil {
+			t.Fatalf("unmarshal identity: %v", err)
+		}
+		if identity.AppInfoID != "" {
+			t.Fatalf("expected empty appInfoId for an unmanaged app-info scope, got %q", identity.AppInfoID)
+		}
 	})
 
 	t.Run("apply succeeds without allow-deletes", func(t *testing.T) {

@@ -116,24 +116,30 @@ func ExecutePushWithWarnings(ctx context.Context, opts PushExecutionOptions) (Pu
 	}
 	versionIDValue := resolvedVersion.id
 	versionStateValue := resolvedVersion.state
-	appInfoIDValue, err := shared.RetryReadWithFreshTimeout(ctx, func(requestCtx context.Context) (string, error) {
-		return resolveMetadataPushAppInfoID(
-			requestCtx,
-			client,
-			opts.CommandName,
-			resolvedAppID,
-			strings.TrimSpace(opts.AppInfoID),
-			versionValue,
-			platformValue,
-			dirValue,
-			versionStateValue,
-		)
-	})
-	if err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return PushPlanResult{}, nil, err
+	// An absent app-info directory leaves the app-info scope unmanaged, so the
+	// app info is not resolved: an ambiguous app-info selection must not block
+	// a version-only push.
+	appInfoIDValue := strings.TrimSpace(opts.AppInfoID)
+	if localBundle.appInfoManaged {
+		appInfoIDValue, err = shared.RetryReadWithFreshTimeout(ctx, func(requestCtx context.Context) (string, error) {
+			return resolveMetadataPushAppInfoID(
+				requestCtx,
+				client,
+				opts.CommandName,
+				resolvedAppID,
+				strings.TrimSpace(opts.AppInfoID),
+				versionValue,
+				platformValue,
+				dirValue,
+				versionStateValue,
+			)
+		})
+		if err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return PushPlanResult{}, nil, err
+			}
+			return PushPlanResult{}, nil, fmt.Errorf("%s: %w", errorPrefix, err)
 		}
-		return PushPlanResult{}, nil, fmt.Errorf("%s: %w", errorPrefix, err)
 	}
 
 	// An absent scope directory leaves that scope unmanaged, so its remote
