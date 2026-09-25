@@ -217,7 +217,7 @@ func TestNewTestNotesRecoveryErrorRedactsExactEchoesWithoutCorruptingDiagnostics
 	}
 }
 
-func TestNormalizeTestNotesPreservesScriptMarksAndEmoji(t *testing.T) {
+func TestNormalizeTestNotesPreservesScriptMarks(t *testing.T) {
 	// App Store Connect accepts these marks (verified live on a TestFlight
 	// localization text field); removing them corrupts the text.
 	tests := []struct {
@@ -229,8 +229,6 @@ func TestNormalizeTestNotesPreservesScriptMarksAndEmoji(t *testing.T) {
 		{name: "hebrew niqqud", notes: "שָׁלוֹם"},
 		{name: "arabic harakat", notes: "مَرْحَبًا"},
 		{name: "cyrillic titlo", notes: "а҃ ok"},
-		{name: "emoji variation selector", notes: "Love ❤️"},
-		{name: "keycap emoji", notes: "Press 1️⃣"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -269,6 +267,109 @@ func TestNormalizeTestNotesDropsGenericCombiningDiacritics(t *testing.T) {
 		}
 		if normalization.Notes != tt.want || !normalization.RemovedCombiningMarks {
 			t.Fatalf("NormalizeTestNotes(%q) = %#v, want %q with RemovedCombiningMarks", tt.notes, normalization, tt.want)
+		}
+	}
+}
+
+func TestNormalizeTestNotesRejectsCharactersAppStoreConnectRefuses(t *testing.T) {
+	// Each input was rejected live by App Store Connect in whatsNew with "Text
+	// for whatsNew contains invalid characters" (see docs/API_NOTES.md).
+	tests := []struct {
+		name  string
+		notes string
+		want  []string
+	}{
+		{name: "heart", notes: "Love \u2764", want: []string{"U+2764 \"\u2764\""}},
+		{name: "heart with VS16", notes: "Love \u2764\ufe0f", want: []string{"U+2764 \"\u2764\"", "U+FE0F"}},
+		{name: "text VS15 after a letter", notes: "a\ufe0e", want: []string{"U+FE0E"}},
+		{name: "grinning face", notes: "Smile \U0001F600", want: []string{"U+1F600"}},
+		{name: "check mark button", notes: "Done \u2705", want: []string{"U+2705"}},
+		{name: "check mark dingbat", notes: "Done \u2713", want: []string{"U+2713"}},
+		{name: "black star", notes: "Rate \u2605", want: []string{"U+2605"}},
+		{name: "box drawing", notes: "a \u2500 b", want: []string{"U+2500"}},
+		{name: "block element", notes: "a \u2588 b", want: []string{"U+2588"}},
+		{name: "misc symbols and arrows", notes: "Up \u2b06", want: []string{"U+2B06"}},
+		{name: "braille", notes: "a \u2801", want: []string{"U+2801"}},
+		{name: "keycap", notes: "Press 1\ufe0f\u20e3", want: []string{"U+FE0F", "U+20E3"}},
+		{name: "zwj family", notes: "\U0001F468\u200d\U0001F469\u200d\U0001F467 ok", want: []string{"U+1F468", "U+1F469", "U+1F467"}},
+		{name: "flag", notes: "\U0001F1FA\U0001F1F8 ok", want: []string{"U+1F1FA", "U+1F1F8"}},
+		{name: "supplementary letter", notes: "Bold \U0001D400", want: []string{"U+1D400"}},
+		{name: "private use", notes: "Logo \uf8ff", want: []string{"U+F8FF"}},
+		{name: "replacement character", notes: "Broken \ufffd", want: []string{"U+FFFD"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			normalization, err := NormalizeTestNotes(tt.notes)
+			if err == nil {
+				t.Fatalf("NormalizeTestNotes(%q) = %#v, want usage failure", tt.notes, normalization)
+			}
+			if !errors.Is(err, flag.ErrHelp) {
+				t.Fatalf("NormalizeTestNotes(%q) error = %v, want usage-class error", tt.notes, err)
+			}
+			if got := ClassifyUsageError(err); got != UsageErrorInvalidValue {
+				t.Fatalf("ClassifyUsageError() = %q, want %q", got, UsageErrorInvalidValue)
+			}
+			message := err.Error()
+			if !strings.Contains(message, "What to Test notes") {
+				t.Fatalf("error = %q, want it to name the notes", message)
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(message, want) {
+					t.Fatalf("error = %q, want it to contain %q", message, want)
+				}
+			}
+			if strings.Count(message, "U+") != len(tt.want) {
+				t.Fatalf("error = %q, want exactly the distinct offending characters %v", message, tt.want)
+			}
+			if strings.Contains(message, "\n") {
+				t.Fatalf("error = %q, want a single line", message)
+			}
+		})
+	}
+}
+
+func TestNormalizeTestNotesRejectedCharacterListIsBounded(t *testing.T) {
+	var notes strings.Builder
+	for r := rune(0x1F600); r < 0x1F600+20; r++ {
+		notes.WriteRune(r)
+		notes.WriteRune(r)
+	}
+	_, err := NormalizeTestNotes(notes.String())
+	if err == nil {
+		t.Fatal("NormalizeTestNotes() error = nil, want usage failure")
+	}
+	message := err.Error()
+	if got := strings.Count(message, "U+"); got != maxReportedTestNotesRunes {
+		t.Fatalf("error = %q, want %d listed characters, got %d", message, maxReportedTestNotesRunes, got)
+	}
+	if !strings.Contains(message, "and 12 more") {
+		t.Fatalf("error = %q, want it to count the unlisted characters", message)
+	}
+}
+
+func TestNormalizeTestNotesAcceptsCharactersAppStoreConnectAllows(t *testing.T) {
+	// Each input was accepted live by App Store Connect in whatsNew, including
+	// symbols that have emoji presentations in other blocks.
+	for _, notes := range []string{
+		"Next \u2192 back \u2194 up \u21ff",
+		"Brand\u2122 \u00a9 \u00ae \u2139 \u2116",
+		"Keys \u2318 \u231a \u231b \u23e9 \u23ff",
+		"Items \u2022 \u2026 \u2014 \u20ac \u2264 \u22ff",
+		"Shapes \u25a0 \u25aa \u25b6 \u25cf \u25ff \u2460 \u24c2 \u24ff",
+		"Punct \u203c \u2049 \u3030 \u303d \u3297 \u3299 \u2934 \u27f6",
+		"Line one\nLine two\r\nTab\there",
+		"Invisible a\u00a0b a\u00adb a\u200bb a\u200eb",
+		"\u0915\u094d\u200d\u0937 \u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645",
+		"\u65e5\u672c\u8a9e \ud55c\uad6d\uc5b4 \uff01 \uff76 \uf900",
+		"Roll the die and check the oracle. \u0939\u093f\u0902\u0926\u0940 \u092e\u0947\u0902 \u092a\u0930\u0940\u0915\u094d\u0937\u0923 \u0915\u0930\u0947\u0902",
+		"a > b & c #1",
+	} {
+		normalization, err := NormalizeTestNotes(notes)
+		if err != nil {
+			t.Fatalf("NormalizeTestNotes(%q) error = %v, want accepted", notes, err)
+		}
+		if want := norm.NFC.String(strings.TrimSpace(notes)); normalization.Notes != want {
+			t.Fatalf("NormalizeTestNotes(%q) = %q, want %q", notes, normalization.Notes, want)
 		}
 	}
 }
