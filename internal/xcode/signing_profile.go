@@ -697,7 +697,7 @@ func parseSigningProfile(path string) (signingProfile, error) {
 	if !signingTeamIDPattern.MatchString(strings.ToUpper(teamID)) {
 		return signingProfile{}, fmt.Errorf("profile %s has invalid team ID %q", path, teamID)
 	}
-	identity, certSHA, err := signingProfileIdentity(payload.DeveloperCertificates)
+	identity, certSHA, certExpires, err := signingProfileIdentity(payload.DeveloperCertificates, signingProfileNow())
 	if err != nil {
 		return signingProfile{}, fmt.Errorf("profile %s: %w", path, err)
 	}
@@ -708,7 +708,7 @@ func parseSigningProfile(path string) (signingProfile, error) {
 		teamID:     strings.ToUpper(teamID),
 		pattern:    pattern,
 		wildcard:   wildcard,
-		expires:    payload.ExpirationDate,
+		expires:    earliestSigningExpiry(payload.ExpirationDate, certExpires),
 		identity:   identity,
 		certSHA256: certSHA,
 		platforms:  append([]string(nil), payload.Platform...),
@@ -739,20 +739,45 @@ func signingProfilePattern(applicationID, prefix string) (string, bool, error) {
 	return pattern, strings.HasSuffix(pattern, ".*"), nil
 }
 
-func signingProfileIdentity(certificates [][]byte) (string, string, error) {
+// signingProfileIdentity picks the developer certificate the plan signs
+// with: the one valid at now with the latest expiration, falling back to the
+// latest-expiring certificate when none is currently valid. It returns that
+// certificate's expiration so an expired identity makes the profile expired.
+func signingProfileIdentity(certificates [][]byte, now time.Time) (string, string, time.Time, error) {
 	if len(certificates) == 0 {
-		return "", "", fmt.Errorf("missing developer certificate")
+		return "", "", time.Time{}, fmt.Errorf("missing developer certificate")
 	}
-	certificate, err := x509.ParseCertificate(certificates[0])
-	if err != nil {
-		return "", "", fmt.Errorf("parse developer certificate: %w", err)
+	var chosen *x509.Certificate
+	var chosenDER []byte
+	chosenValid := false
+	for _, der := range certificates {
+		certificate, err := x509.ParseCertificate(der)
+		if err != nil {
+			return "", "", time.Time{}, fmt.Errorf("parse developer certificate: %w", err)
+		}
+		valid := !now.Before(certificate.NotBefore) && now.Before(certificate.NotAfter)
+		switch {
+		case chosen == nil,
+			valid && !chosenValid,
+			valid == chosenValid && certificate.NotAfter.After(chosen.NotAfter):
+			chosen, chosenDER, chosenValid = certificate, der, valid
+		}
 	}
-	sum := sha256.Sum256(certificates[0])
-	identity := strings.TrimSpace(certificate.Subject.CommonName)
+	sum := sha256.Sum256(chosenDER)
+	identity := strings.TrimSpace(chosen.Subject.CommonName)
 	if identity == "" {
 		identity = "Apple Distribution"
 	}
-	return identity, hex.EncodeToString(sum[:]), nil
+	return identity, hex.EncodeToString(sum[:]), chosen.NotAfter, nil
+}
+
+// earliestSigningExpiry is when a profile stops being usable: the profile
+// or its signing certificate, whichever expires first.
+func earliestSigningExpiry(profile, certificate time.Time) time.Time {
+	if profile.IsZero() || !certificate.IsZero() && certificate.Before(profile) {
+		return certificate
+	}
+	return profile
 }
 
 func signingProfileExportMethod(mac, allDevices, hasDevices, debuggable bool) string {

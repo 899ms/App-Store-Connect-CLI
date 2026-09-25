@@ -539,3 +539,39 @@ func TestInferSigningPlanExportOptionsIncludeSettingsOnlyTargets(t *testing.T) {
 		t.Fatalf("export options = %#v, want the settings-only Widget profile", plan.ExportOptions)
 	}
 }
+
+func TestInferSigningPlanIgnoresProfilesWithExpiredCertificates(t *testing.T) {
+	requireStrictSigningPlatform(t)
+	project := writeInferredSigningProject(t)
+	root := t.TempDir()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "Apple Distribution: Expired"},
+		NotBefore:    time.Now().Add(-48 * time.Hour),
+		NotAfter:     time.Now().Add(-time.Hour),
+	}
+	expiredCert, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := writeSigningTestProfileWith(t, filepath.Join(root, "App.mobileprovision"), "Stale Cert", "abababab-abab-abab-abab-abababababab", "ABCDE12345.com.example.demo", time.Now().Add(24*time.Hour), func(payload map[string]any) {
+		payload["DeveloperCertificates"] = [][]byte{expiredCert}
+	})
+	plan, err := BuildSigningPlan(SigningPlanOptions{
+		ProjectPath:   project,
+		ProfilePaths:  []string{profile},
+		Configuration: "Release",
+		SkipTargets:   []string{"Widget", "Watch"},
+		StateDir:      filepath.Join(root, "state"),
+	})
+	if err != nil {
+		t.Fatalf("BuildSigningPlan() error = %v", err)
+	}
+	if plan.Ready || !strings.Contains(strings.Join(plan.Blockers, "\n"), "expired") {
+		t.Fatalf("ready=%t blockers=%v, want an expired certificate blocker", plan.Ready, plan.Blockers)
+	}
+}
