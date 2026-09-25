@@ -2,6 +2,7 @@ package signing
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,23 +12,29 @@ import (
 	"testing"
 )
 
-func TestRemoveSigningFilesDeletesPartialArtifacts(t *testing.T) {
+func TestRemoveWrittenSigningFilesRemovesOnlyUnchangedFiles(t *testing.T) {
 	dir := t.TempDir()
 	profilePath := filepath.Join(dir, "App.mobileprovision")
 	certPath := filepath.Join(dir, "cert.cer")
 	if err := os.WriteFile(profilePath, []byte("profile"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(certPath, []byte("cert"), 0o600); err != nil {
+	if err := os.WriteFile(certPath, []byte("replaced by someone else"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	removeSigningFiles([]string{profilePath, certPath})
-
-	for _, path := range []string{profilePath, certPath} {
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Fatalf("partial artifact %s still present: %v", path, err)
-		}
+	err := removeWrittenSigningFiles(dir, []writtenSigningFile{
+		{path: profilePath, data: []byte("profile")},
+		{path: certPath, data: []byte("cert")},
+	})
+	if err == nil || !strings.Contains(err.Error(), "changed after it was written") {
+		t.Fatalf("err = %v, want a changed-file error", err)
+	}
+	if _, err := os.Stat(profilePath); !os.IsNotExist(err) {
+		t.Fatalf("unchanged partial file still present: %v", err)
+	}
+	if data, err := os.ReadFile(certPath); err != nil || string(data) != "replaced by someone else" {
+		t.Fatalf("changed file was touched: %q, %v", data, err)
 	}
 }
 
@@ -43,6 +50,7 @@ func TestBundleIdentifierMatches(t *testing.T) {
 		{parent: "com.app", candidate: "com.app.widget", expand: true, want: true},
 		{parent: "com.app", candidate: "com.app.clip", expand: true, want: true},
 		{parent: "com.app", candidate: "com.apple.other", expand: true, want: false},
+		{parent: "com.app", candidate: "com.app.*", expand: true, want: false},
 		{parent: "com.example.*", candidate: "com.example.app", expand: true, want: false},
 	}
 	for _, test := range tests {
@@ -52,21 +60,29 @@ func TestBundleIdentifierMatches(t *testing.T) {
 	}
 }
 
-func TestListSigningBundleIDsFiltersExtensionsClientSide(t *testing.T) {
-	var sawExactFilter bool
+func TestListSigningBundleIDsReadsEveryFilteredPage(t *testing.T) {
+	var requests []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if req.URL.Query().Get("filter[identifier]") == "com.app" {
-			sawExactFilter = true
-			_, _ = io.WriteString(w, `{"data":[{"type":"bundleIds","id":"id-app","attributes":{"identifier":"com.app","name":"App","platform":"IOS"}}],"links":{}}`)
+		requests = append(requests, req.URL.RawQuery)
+		if req.URL.Query().Get("cursor") == "2" {
+			_, _ = io.WriteString(w, `{"data":[
+				{"type":"bundleIds","id":"id-app","attributes":{"identifier":"com.app","platform":"IOS"}},
+				{"type":"bundleIds","id":"id-clip","attributes":{"identifier":"com.app.clip","platform":"IOS"}}
+			],"links":{}}`)
 			return
 		}
+		if got := req.URL.Query().Get("filter[identifier]"); got != "com.app" {
+			t.Errorf("filter[identifier] = %q, want com.app", got)
+		}
+		if got := req.URL.Query().Get("limit"); got != "200" {
+			t.Errorf("limit = %q, want 200", got)
+		}
 		_, _ = io.WriteString(w, `{"data":[
-			{"type":"bundleIds","id":"id-app","attributes":{"identifier":"com.app","name":"App","platform":"IOS"}},
-			{"type":"bundleIds","id":"id-widget","attributes":{"identifier":"com.app.widget","name":"Widget","platform":"IOS"}},
-			{"type":"bundleIds","id":"id-clip","attributes":{"identifier":"com.app.clip","name":"Clip","platform":"IOS"}},
-			{"type":"bundleIds","id":"id-other","attributes":{"identifier":"com.apple.other","name":"Other","platform":"IOS"}}
-		],"links":{}}`)
+			{"type":"bundleIds","id":"id-widget","attributes":{"identifier":"com.app.widget","platform":"IOS"}},
+			{"type":"bundleIds","id":"id-wild","attributes":{"identifier":"com.app.*","platform":"IOS"}},
+			{"type":"bundleIds","id":"id-other","attributes":{"identifier":"com.apple.other","platform":"IOS"}}
+		],"links":{"next":"https://api.appstoreconnect.apple.com/v1/bundleIds?cursor=2"}}`)
 	}))
 	t.Cleanup(server.Close)
 	client := newSigningFetchServerTestClient(t, server)
@@ -75,15 +91,45 @@ func TestListSigningBundleIDsFiltersExtensionsClientSide(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listSigningBundleIDs: %v", err)
 	}
-	if !sawExactFilter {
-		t.Fatal("expected filter[identifier]=com.app")
-	}
 	got := make([]string, 0, len(matched))
 	for _, item := range matched {
 		got = append(got, item.Attributes.Identifier)
 	}
-	want := []string{"com.app", "com.app.widget", "com.app.clip"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("matched = %v, want %v", got, want)
+	if strings.Join(got, ",") != "com.app,com.app.widget,com.app.clip" {
+		t.Fatalf("matched = %v, want the exact ID first, then extensions from every page", got)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("requests = %v, want 2 pages", requests)
+	}
+}
+
+func TestListSigningBundleIDsRejectsRepeatedNextURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":[{"type":"bundleIds","id":"id-app","attributes":{"identifier":"com.app"}}],"links":{"next":"https://api.appstoreconnect.apple.com/v1/bundleIds?cursor=2"}}`)
+	}))
+	t.Cleanup(server.Close)
+	client := newSigningFetchServerTestClient(t, server)
+
+	if _, err := listSigningBundleIDs(context.Background(), client, "com.app", true); err == nil || !strings.Contains(err.Error(), "repeated") {
+		t.Fatalf("err = %v, want a repeated pagination error", err)
+	}
+}
+
+func TestMatchedSyncTargetBundlesRejectsMoreThanBatchLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		items := []string{`{"type":"bundleIds","id":"id-app","attributes":{"identifier":"com.app"}}`}
+		for i := 0; i < maxSigningSyncTargets; i++ {
+			items = append(items, fmt.Sprintf(`{"type":"bundleIds","id":"id-%d","attributes":{"identifier":"com.app.ext%d"}}`, i, i))
+		}
+		_, _ = io.WriteString(w, `{"data":[`+strings.Join(items, ",")+`],"links":{}}`)
+	}))
+	t.Cleanup(server.Close)
+	client := newSigningFetchServerTestClient(t, server)
+
+	_, err := matchedSyncTargetBundles(context.Background(), client, "com.app")
+	if err == nil || !strings.Contains(err.Error(), "matched 33 bundle IDs") {
+		t.Fatalf("err = %v, want a target limit error", err)
 	}
 }

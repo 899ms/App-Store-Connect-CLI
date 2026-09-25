@@ -166,7 +166,7 @@ func syncPushCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("push", flag.ExitOnError)
 
 	bundleID := fs.String("bundle-id", "", "Bundle identifier (required unless --targets-file is used)")
-	matchExtensions := fs.Bool("match-extensions", false, "Also include registered bundle IDs that extend --bundle-id")
+	matchExtensions := fs.Bool("match-extensions", false, "Also include registered bundle IDs that extend --bundle-id, such as <id>.widget (not with --targets-file; at most 32 targets)")
 	strictMatch := fs.Bool("strict-match-identifier", false, "Include only the exact --bundle-id")
 	targetsFile := fs.String("targets-file", "", "Command-root-relative JSON file containing 1-32 bundle targets (mutually exclusive with --bundle-id)")
 	profileType := fs.String("profile-type", "", "Profile type: IOS_APP_STORE, IOS_APP_DEVELOPMENT, etc. (required)")
@@ -208,6 +208,9 @@ func syncPushCommand() *ffcli.Command {
 			}
 			if *matchExtensions && *strictMatch {
 				return shared.UsageError("--match-extensions and --strict-match-identifier are mutually exclusive")
+			}
+			if *matchExtensions && hasTargetsPath {
+				return shared.UsageError("--match-extensions requires --bundle-id; list extension targets in --targets-file instead")
 			}
 			var targetBundles []string
 			if hasTargetsPath {
@@ -303,15 +306,12 @@ func syncPushCommand() *ffcli.Command {
 			}
 			if *matchExtensions && !hasTargetsPath {
 				requestCtx, cancel := shared.ContextWithTimeout(ctx)
-				expanded, expandErr := listSigningBundleIDs(requestCtx, client, bundle, true)
+				expanded, expandErr := matchedSyncTargetBundles(requestCtx, client, bundle)
 				cancel()
 				if expandErr != nil {
 					return fmt.Errorf("signing sync push: %w", expandErr)
 				}
-				targetBundles = make([]string, 0, len(expanded))
-				for _, item := range expanded {
-					targetBundles = append(targetBundles, strings.TrimSpace(item.Attributes.Identifier))
-				}
+				targetBundles = expanded
 			}
 			partialResult := SyncResult{
 				Operation:       "push",
@@ -1188,4 +1188,21 @@ func profileDirectoryName(profileType string) string {
 	default:
 		return "other"
 	}
+}
+
+// matchedSyncTargetBundles expands --match-extensions into the parent bundle
+// ID and its registered extensions, within the batch target limit.
+func matchedSyncTargetBundles(ctx context.Context, client *asc.Client, bundle string) ([]string, error) {
+	expanded, err := listSigningBundleIDs(ctx, client, bundle, true)
+	if err != nil {
+		return nil, err
+	}
+	if len(expanded) > maxSigningSyncTargets {
+		return nil, fmt.Errorf("--match-extensions matched %d bundle IDs, more than the %d targets one run supports; split them across --targets-file runs", len(expanded), maxSigningSyncTargets)
+	}
+	targets := make([]string, 0, len(expanded))
+	for _, item := range expanded {
+		targets = append(targets, strings.TrimSpace(item.Attributes.Identifier))
+	}
+	return targets, nil
 }
