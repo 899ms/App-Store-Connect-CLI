@@ -314,3 +314,65 @@ func TestInferSigningPlanIgnoresExpiredProfiles(t *testing.T) {
 		t.Fatalf("blockers = %v, want an expired-profile explanation", onlyExpired.Blockers)
 	}
 }
+
+func TestInferSigningPlanSkipsTargetsWithoutProvisioningProfiles(t *testing.T) {
+	requireStrictSigningPlatform(t)
+	project := writeSigningProjectFixture(t, "333333333333333333333333, 444444444444444444444444, AAAAAAAAAAAAAAAAAAAAAAAA", `
+		333333333333333333333333 /* App */ = {isa = PBXNativeTarget; buildConfigurationList = 555555555555555555555555; buildPhases = (); dependencies = (); name = App; productName = App; productType = "com.apple.product-type.application"; };
+		444444444444444444444444 /* Kit */ = {isa = PBXNativeTarget; buildConfigurationList = 777777777777777777777777; buildPhases = (); dependencies = (); name = Kit; productName = Kit; productType = "com.apple.product-type.framework"; };
+		AAAAAAAAAAAAAAAAAAAAAAAA /* AppTests */ = {isa = PBXNativeTarget; buildConfigurationList = BBBBBBBBBBBBBBBBBBBBBBBB; buildPhases = (); dependencies = (); name = AppTests; productName = AppTests; productType = "com.apple.product-type.bundle.unit-test"; };
+		999999999999999999999994 /* App Release */ = {isa = XCBuildConfiguration; buildSettings = { PRODUCT_BUNDLE_IDENTIFIER = com.example.demo; }; name = Release; };
+		999999999999999999999996 /* Kit Release */ = {isa = XCBuildConfiguration; buildSettings = { PRODUCT_BUNDLE_IDENTIFIER = com.example.demo.kit; }; name = Release; };
+		DDDDDDDDDDDDDDDDDDDDDDDD /* AppTests Release */ = {isa = XCBuildConfiguration; buildSettings = { PRODUCT_BUNDLE_IDENTIFIER = com.example.demo.tests; }; name = Release; };
+		555555555555555555555555 = {isa = XCConfigurationList; buildConfigurations = (999999999999999999999994); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		777777777777777777777777 = {isa = XCConfigurationList; buildConfigurations = (999999999999999999999996); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		BBBBBBBBBBBBBBBBBBBBBBBB = {isa = XCConfigurationList; buildConfigurations = (DDDDDDDDDDDDDDDDDDDDDDDD); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };`)
+	root := t.TempDir()
+	wildcard := writeSigningTestProfile(t, filepath.Join(root, "Wild.mobileprovision"), "Wildcard", "77777777-7777-7777-7777-777777777777", "ABCDE12345.com.example.*", time.Now().Add(time.Hour))
+	plan, err := BuildSigningPlan(SigningPlanOptions{
+		ProjectPath:  project,
+		ProfilePaths: []string{wildcard},
+		StateDir:     filepath.Join(root, "state"),
+	})
+	if err != nil {
+		t.Fatalf("BuildSigningPlan() error = %v", err)
+	}
+	if !plan.Ready {
+		t.Fatalf("expected ready plan, blockers=%v", plan.Blockers)
+	}
+	if len(plan.Inferences) != 1 || plan.Inferences[0].Target != "App" {
+		t.Fatalf("inferences = %#v, want only the App target", plan.Inferences)
+	}
+	for _, target := range plan.Desired {
+		if target.Target != "App" {
+			t.Fatalf("desired includes %s, which does not embed a provisioning profile", target.Target)
+		}
+	}
+}
+
+func writeSigningProjectFixture(t *testing.T, targetIDs, objects string) string {
+	t.Helper()
+	root := t.TempDir()
+	projectPath := filepath.Join(root, "Demo.xcodeproj")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	project := `// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 77;
+	objects = {
+		111111111111111111111111 /* Project object */ = {isa = PBXProject; attributes = {}; buildConfigurationList = 222222222222222222222222; targets = (` + targetIDs + `); };
+		999999999999999999999992 /* Project Release */ = {isa = XCBuildConfiguration; buildSettings = {}; name = Release; };
+		222222222222222222222222 /* Project configuration list */ = {isa = XCConfigurationList; buildConfigurations = (999999999999999999999992); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+` + objects + `
+	};
+	rootObject = 111111111111111111111111 /* Project object */;
+}
+`
+	if err := os.WriteFile(filepath.Join(projectPath, "project.pbxproj"), []byte(project), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return projectPath
+}

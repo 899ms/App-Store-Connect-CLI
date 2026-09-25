@@ -103,6 +103,7 @@ func inferSigningSettings(project *structuredVersionProject, opts SigningPlanOpt
 		}, nil
 	}
 
+	productTypes := signingTargetProductTypes(project)
 	assigned := make([]signingProfileAssignment, 0)
 	blockers := make([]string, 0)
 	warnings := make([]string, 0)
@@ -112,7 +113,7 @@ func inferSigningSettings(project *structuredVersionProject, opts SigningPlanOpt
 		if scope.name == configurationFilter {
 			seenConfiguration = true
 		}
-		if skipped[scope.target] {
+		if skipped[scope.target] || !signingProductEmbedsProfile(productTypes[scope.target]) {
 			continue
 		}
 		bundleID, bundleErr := signingBundleID(project, scope)
@@ -249,6 +250,37 @@ func signingInferenceScopes(project *structuredVersionProject, configuration str
 		return scopes[left].name < scopes[right].name
 	})
 	return scopes
+}
+
+func signingTargetProductTypes(project *structuredVersionProject) map[string]string {
+	productTypes := make(map[string]string, len(project.project.Proj.Targets))
+	for _, target := range project.project.Proj.Targets {
+		productTypes[target.Name] = target.ProductType
+	}
+	return productTypes
+}
+
+// signingProductEmbedsProfile reports whether a product type is signed with
+// an embedded provisioning profile. Frameworks, libraries, test bundles, and
+// tools are signed without one, and Xcode rejects a manual
+// PROVISIONING_PROFILE_SPECIFIER on them, so inference leaves them alone.
+func signingProductEmbedsProfile(productType string) bool {
+	switch {
+	case strings.HasPrefix(productType, "com.apple.product-type.application"),
+		strings.HasPrefix(productType, "com.apple.product-type.app-extension"):
+		return true
+	}
+	switch productType {
+	case "com.apple.product-type.extensionkit-extension",
+		"com.apple.product-type.watchkit-extension",
+		"com.apple.product-type.watchkit2-extension",
+		"com.apple.product-type.tv-app-extension",
+		"com.apple.product-type.system-extension",
+		"com.apple.product-type.driver-extension":
+		return true
+	default:
+		return false
+	}
 }
 
 func signingBundleID(project *structuredVersionProject, configuration *versionConfiguration) (string, error) {
