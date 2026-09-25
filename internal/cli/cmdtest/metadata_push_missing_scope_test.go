@@ -299,3 +299,22 @@ func TestMetadataPushEmptyAppInfoDirStillManagesAppInfoScope(t *testing.T) {
 		}
 	})
 }
+
+func TestMetadataPushRejectsTreeWithOnlyEmptyScopeDir(t *testing.T) {
+	setupMetadataScopeEnv(t)
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "app-info"), 0o755); err != nil {
+		t.Fatalf("mkdir app-info: %v", err)
+	}
+	fixture := installMetadataScopeTransport(t)
+	_, stderr, err := runMetadataScopePush(t, "--dir", dir, "--allow-deletes", "--confirm")
+	if err == nil {
+		t.Fatal("expected an empty metadata tree to be rejected")
+	}
+	if !strings.Contains(stderr, "no metadata .json files found") {
+		t.Fatalf("expected no-files error, got %q", stderr)
+	}
+	if got := fixture.seen(""); len(got) != 0 {
+		t.Fatalf("expected no requests for an empty metadata tree, got %v", got)
+	}
+}

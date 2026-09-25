@@ -204,6 +204,7 @@ Notes:
   - with --allow-deletes, remote locales missing locally are planned as deletes.
   - a missing app-info/ or version/<version>/ directory leaves that scope unmanaged;
     an existing directory manages every locale in that scope.
+  - --dir must contain at least one metadata .json file; an empty tree is rejected.
   - applying an explicit null field clear requires --confirm.
   - omitted fields are treated as no-op; they do not imply deletion.`,
 			cfg.verbTitle,
