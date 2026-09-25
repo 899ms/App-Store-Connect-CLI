@@ -667,3 +667,38 @@ func TestXcodeSigningPlanDoesNotWriteExportOptionsForBlockedPlan(t *testing.T) {
 		t.Fatalf("stderr = %q, want a not-written warning", stderr)
 	}
 }
+
+func TestXcodeSigningPlanRejectsExportOptionsAliasingPlanInputs(t *testing.T) {
+	root := t.TempDir()
+	pbxproj := filepath.Join(root, "project.pbxproj")
+	if err := os.WriteFile(pbxproj, []byte("project"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, destination := range []string{filepath.Join(root, "plan.json"), pbxproj} {
+		_, calledWrite := stubXcodeSigningPlanSideEffects(t)
+		runBuildSigningPlan = func(localxcode.SigningPlanOptions) (*localxcode.SigningPlan, error) {
+			return &localxcode.SigningPlan{
+				Ready:         true,
+				PlanPath:      filepath.Join(root, "plan.json"),
+				ReceiptPath:   filepath.Join(root, "receipt.json"),
+				Files:         []localxcode.SigningPlanFile{{Path: pbxproj, Source: "pbxproj"}},
+				ExportOptions: &localxcode.SigningPlanExportOptions{Method: "app-store", SigningStyle: "manual"},
+			}, nil
+		}
+		command := xcodeSigningPlanCommand()
+		command.FlagSet.SetOutput(io.Discard)
+		if err := command.FlagSet.Parse([]string{"--project", "App.xcodeproj", "--profile", "App.mobileprovision", "--export-options-out", destination, "--overwrite", "--output", "json"}); err != nil {
+			t.Fatal(err)
+		}
+		err := command.Exec(context.Background(), nil)
+		if err == nil || !strings.Contains(err.Error(), "must not be") {
+			t.Fatalf("%s: error = %v, want an alias rejection", destination, err)
+		}
+		if *calledWrite {
+			t.Fatalf("%s: plan artifact was written before the alias was rejected", destination)
+		}
+		if data, _ := os.ReadFile(pbxproj); string(data) != "project" {
+			t.Fatalf("project file was overwritten: %q", data)
+		}
+	}
+}

@@ -888,6 +888,47 @@ func CheckSigningExportOptionsDestination(path string, overwrite bool) error {
 	return nil
 }
 
+// CheckSigningExportOptionsAliases rejects an export-options destination that
+// names the plan, its receipt, the project, or any file the plan read, so
+// writing the plist can never replace a plan artifact or project input.
+func CheckSigningExportOptionsAliases(path string, plan *SigningPlan) error {
+	if plan == nil {
+		return nil
+	}
+	destination, err := canonicalSigningPath(path, "export options")
+	if err != nil {
+		return err
+	}
+	protected := []string{plan.PlanPath, plan.ReceiptPath, plan.SettingsFilePath}
+	if plan.ProjectPath != "" {
+		protected = append(protected, plan.ProjectPath, filepath.Join(plan.ProjectPath, "project.pbxproj"))
+	}
+	protected = append(protected, plan.ProfilePaths...)
+	for _, file := range plan.Files {
+		protected = append(protected, file.Path)
+	}
+	destinationInfo, destinationErr := os.Stat(destination)
+	for _, candidate := range protected {
+		if strings.TrimSpace(candidate) == "" {
+			continue
+		}
+		absolute, err := canonicalSigningPath(candidate, "plan file")
+		if err != nil {
+			continue
+		}
+		same := strings.EqualFold(absolute, destination)
+		if !same && destinationErr == nil {
+			if info, statErr := os.Stat(absolute); statErr == nil && os.SameFile(info, destinationInfo) {
+				same = true
+			}
+		}
+		if same {
+			return fmt.Errorf("--export-options-out must not be %s, which the signing plan writes or reads", absolute)
+		}
+	}
+	return nil
+}
+
 func openSigningExportOptionsRoot(path string) (rootfs.Root, string, error) {
 	absolute, err := canonicalSigningPath(path, "export options")
 	if err != nil {

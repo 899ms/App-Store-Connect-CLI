@@ -189,6 +189,11 @@ Examples:
 				}
 				return fmt.Errorf("xcode signing plan: %w", err)
 			}
+			if exportOptionsPath != "" {
+				if err := localxcode.CheckSigningExportOptionsAliases(exportOptionsPath, plan); err != nil {
+					return fmt.Errorf("xcode signing plan: %w", err)
+				}
+			}
 			if err := writeSigningPlanArtifact(plan, *overwrite); err != nil {
 				return fmt.Errorf("xcode signing plan: %w", err)
 			}
