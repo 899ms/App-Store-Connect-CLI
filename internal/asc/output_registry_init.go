@@ -582,6 +582,7 @@ func registerAllOutputRenderers() {
 	registerRows(endUserLicenseAgreementDeleteResultRows)
 	registerRows(profileDownloadResultRows)
 	registerRows(signingFetchResultRows)
+	registerDirect(signingFetchBatchResultRender)
 	registerRows(capabilityReconcilePlanRows)
 	registerRows(signingSyncRows)
 	registerRows(signingKeychainInstallRows)
