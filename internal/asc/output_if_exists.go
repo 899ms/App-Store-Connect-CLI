@@ -8,8 +8,8 @@ const (
 )
 
 // IdempotentWriteReceipt carries the additive --if-exists fields on mutation
-// receipts. AlreadyExists is omitted on the plain create path so existing
-// consumers only gain the action key.
+// receipts. Commands leave it empty in fail mode so the default and explicit
+// fail paths preserve their historical output.
 type IdempotentWriteReceipt struct {
 	AlreadyExists bool   `json:"alreadyExists,omitempty"`
 	Action        string `json:"action,omitempty"`

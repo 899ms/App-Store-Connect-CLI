@@ -49,6 +49,18 @@ const (
 
 var ErrMissingAuth = errors.New("missing authentication")
 
+// RootProfileFlagName is the credential-profile selector bound by
+// BindRootFlags. Only the root flag set binds it, but it is accepted before or
+// after the command name, so surfaces that enumerate a command's accepted
+// flags offer it alongside the command's own flags.
+const RootProfileFlagName = "profile"
+
+// FlagTerminatorSentinel preserves a leading `--` for commands that need to
+// distinguish escaped positional tokens after flag.FlagSet removes the
+// terminator. NUL cannot appear in a real process argument, so it cannot
+// collide with operator input.
+const FlagTerminatorSentinel = "\x00asc-flag-terminator"
+
 var (
 	ascClientFactoryMu sync.RWMutex
 	ascClientFactory   = getASCClient
@@ -96,7 +108,7 @@ func BindRootFlags(fs *flag.FlagSet) {
 	debug.EnableBoolFlag()
 	apiDebug.EnableBoolFlag()
 
-	fs.StringVar(&selectedProfile, "profile", "", "Use named authentication profile")
+	fs.StringVar(&selectedProfile, RootProfileFlagName, "", "Use named authentication profile (accepted before or after the command name)")
 	fs.BoolVar(&strictAuth, "strict-auth", false, "Fail when credentials are resolved from multiple sources")
 	fs.Var(&retryLog, "retry-log", "Enable retry logging to stderr (overrides ASC_RETRY_LOG/config when set)")
 	fs.Var(&debug, "debug", "Enable debug logging to stderr")
@@ -107,6 +119,46 @@ func BindRootFlags(fs *flag.FlagSet) {
 // SelectedProfile returns the current profile override.
 func SelectedProfile() string {
 	return selectedProfile
+}
+
+// RootFlagsForReinvocation returns the root-level flags that were explicitly
+// set, in binding order, so a command can print a re-invocation that keeps the
+// caller's behavior instead of silently dropping flags such as --strict-auth.
+// Values are rendered with ShellQuote; ok is false when any of them cannot be
+// rendered as a copyable argument, so callers omit the suggestion entirely
+// rather than print a command that would run with a different value.
+func RootFlagsForReinvocation() (args []string, ok bool) {
+	args = make([]string, 0, 8)
+	if profile := strings.TrimSpace(selectedProfile); profile != "" {
+		quoted, quotable := ShellQuote(profile)
+		if !quotable {
+			return nil, false
+		}
+		args = append(args, "--profile", quoted)
+	}
+	if strictAuth {
+		args = append(args, "--strict-auth")
+	}
+	// --debug, --api-debug, and --retry-log are deliberately omitted: they only
+	// add stderr diagnostics and never change what a command does, so repeating
+	// them would lengthen the printed command without preserving behavior.
+	for _, report := range []struct {
+		name  string
+		value string
+	}{
+		{name: "--report", value: ReportFormat()},
+		{name: "--report-file", value: ReportFile()},
+	} {
+		if report.value == "" {
+			continue
+		}
+		quoted, quotable := ShellQuote(report.value)
+		if !quotable {
+			return nil, false
+		}
+		args = append(args, report.name, quoted)
+	}
+	return args, true
 }
 
 // ProgressEnabled reports whether it's safe/appropriate to emit progress messages.

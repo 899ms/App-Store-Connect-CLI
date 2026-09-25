@@ -322,6 +322,41 @@ func TestVersionsCreateDefaultIfExistsFailPreservesConflict(t *testing.T) {
 	}
 }
 
+func TestVersionsCreateDefaultIfExistsFailPreservesSuccessfulOutput(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		args []string
+	}{
+		{name: "default", args: nil},
+		{name: "explicit fail", args: []string{"--if-exists", "fail"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			args := []string{"versions", "create", "--app", "app-1", "--version", "2.0.0", "--platform", "IOS", "--output", "json"}
+			args = append(args, tt.args...)
+			stdout, stderr, seen, runErr := runIfExistsCommand(t, args, func(req ifExistsRequest) (*http.Response, error) {
+				if req.Method == http.MethodPost && req.Path == "/v1/appStoreVersions" {
+					return jsonResponse(http.StatusCreated, `{"data":{"type":"appStoreVersions","id":"version-created","attributes":{"versionString":"2.0.0","platform":"IOS","appStoreState":"PREPARE_FOR_SUBMISSION"}}}`)
+				}
+				t.Fatalf("unexpected request %s %s", req.Method, req.Path)
+				return nil, nil
+			})
+			if runErr != nil {
+				t.Fatalf("run error: %v", runErr)
+			}
+			const want = `{"id":"version-created","versionString":"2.0.0","platform":"IOS","state":"PREPARE_FOR_SUBMISSION"}` + "\n"
+			if stdout != want {
+				t.Fatalf("stdout = %q, want legacy output %q", stdout, want)
+			}
+			if stderr != "" {
+				t.Fatalf("stderr = %q, want empty", stderr)
+			}
+			if len(seen) != 1 {
+				t.Fatalf("requests = %+v, want only the POST", seen)
+			}
+		})
+	}
+}
+
 func TestVersionsCreateIfExistsSkipStillFailsWhenReadBackFindsNothing(t *testing.T) {
 	stdout, _, seen, runErr := runIfExistsCommand(t, []string{
 		"versions", "create", "--app", "app-1", "--version", "2.0.0", "--if-exists", "skip", "--output", "json",
@@ -457,6 +492,39 @@ func TestReviewDetailsCreateIfExistsUpdatePatchesExistingDetail(t *testing.T) {
 	}
 	if !strings.Contains(stdout, `"notes":"new notes"`) {
 		t.Fatalf("stdout = %q, want PATCH response", stdout)
+	}
+}
+
+func TestReviewDetailsCreateIfExistsUpdateReusesExistingDemoCredentials(t *testing.T) {
+	stdout, _, seen, runErr := runIfExistsCommand(t, []string{
+		"review", "details-create", "--version-id", "version-1",
+		"--demo-account-required=true",
+		"--if-exists", "update", "--output", "json",
+	}, func(req ifExistsRequest) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodGet && req.Path == "/v1/appStoreVersions/version-1/appStoreReviewDetail":
+			return jsonResponse(http.StatusOK, `{"data":{"type":"appStoreReviewDetails","id":"detail-existing","attributes":{"demoAccountName":"reviewer@example.com","demoAccountPassword":"existing-password","demoAccountRequired":true}}}`)
+		case req.Method == http.MethodPatch && req.Path == "/v1/appStoreReviewDetails/detail-existing":
+			if !strings.Contains(req.Body, `"demoAccountRequired":true`) {
+				t.Fatalf("PATCH body = %s, want demoAccountRequired=true", req.Body)
+			}
+			if strings.Contains(req.Body, "demoAccountName") || strings.Contains(req.Body, "demoAccountPassword") {
+				t.Fatalf("PATCH body = %s, must not resend existing credentials", req.Body)
+			}
+			return jsonResponse(http.StatusOK, `{"data":{"type":"appStoreReviewDetails","id":"detail-existing","attributes":{"demoAccountRequired":true}}}`)
+		default:
+			t.Fatalf("unexpected request %s %s", req.Method, req.Path)
+			return nil, nil
+		}
+	})
+	if runErr != nil {
+		t.Fatalf("run error: %v", runErr)
+	}
+	if len(seen) != 2 {
+		t.Fatalf("requests = %+v, want read-back GET then PATCH", seen)
+	}
+	if !strings.Contains(stdout, `"id":"detail-existing"`) {
+		t.Fatalf("stdout = %q, want updated detail", stdout)
 	}
 }
 
