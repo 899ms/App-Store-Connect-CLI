@@ -78,6 +78,9 @@ func ExecutePushWithWarnings(ctx context.Context, opts PushExecutionOptions) (Pu
 	if err != nil {
 		return PushPlanResult{}, nil, fmt.Errorf("%s: %w", errorPrefix, err)
 	}
+	if err := validateDefaultClearFields(localBundle, versionValue); err != nil {
+		return PushPlanResult{}, nil, shared.UsageError(err.Error())
+	}
 
 	client, err := shared.GetASCClient()
 	if err != nil {
@@ -148,6 +151,9 @@ func ExecutePushWithWarnings(ctx context.Context, opts PushExecutionOptions) (Pu
 
 	localAppInfo := applyDefaultAppInfoFallback(localBundle.appInfo, localBundle.defaultAppInfo, remoteAppInfo, opts.AllowDeletes)
 	localVersion := applyDefaultVersionFallback(localBundle.version, localBundle.defaultVersion, remoteVersion, opts.AllowDeletes)
+	if err := validateVersionClearOnlyLocales(localVersion, remoteVersion); err != nil {
+		return PushPlanResult{}, nil, shared.UsageError(err.Error())
+	}
 	if err := validateMetadataCreatePrerequisites(localAppInfo, remoteAppInfo); err != nil {
 		return PushPlanResult{}, nil, shared.UsageError(err.Error())
 	}
@@ -219,6 +225,13 @@ func ExecutePushWithWarnings(ctx context.Context, opts PushExecutionOptions) (Pu
 			return PushPlanResult{}, nil, shared.UsageError("--confirm is required when applying delete operations")
 		}
 	}
+	if !opts.Confirm {
+		for _, update := range result.Updates {
+			if update.Reason == "field cleared locally" {
+				return PushPlanResult{}, nil, shared.UsageError("--confirm is required when applying field clear operations")
+			}
+		}
+	}
 
 	actions, applyErr := applyMetadataPlan(
 		ctx,
@@ -259,6 +272,36 @@ func ExecutePushWithWarnings(ctx context.Context, opts PushExecutionOptions) (Pu
 		return result, warnings, fmt.Errorf("%s: %w", errorPrefix, applyErr)
 	}
 	return result, warnings, nil
+}
+
+// validateVersionClearOnlyLocales prevents a promotional-text clear from
+// being silently treated as a no-op when its version localization is missing.
+// Set fields can still create a localization; a null field on that new resource
+// is already empty and remains omitted from the create payload.
+func validateVersionClearOnlyLocales(
+	localVersion map[string]versionLocalPatch,
+	remoteVersion map[string]VersionLocalization,
+) error {
+	for _, locale := range sortedKeys(localVersion) {
+		patch := localVersion[locale]
+		if len(patch.setFields) > 0 || len(patch.clearFields) == 0 {
+			continue
+		}
+		if _, exists := remoteVersion[locale]; !exists {
+			return fmt.Errorf("version localization %q cannot be cleared because no existing localization was found", locale)
+		}
+	}
+	return nil
+}
+
+func validateDefaultClearFields(bundle localMetadataBundle, version string) error {
+	if bundle.defaultAppInfo != nil && len(bundle.defaultAppInfo.clearFields) > 0 {
+		return fmt.Errorf("clear fields in app-info/default.json are not supported; move null values to an explicit locale file")
+	}
+	if bundle.defaultVersion != nil && len(bundle.defaultVersion.clearFields) > 0 {
+		return fmt.Errorf("clear fields in version/%s/default.json are not supported; move null values to an explicit locale file", version)
+	}
+	return nil
 }
 
 func metadataMutationErrorPrefix(commandName string) string {
