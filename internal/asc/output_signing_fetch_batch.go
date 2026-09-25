@@ -9,9 +9,12 @@ type SigningFetchBatchResult struct {
 }
 
 // SigningFetchBatchFailure is one matched bundle ID whose fetch failed.
+// StaleProfiles is the --delete-stale-profiles receipt for that bundle ID,
+// kept because deletions cannot be undone even when the fetch failed.
 type SigningFetchBatchFailure struct {
-	BundleID string `json:"bundleId"`
-	Error    string `json:"error"`
+	BundleID      string                     `json:"bundleId"`
+	Error         string                     `json:"error"`
+	StaleProfiles *SigningFetchStaleProfiles `json:"staleProfiles,omitempty"`
 }
 
 func signingFetchBatchResultRender(result *SigningFetchBatchResult, render func([]string, [][]string)) error {
@@ -36,9 +39,18 @@ func signingFetchBatchResultRender(result *SigningFetchBatchResult, render func(
 	if len(result.Failures) > 0 {
 		failureRows := make([][]string, 0, len(result.Failures))
 		for _, failure := range result.Failures {
-			failureRows = append(failureRows, []string{failure.BundleID, failure.Error})
+			deleted, failed := "", ""
+			if stale := failure.StaleProfiles; stale != nil {
+				deleted = joinSigningList(signingStaleProfileIDs(stale.Deleted))
+				failedIDs := make([]string, 0, len(stale.Failed))
+				for _, item := range stale.Failed {
+					failedIDs = append(failedIDs, item.ID+": "+item.Error)
+				}
+				failed = joinSigningList(failedIDs)
+			}
+			failureRows = append(failureRows, []string{failure.BundleID, failure.Error, deleted, failed})
 		}
-		render([]string{"Failed Bundle ID", "Error"}, failureRows)
+		render([]string{"Failed Bundle ID", "Error", "Stale Deleted", "Stale Failed"}, failureRows)
 	}
 	return nil
 }

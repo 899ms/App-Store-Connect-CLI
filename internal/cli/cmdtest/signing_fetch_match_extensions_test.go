@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -364,5 +365,211 @@ func TestSigningFetchMatchExtensionsCreatesDistinctProfilePerTarget(t *testing.T
 		if !strings.Contains(created[i], identifier) {
 			t.Fatalf("profile name %q does not identify %s", created[i], identifier)
 		}
+	}
+}
+
+type matchStaleStub struct {
+	mu       sync.Mutex
+	requests []string
+}
+
+func (s *matchStaleStub) add(r string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.requests = append(s.requests, r)
+}
+
+func (s *matchStaleStub) count(prefix string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, r := range s.requests {
+		if strings.HasPrefix(r, prefix) {
+			n++
+		}
+	}
+	return n
+}
+
+// startMatchStaleStub serves com.app and com.app.widget, each with one expired
+// and one current IOS_APP_STORE profile that share certificate cert-1.
+func startMatchStaleStub(t *testing.T, failDelete string) *matchStaleStub {
+	t.Helper()
+	setupAuth(t)
+	stub := &matchStaleStub{}
+	cert := matchExtensionsCertificate("cert-1", "SER1", base64.StdEncoding.EncodeToString([]byte("cert-one")))
+	profiles := func(prefix string) string {
+		content := base64.StdEncoding.EncodeToString([]byte("profile-" + prefix))
+		return fmt.Sprintf(`{"data":[
+			{"type":"profiles","id":"stale-%[1]s","attributes":{"name":"Old %[1]s","profileType":"IOS_APP_STORE","profileState":"ACTIVE","expirationDate":"2000-01-01T00:00:00Z"}},
+			{"type":"profiles","id":"live-%[1]s","attributes":{"name":"Live %[1]s","profileType":"IOS_APP_STORE","profileState":"ACTIVE","expirationDate":"2100-01-01T00:00:00Z","profileContent":%[2]q}}
+		],"links":{}}`, prefix, content)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		stub.add(req.Method + " " + req.URL.Path)
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/bundleIds":
+			writeSigningFetchOutputJSON(t, w, http.StatusOK, `{"data":[
+				{"type":"bundleIds","id":"bundle-app","attributes":{"identifier":"com.app","platform":"IOS"}},
+				{"type":"bundleIds","id":"bundle-widget","attributes":{"identifier":"com.app.widget","platform":"IOS"}}
+			],"links":{}}`)
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/bundleIds/bundle-app/profiles":
+			writeSigningFetchOutputJSON(t, w, http.StatusOK, profiles("app"))
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/bundleIds/bundle-widget/profiles":
+			writeSigningFetchOutputJSON(t, w, http.StatusOK, profiles("widget"))
+		case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/certificates"):
+			writeSigningFetchOutputJSON(t, w, http.StatusOK, `{"data":[`+cert+`],"links":{}}`)
+		case req.Method == http.MethodDelete && strings.HasPrefix(req.URL.Path, "/v1/profiles/"):
+			if strings.TrimPrefix(req.URL.Path, "/v1/profiles/") == failDelete {
+				writeSigningFetchOutputJSON(t, w, http.StatusConflict, `{"errors":[{"status":"409","code":"STATE_ERROR","title":"Conflict","detail":"cannot delete"}]}`)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request: %s %s", req.Method, req.URL.String())
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(server.Close)
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := server.Client().Transport
+	client, err := asc.NewClientWithHTTPClient(os.Getenv("ASC_KEY_ID"), os.Getenv("ASC_ISSUER_ID"), os.Getenv("ASC_PRIVATE_KEY_PATH"),
+		&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			cloned := req.Clone(req.Context())
+			cloned.URL.Scheme = serverURL.Scheme
+			cloned.URL.Host = serverURL.Host
+			return transport.RoundTrip(cloned)
+		})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(shared.SetASCClientFactoryForTesting(func() (*asc.Client, error) { return client, nil }))
+	return stub
+}
+
+type matchStaleReceipt struct {
+	Results []struct {
+		BundleID      string `json:"bundleId"`
+		ProfileID     string `json:"profileId"`
+		StaleProfiles struct {
+			DryRun  bool `json:"dryRun"`
+			Planned []struct {
+				ID string `json:"id"`
+			} `json:"planned"`
+			Deleted []struct {
+				ID string `json:"id"`
+			} `json:"deleted"`
+		} `json:"staleProfiles"`
+	} `json:"results"`
+	Failures []struct {
+		BundleID      string `json:"bundleId"`
+		StaleProfiles *struct {
+			Deleted []struct {
+				ID string `json:"id"`
+			} `json:"deleted"`
+			Failed []struct {
+				ID string `json:"id"`
+			} `json:"failed"`
+		} `json:"staleProfiles"`
+	} `json:"failures"`
+}
+
+func runMatchStaleFetch(t *testing.T, outputDir string, extra ...string) (int, matchStaleReceipt, string) {
+	t.Helper()
+	var code int
+	stdout, stderr := captureOutput(t, func() {
+		code = rootcmd.Run(append([]string{
+			"signing", "fetch",
+			"--bundle-id", "com.app",
+			"--profile-type", "IOS_APP_STORE",
+			"--match-extensions",
+			"--delete-stale-profiles",
+			"--output", outputDir,
+			"--format", "json",
+		}, extra...), "test")
+	})
+	var receipt matchStaleReceipt
+	if err := json.Unmarshal([]byte(stdout), &receipt); err != nil {
+		t.Fatalf("decode %q (stderr %q): %v", stdout, stderr, err)
+	}
+	return code, receipt, stderr
+}
+
+func TestSigningFetchMatchExtensionsDeleteStaleDryRunPlansEveryTarget(t *testing.T) {
+	stub := startMatchStaleStub(t, "")
+	outputDir := filepath.Join(t.TempDir(), "signing")
+
+	code, receipt, stderr := runMatchStaleFetch(t, outputDir, "--dry-run")
+	if code != rootcmd.ExitSuccess {
+		t.Fatalf("exit code = %d (stderr %q)", code, stderr)
+	}
+	if len(receipt.Results) != 2 {
+		t.Fatalf("results = %+v, want a plan per target", receipt.Results)
+	}
+	for _, result := range receipt.Results {
+		if !result.StaleProfiles.DryRun || len(result.StaleProfiles.Planned) != 1 || len(result.StaleProfiles.Deleted) != 0 || result.ProfileID != "" {
+			t.Fatalf("%s plan = %+v", result.BundleID, result)
+		}
+	}
+	if stub.count("DELETE") != 0 || stub.count("GET /v1/profiles/") != 0 {
+		t.Fatalf("dry run deleted or fetched: %v", stub.requests)
+	}
+	if _, err := os.Stat(outputDir); !os.IsNotExist(err) {
+		t.Fatalf("dry run created the output dir: %v", err)
+	}
+	if !strings.Contains(stderr, "would delete 2 stale profile(s) across 2 bundle ID(s)") {
+		t.Fatalf("stderr = %q", stderr)
+	}
+}
+
+func TestSigningFetchMatchExtensionsDeleteStaleConfirmDeletesPerTarget(t *testing.T) {
+	stub := startMatchStaleStub(t, "")
+
+	code, receipt, stderr := runMatchStaleFetch(t, t.TempDir(), "--confirm")
+	if code != rootcmd.ExitSuccess {
+		t.Fatalf("exit code = %d (stderr %q)", code, stderr)
+	}
+	if len(receipt.Results) != 2 {
+		t.Fatalf("results = %+v", receipt.Results)
+	}
+	for _, result := range receipt.Results {
+		if len(result.StaleProfiles.Deleted) != 1 || !strings.HasPrefix(result.StaleProfiles.Deleted[0].ID, "stale-") || !strings.HasPrefix(result.ProfileID, "live-") {
+			t.Fatalf("%s result = %+v", result.BundleID, result)
+		}
+	}
+	if got := stub.count("DELETE"); got != 2 {
+		t.Fatalf("deletes = %d, want 2", got)
+	}
+}
+
+func TestSigningFetchMatchExtensionsDeleteStaleFailureStopsEveryTarget(t *testing.T) {
+	stub := startMatchStaleStub(t, "stale-widget")
+
+	code, receipt, stderr := runMatchStaleFetch(t, t.TempDir(), "--confirm")
+	if code == rootcmd.ExitSuccess {
+		t.Fatal("expected failure when a stale deletion fails")
+	}
+	if len(receipt.Results) != 0 || len(receipt.Failures) != 2 {
+		t.Fatalf("receipt = %+v, want every target reported as failed", receipt)
+	}
+	for _, failure := range receipt.Failures {
+		if failure.StaleProfiles == nil {
+			t.Fatalf("%s failure has no stale receipt", failure.BundleID)
+		}
+	}
+	if app := receipt.Failures[0]; app.BundleID != "com.app" || len(app.StaleProfiles.Deleted) != 1 {
+		t.Fatalf("com.app receipt = %+v, want its completed deletion recorded", app)
+	}
+	if widget := receipt.Failures[1]; len(widget.StaleProfiles.Failed) != 1 || len(widget.StaleProfiles.Deleted) != 0 {
+		t.Fatalf("widget receipt = %+v", widget)
+	}
+	if stub.count("GET /v1/profiles/") != 0 {
+		t.Fatalf("fetched after a failed deletion: %v", stub.requests)
+	}
+	if !strings.Contains(stderr, "nothing was fetched or created") {
+		t.Fatalf("stderr = %q", stderr)
 	}
 }
