@@ -15,6 +15,10 @@ type SigningFetchBatchFailure struct {
 	BundleID      string                     `json:"bundleId"`
 	Error         string                     `json:"error"`
 	StaleProfiles *SigningFetchStaleProfiles `json:"staleProfiles,omitempty"`
+	// ProfileID and ProfileCreationState report a profile this run created
+	// ("created") or may have created ("unknown") before the target failed.
+	ProfileID            string `json:"profileId,omitempty"`
+	ProfileCreationState string `json:"profileCreationState,omitempty"`
 }
 
 func signingFetchBatchResultRender(result *SigningFetchBatchResult, render func([]string, [][]string)) error {
@@ -48,9 +52,9 @@ func signingFetchBatchResultRender(result *SigningFetchBatchResult, render func(
 				}
 				failed = joinSigningList(failedIDs)
 			}
-			failureRows = append(failureRows, []string{failure.BundleID, failure.Error, deleted, failed})
+			failureRows = append(failureRows, []string{failure.BundleID, failure.Error, failure.ProfileID, failure.ProfileCreationState, deleted, failed})
 		}
-		render([]string{"Failed Bundle ID", "Error", "Stale Deleted", "Stale Failed"}, failureRows)
+		render([]string{"Failed Bundle ID", "Error", "Profile ID", "Profile Creation", "Stale Deleted", "Stale Failed"}, failureRows)
 	}
 	return nil
 }

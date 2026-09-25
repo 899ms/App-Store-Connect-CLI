@@ -592,3 +592,84 @@ func TestSigningFetchMatchExtensionsDeleteStaleChecksOutputDirBeforeDeleting(t *
 		t.Fatalf("delete requests = %d, want 0", n)
 	}
 }
+
+func TestSigningFetchMatchExtensionsReportsCreatedProfileWhenWriteFails(t *testing.T) {
+	setupAuth(t)
+	certContent := base64.StdEncoding.EncodeToString([]byte("cert-one"))
+	creates := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/bundleIds":
+			writeSigningFetchOutputJSON(t, w, http.StatusOK, `{"data":[
+				{"type":"bundleIds","id":"bundle-app","attributes":{"identifier":"com.app","platform":"IOS"}},
+				{"type":"bundleIds","id":"bundle-widget","attributes":{"identifier":"com.app.widget","platform":"IOS"}}
+			],"links":{}}`)
+		case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/profiles"):
+			writeSigningFetchOutputJSON(t, w, http.StatusOK, `{"data":[],"links":{}}`)
+		case req.Method == http.MethodGet && req.URL.Path == "/v1/certificates":
+			writeSigningFetchOutputJSON(t, w, http.StatusOK, `{"data":[`+matchExtensionsCertificate("cert-1", "SER1", certContent)+`],"links":{}}`)
+		case req.Method == http.MethodPost && req.URL.Path == "/v1/profiles":
+			creates++
+			content := base64.StdEncoding.EncodeToString([]byte("profile"))
+			if creates == 2 {
+				content = "!!not-base64!!"
+			}
+			writeSigningFetchOutputJSON(t, w, http.StatusCreated, fmt.Sprintf(
+				`{"data":{"type":"profiles","id":"created-%d","attributes":{"name":"Created %d","profileType":"IOS_APP_STORE","profileState":"ACTIVE","profileContent":%q}}}`,
+				creates, creates, content,
+			))
+		default:
+			t.Errorf("unexpected request: %s %s", req.Method, req.URL.String())
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(server.Close)
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := server.Client().Transport
+	client, err := asc.NewClientWithHTTPClient(os.Getenv("ASC_KEY_ID"), os.Getenv("ASC_ISSUER_ID"), os.Getenv("ASC_PRIVATE_KEY_PATH"),
+		&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			cloned := req.Clone(req.Context())
+			cloned.URL.Scheme = serverURL.Scheme
+			cloned.URL.Host = serverURL.Host
+			return transport.RoundTrip(cloned)
+		})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(shared.SetASCClientFactoryForTesting(func() (*asc.Client, error) { return client, nil }))
+
+	var code int
+	stdout, stderr := captureOutput(t, func() {
+		code = rootcmd.Run([]string{
+			"signing", "fetch",
+			"--bundle-id", "com.app",
+			"--profile-type", "IOS_APP_STORE",
+			"--match-extensions", "--create-missing",
+			"--output", t.TempDir(),
+			"--format", "json",
+		}, "test")
+	})
+	if code == rootcmd.ExitSuccess {
+		t.Fatalf("expected failure (stderr %q)", stderr)
+	}
+	var receipt struct {
+		Failures []struct {
+			BundleID             string `json:"bundleId"`
+			ProfileID            string `json:"profileId"`
+			ProfileCreationState string `json:"profileCreationState"`
+		} `json:"failures"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &receipt); err != nil {
+		t.Fatalf("decode %q: %v", stdout, err)
+	}
+	if len(receipt.Failures) != 1 {
+		t.Fatalf("failures = %+v", receipt.Failures)
+	}
+	failure := receipt.Failures[0]
+	if failure.BundleID != "com.app.widget" || failure.ProfileID != "created-2" || failure.ProfileCreationState != "created" {
+		t.Fatalf("failure = %+v, want the created profile reported", failure)
+	}
+}

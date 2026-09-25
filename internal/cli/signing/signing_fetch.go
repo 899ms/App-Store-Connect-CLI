@@ -516,7 +516,12 @@ func fetchMatchedSigningBundles(
 	for i, item := range bundleIDs {
 		result, err := fetchMatchedSigningBundle(ctx, client, item, identifiers[i], opts, writtenCertificates)
 		if err != nil {
-			batch.Failures = append(batch.Failures, asc.SigningFetchBatchFailure{BundleID: identifiers[i], Error: err.Error(), StaleProfiles: stale[i]})
+			failure := asc.SigningFetchBatchFailure{BundleID: identifiers[i], Error: err.Error(), StaleProfiles: stale[i]}
+			if result != nil {
+				failure.ProfileID = result.ProfileID
+				failure.ProfileCreationState = result.ProfileCreationState
+			}
+			batch.Failures = append(batch.Failures, failure)
 			continue
 		}
 		result.StaleProfiles = stale[i]
@@ -632,6 +637,7 @@ func fetchMatchedSigningBundle(
 		return ensureOutputPathsAreFree(signingOutputPaths(opts.OutputDir, profileName, profileID, opts.ProfileType, pending))
 	}
 
+	progress := &signingAssetsProgress{}
 	profile, certs, created, err := resolveSigningAssets(requestCtx, client, signingAssetsOptions{
 		BundleIDResourceID: item.ID,
 		BundleIdentifier:   identifier,
@@ -642,11 +648,16 @@ func fetchMatchedSigningBundle(
 		CertificateType: opts.CertificateType,
 		DeviceIDs:       opts.DeviceIDs,
 		CreateMissing:   opts.CreateMissing,
+		Progress:        progress,
 		BeforeCreate: func(plan profileCreatePlan) error {
 			return preflight(plan.ProfileName, "", plan.Certificates)
 		},
 	})
 	if err != nil {
+		if progress.ProfileCreateAttempted {
+			// The create request may have reached App Store Connect.
+			return &asc.SigningFetchResult{BundleID: identifier, ProfileCreationState: "unknown"}, err
+		}
 		return nil, err
 	}
 	result := &asc.SigningFetchResult{
@@ -658,6 +669,17 @@ func fetchMatchedSigningBundle(
 		OutputPath:       opts.OutputDir,
 		Created:          created,
 	}
+	if created {
+		result.ProfileCreationState = "created"
+	}
+	// Once a profile exists, failures still return the result so the batch
+	// receipt can report the profile this run created.
+	partial := func(cause error) (*asc.SigningFetchResult, error) {
+		if created {
+			return result, cause
+		}
+		return nil, cause
+	}
 	fail := func(written []writtenSigningFile, cause error) error {
 		if cleanupErr := removeWrittenSigningFiles(opts.OutputDir, written); cleanupErr != nil {
 			return errors.Join(cause, fmt.Errorf("remove partial files: %w", cleanupErr))
@@ -665,15 +687,15 @@ func fetchMatchedSigningBundle(
 		return cause
 	}
 	if err := preflight(profile.Data.Attributes.Name, profile.Data.ID, certs.Data); err != nil {
-		return nil, err
+		return partial(err)
 	}
 	profilePath := profileOutputPath(opts.OutputDir, profile.Data.Attributes.Name, profile.Data.ID, opts.ProfileType)
 	profileContent, err := decodeBase64Content("profile", profile.Data.Attributes.ProfileContent)
 	if err != nil {
-		return nil, fmt.Errorf("decode profile: %w", err)
+		return partial(fmt.Errorf("decode profile: %w", err))
 	}
 	if err := shared.WriteProfileFile(profilePath, profileContent); err != nil {
-		return nil, fmt.Errorf("write profile: %w", err)
+		return partial(fmt.Errorf("write profile: %w", err))
 	}
 	result.ProfileFile = profilePath
 	written := []writtenSigningFile{{path: profilePath, data: profileContent}}
@@ -686,10 +708,12 @@ func fetchMatchedSigningBundle(
 		certPath := certificateOutputPath(opts.OutputDir, cert)
 		certContent, err := decodeBase64Content("certificate", cert.Attributes.CertificateContent)
 		if err != nil {
-			return nil, fail(written, fmt.Errorf("decode certificate: %w", err))
+			result.ProfileFile, result.CertificateFiles = "", nil
+			return partial(fail(written, fmt.Errorf("decode certificate: %w", err)))
 		}
 		if err := writeBinaryFile(certPath, certContent); err != nil {
-			return nil, fail(written, fmt.Errorf("write certificate: %w", err))
+			result.ProfileFile, result.CertificateFiles = "", nil
+			return partial(fail(written, fmt.Errorf("write certificate: %w", err)))
 		}
 		written = append(written, writtenSigningFile{path: certPath, data: certContent})
 		newCertificates[cert.ID] = certPath

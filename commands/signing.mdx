@@ -193,7 +193,7 @@ asc signing fetch \
   --output ./signing
 ```
 
-When more than one bundle ID matches, the JSON receipt lists `matchedBundleIds`, one entry in `results` per fetched target, and `failures` for targets that could not be fetched. A certificate shared by several targets is written once and listed for each target. A failed target removes only the files it wrote, and the command exits 1 after finishing the remaining targets. `--match-extensions` cannot be combined with `--create-missing-certificate`; create the certificate with a single-bundle fetch first. `signing sync push --bundle-id ID --match-extensions` expands to the same targets (at most 32) and cannot be combined with `--targets-file`.
+When more than one bundle ID matches, the JSON receipt lists `matchedBundleIds`, one entry in `results` per fetched target, and `failures` for targets that could not be fetched. A certificate shared by several targets is written once and listed for each target. A failed target removes only the files it wrote; if it had already created a profile, its `failures` entry reports `profileId` and `profileCreationState` (`created`, or `unknown` when the create request may have reached App Store Connect). The command exits 1 after finishing the remaining targets. `--match-extensions` cannot be combined with `--create-missing-certificate`; create the certificate with a single-bundle fetch first. `signing sync push --bundle-id ID --match-extensions` expands to the same targets (at most 32) and cannot be combined with `--targets-file`.
 
 ### Stale profiles
 
