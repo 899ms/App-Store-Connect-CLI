@@ -136,6 +136,11 @@ func signingPlanSettingEquals(plan *SigningPlan, target, configuration, key, wan
 
 func writeSigningTestProfile(t *testing.T, path, name, uuid, applicationID string, expires time.Time) string {
 	t.Helper()
+	return writeSigningTestProfileWith(t, path, name, uuid, applicationID, expires, nil)
+}
+
+func writeSigningTestProfileWith(t *testing.T, path, name, uuid, applicationID string, expires time.Time, mutate func(map[string]any)) string {
+	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
@@ -169,6 +174,9 @@ func writeSigningTestProfile(t *testing.T, path, name, uuid, applicationID strin
 		"ProvisionedDevices":    []string{"device"},
 	}
 	payload["UUID"] = uuid
+	if mutate != nil {
+		mutate(payload)
+	}
 	encoded, err := plist.Marshal(payload, plist.XMLFormat)
 	if err != nil {
 		t.Fatal(err)
@@ -237,5 +245,31 @@ func TestSigningPlanJSONRecordsProfileProvenance(t *testing.T) {
 	}
 	if !json.Valid(encoded) {
 		t.Fatalf("invalid JSON %s", encoded)
+	}
+}
+
+func TestParseSigningProfileAcceptsTeamWildcard(t *testing.T) {
+	root := t.TempDir()
+	path := writeSigningTestProfile(t, filepath.Join(root, "Team.mobileprovision"), "Team Wildcard", "44444444-4444-4444-4444-444444444444", "ABCDE12345.*", time.Now().Add(time.Hour))
+	profile, err := parseSigningProfile(path)
+	if err != nil {
+		t.Fatalf("parseSigningProfile() error = %v", err)
+	}
+	if !profile.wildcard || profile.pattern != "*" {
+		t.Fatalf("profile pattern = %q wildcard=%t, want team wildcard", profile.pattern, profile.wildcard)
+	}
+	selected, _, match := selectSigningProfile([]signingProfile{profile}, "com.example.demo")
+	if selected == nil || match != "wildcard" {
+		t.Fatalf("team wildcard did not match: %#v %s", selected, match)
+	}
+}
+
+func TestSelectSigningProfilePrefersNarrowerWildcard(t *testing.T) {
+	later := time.Now().Add(48 * time.Hour)
+	team := signingProfile{name: "Team", uuid: "team", pattern: "*", wildcard: true, expires: later}
+	narrow := signingProfile{name: "Narrow", uuid: "narrow", pattern: "com.example.*", wildcard: true, expires: time.Now().Add(time.Hour)}
+	selected, _, _ := selectSigningProfile([]signingProfile{team, narrow}, "com.example.demo")
+	if selected == nil || selected.name != "Narrow" {
+		t.Fatalf("selected = %#v, want narrower wildcard", selected)
 	}
 }

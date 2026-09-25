@@ -270,6 +270,11 @@ func selectSigningProfile(profiles []signingProfile, bundleID string) (*signingP
 		return nil, nil, ""
 	}
 	sort.SliceStable(chosen, func(left, right int) bool {
+		// A narrower wildcard (com.example.*) is more specific than the team
+		// wildcard (*), so it wins before expiration is considered.
+		if len(chosen[left].pattern) != len(chosen[right].pattern) {
+			return len(chosen[left].pattern) > len(chosen[right].pattern)
+		}
 		if !chosen[left].expires.Equal(chosen[right].expires) {
 			return chosen[left].expires.After(chosen[right].expires)
 		}
@@ -283,6 +288,9 @@ func selectSigningProfile(profiles []signingProfile, bundleID string) (*signingP
 }
 
 func signingWildcardMatch(pattern, bundleID string) bool {
+	if pattern == "*" {
+		return bundleID != ""
+	}
 	prefix := strings.TrimSuffix(pattern, "*")
 	if prefix == pattern || !strings.HasSuffix(prefix, ".") {
 		return false
@@ -518,7 +526,12 @@ func signingProfilePattern(applicationID, prefix string) (string, bool, error) {
 		return "", false, fmt.Errorf("application identifier %q does not use prefix %s", applicationID, prefix)
 	}
 	pattern := strings.TrimPrefix(applicationID, qualified)
-	if pattern == "" || strings.Contains(pattern, "*") && !strings.HasSuffix(pattern, ".*") {
+	if pattern == "*" {
+		// TEAM.* is the team-wide wildcard App ID used by Xcode-managed and
+		// generic development profiles; it matches any bundle identifier.
+		return pattern, true, nil
+	}
+	if pattern == "" || strings.Count(pattern, "*") > 1 || strings.Contains(pattern, "*") && !strings.HasSuffix(pattern, ".*") {
 		return "", false, fmt.Errorf("unsupported application identifier %q", applicationID)
 	}
 	return pattern, strings.HasSuffix(pattern, ".*"), nil
