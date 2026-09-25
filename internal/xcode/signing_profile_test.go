@@ -1,6 +1,7 @@
 package xcode
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -863,5 +864,24 @@ func TestInferSigningPlanMatchesProfilesByTargetPlatform(t *testing.T) {
 	if !signingPlanSettingEquals(plan, "Phone", "Release", "PROVISIONING_PROFILE_SPECIFIER", "iOS Profile") ||
 		!signingPlanSettingEquals(plan, "TV", "Release", "PROVISIONING_PROFILE_SPECIFIER", "tvOS Profile") {
 		t.Fatalf("profiles were not matched by platform: %#v", plan.Inferences)
+	}
+}
+
+func TestParseSigningProfileRejectsTamperedContent(t *testing.T) {
+	root := t.TempDir()
+	path := writeSigningTestProfile(t, filepath.Join(root, "App.mobileprovision"), "App Profile", "bdbdbdbd-bdbd-bdbd-bdbd-bdbdbdbdbdbd", "ABCDE12345.com.example.demo", time.Now().Add(time.Hour))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered := bytes.Replace(data, []byte("com.example.demo"), []byte("com.example.evil"), 1)
+	if bytes.Equal(tampered, data) {
+		t.Fatal("fixture did not contain the application identifier")
+	}
+	if err := os.WriteFile(path, tampered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseSigningProfile(path); err == nil || !strings.Contains(err.Error(), "signature") {
+		t.Fatalf("parseSigningProfile() error = %v, want a signature verification failure", err)
 	}
 }

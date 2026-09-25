@@ -752,6 +752,11 @@ func parseSigningProfile(path string) (signingProfile, error) {
 	if err != nil {
 		return signingProfile{}, fmt.Errorf("parse profile %s: %w", path, err)
 	}
+	// Check the CMS signature over the payload so a modified or corrupted
+	// profile is rejected instead of trusted for inference.
+	if err := signed.Verify(); err != nil {
+		return signingProfile{}, fmt.Errorf("verify profile %s signature: %w", path, err)
+	}
 	var payload struct {
 		UUID                        string         `plist:"UUID"`
 		Name                        string         `plist:"Name"`
