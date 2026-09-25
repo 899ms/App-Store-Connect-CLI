@@ -204,10 +204,18 @@ func ensureBetaAppLocalization(ctx context.Context, client *asc.Client, buildID,
 	// other attribute belongs to the operator's App Store Connect content.
 	attrs := asc.BetaAppLocalizationAttributes{Locale: locale}
 	if _, err := client.CreateBetaAppLocalization(ctx, resolvedAppID, attrs); err != nil {
-		if errors.Is(err, asc.ErrConflict) {
-			return nil
+		createErr := fmt.Errorf("failed to create TestFlight app localization for locale %q: %w", locale, err)
+		if !errors.Is(err, asc.ErrConflict) {
+			return createErr
 		}
-		return fmt.Errorf("failed to create TestFlight app localization for locale %q: %w", locale, err)
+		// App Store Connect answers 409 both for a duplicate locale and for an
+		// invalid one, so only a locale that now exists proves that a
+		// concurrent creator won the race.
+		exists, lookupErr := hasBetaAppLocalization(ctx, client, resolvedAppID, locale)
+		if lookupErr != nil || !exists {
+			return createErr
+		}
+		return nil
 	}
 	if diagnostics != nil {
 		fmt.Fprintf(diagnostics, "Notice: created TestFlight app localization for locale %q on app %q so What to Test notes can be saved.\n", locale, resolvedAppID)

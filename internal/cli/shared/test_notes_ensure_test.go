@@ -262,9 +262,13 @@ func TestUpsertBetaBuildLocalizationTreatsConcurrentCreateConflictAsEnsured(t *t
 	client := newTestNotesServerClient(t, recorder, func(request recordedTestNotesRequest) (int, string) {
 		switch {
 		case request.Method == http.MethodGet && request.Path == "/v1/betaAppLocalizations":
+			// The second lookup sees the localization a concurrent writer created.
+			if recorder.count(http.MethodPost, "/v1/betaAppLocalizations") > 0 {
+				return http.StatusOK, `{"data":[{"type":"betaAppLocalizations","id":"bal-race","attributes":{"locale":"en-US"}}],"links":{}}`
+			}
 			return http.StatusOK, `{"data":[],"links":{}}`
 		case request.Method == http.MethodPost && request.Path == "/v1/betaAppLocalizations":
-			return http.StatusConflict, `{"errors":[{"status":"409","code":"ENTITY_ERROR.RELATIONSHIP.INVALID","title":"Conflict","detail":"The locale already exists."}]}`
+			return http.StatusConflict, `{"errors":[{"status":"409","code":"ENTITY_ERROR.ATTRIBUTE.INVALID","title":"The provided entity includes an attribute with an invalid value","detail":"There is an entity with same 'locale'"}]}`
 		case request.Method == http.MethodGet && request.Path == "/v1/builds/build-1/betaBuildLocalizations":
 			return http.StatusOK, `{"data":[],"links":{}}`
 		case request.Method == http.MethodPost && request.Path == "/v1/betaBuildLocalizations":
@@ -287,6 +291,50 @@ func TestUpsertBetaBuildLocalizationTreatsConcurrentCreateConflictAsEnsured(t *t
 	}
 	if count := recorder.count(http.MethodPost, "/v1/betaBuildLocalizations"); count != 1 {
 		t.Fatalf("expected exactly one What to Test write, got %d", count)
+	}
+	if count := recorder.count(http.MethodGet, "/v1/betaAppLocalizations"); count != 2 {
+		t.Fatalf("expected the conflict to be confirmed with a second lookup, got %d lookups", count)
+	}
+}
+
+func TestUpsertBetaBuildLocalizationFailsOnConflictWhenLocaleStillMissing(t *testing.T) {
+	// App Store Connect also answers 409 for an invalid locale, so a conflict
+	// alone does not prove the localization exists.
+	recorder := &testNotesRecorder{}
+	client := newTestNotesServerClient(t, recorder, func(request recordedTestNotesRequest) (int, string) {
+		switch {
+		case request.Method == http.MethodGet && request.Path == "/v1/betaAppLocalizations":
+			return http.StatusOK, `{"data":[],"links":{}}`
+		case request.Method == http.MethodPost && request.Path == "/v1/betaAppLocalizations":
+			return http.StatusConflict, `{"errors":[{"status":"409","code":"ENTITY_ERROR.ATTRIBUTE.INVALID","title":"The provided entity includes an attribute with an invalid value","detail":"The 'locale' value is invalid."}]}`
+		default:
+			return 0, ""
+		}
+	})
+
+	var diagnostics bytes.Buffer
+	resp, err := UpsertBetaBuildLocalization(
+		context.Background(), client,
+		"build-1", "xx-YY", "Check the new tab",
+		UpsertBetaBuildLocalizationOptions{AppID: "app-9", Diagnostics: &diagnostics},
+	)
+	if err == nil {
+		t.Fatalf("expected a non-duplicate conflict to fail the write, got %#v", resp)
+	}
+	if !errors.Is(err, asc.ErrConflict) {
+		t.Fatalf("expected the original conflict to be preserved, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "The 'locale' value is invalid.") {
+		t.Fatalf("expected Apple's conflict detail in the error, got %v", err)
+	}
+	if count := recorder.count(http.MethodGet, "/v1/betaAppLocalizations"); count != 2 {
+		t.Fatalf("expected the conflict to be checked with a second lookup, got %d lookups", count)
+	}
+	if count := recorder.count(http.MethodPost, "/v1/betaBuildLocalizations"); count != 0 {
+		t.Fatalf("expected no What to Test write after an unconfirmed conflict, got %d", count)
+	}
+	if diagnostics.Len() != 0 {
+		t.Fatalf("expected no creation notice after a failed create, got %q", diagnostics.String())
 	}
 }
 
