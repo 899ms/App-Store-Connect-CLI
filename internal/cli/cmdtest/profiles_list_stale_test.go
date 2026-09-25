@@ -158,3 +158,61 @@ func installStaleProfilesClient(t *testing.T, server *httptest.Server) {
 func staleProfileJSON(id, state, expiration string) string {
 	return fmt.Sprintf(`{"type":"profiles","id":%q,"attributes":{"name":%q,"profileType":"IOS_APP_STORE","profileState":%q,"expirationDate":%q}}`, id, "Profile "+id, state, expiration)
 }
+
+func TestProfilesListStaleFlagsRequireStalenessFields(t *testing.T) {
+	for _, flagName := range []string{"--stale-only", "--include-stale"} {
+		t.Run(flagName, func(t *testing.T) {
+			requests := startProfilesListStaleStub(t)
+			code, stdout, stderr := runProfilesList(t, flagName, "--fields", "name,profileState", "--output", "table")
+			if code != rootcmd.ExitUsage {
+				t.Fatalf("exit code = %d, want %d (stderr %q)", code, rootcmd.ExitUsage, stderr)
+			}
+			if stdout != "" || !strings.Contains(stderr, "require --fields to include profileState and expirationDate") {
+				t.Fatalf("stdout = %q, stderr = %q", stdout, stderr)
+			}
+			if got := requests.Load(); got != 0 {
+				t.Fatalf("requests = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestProfilesListStaleOnlyKeepsOnlyReferencedIncludedResources(t *testing.T) {
+	setupAuth(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		writeSigningFetchOutputJSON(t, w, http.StatusOK, `{"data":[
+			{"type":"profiles","id":"expired-1","attributes":{"name":"Old","profileType":"IOS_APP_STORE","profileState":"ACTIVE","expirationDate":"2000-01-01T00:00:00Z"},
+			 "relationships":{"bundleId":{"data":{"type":"bundleIds","id":"bundle-old"}},"certificates":{"data":[{"type":"certificates","id":"cert-shared"}]}}},
+			{"type":"profiles","id":"fresh-1","attributes":{"name":"New","profileType":"IOS_APP_STORE","profileState":"ACTIVE","expirationDate":"2100-01-01T00:00:00Z"},
+			 "relationships":{"bundleId":{"data":{"type":"bundleIds","id":"bundle-new"}},"certificates":{"data":[{"type":"certificates","id":"cert-shared"},{"type":"certificates","id":"cert-new"}]}}}
+		],"included":[
+			{"type":"bundleIds","id":"bundle-old","attributes":{"identifier":"com.old"}},
+			{"type":"bundleIds","id":"bundle-new","attributes":{"identifier":"com.new"}},
+			{"type":"certificates","id":"cert-shared","attributes":{"name":"Shared"}},
+			{"type":"certificates","id":"cert-new","attributes":{"name":"New"}}
+		],"links":{"self":"https://api.appstoreconnect.apple.com/v1/profiles"}}`)
+	}))
+	t.Cleanup(server.Close)
+	installStaleProfilesClient(t, server)
+
+	code, stdout, stderr := runProfilesList(t, "--stale-only", "--include", "bundleId,certificates", "--output", "json")
+	if code != rootcmd.ExitSuccess {
+		t.Fatalf("exit code = %d (stderr %q)", code, stderr)
+	}
+	var payload struct {
+		Included []struct {
+			Type string `json:"type"`
+			ID   string `json:"id"`
+		} `json:"included"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("decode %q: %v", stdout, err)
+	}
+	ids := make([]string, 0, len(payload.Included))
+	for _, item := range payload.Included {
+		ids = append(ids, item.Type+"/"+item.ID)
+	}
+	if got := strings.Join(ids, ","); got != "bundleIds/bundle-old,certificates/cert-shared" {
+		t.Fatalf("included = %q, want only resources the stale profile references", got)
+	}
+}
