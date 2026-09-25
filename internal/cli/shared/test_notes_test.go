@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/text/unicode/norm"
+
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 )
 
@@ -23,6 +25,9 @@ func TestNormalizeTestNotesComposesNFCAndDropsRejectedRunes(t *testing.T) {
 		t.Fatalf("normalization flags = %#v, want every flag set", normalization)
 	}
 	notice := normalization.Notice()
+	if !strings.Contains(notice, `removed "<" characters and uncomposable combining diacritics, which App Store Connect rejects`) {
+		t.Fatalf("notice = %q, want it to name the removed characters and why", notice)
+	}
 	if !strings.Contains(notice, "normalized") || strings.Count(notice, "\n") != 0 {
 		t.Fatalf("notice = %q, want a single-line normalization notice", notice)
 	}
@@ -209,5 +214,61 @@ func TestNewTestNotesRecoveryErrorRedactsExactEchoesWithoutCorruptingDiagnostics
 				t.Fatalf("normal diagnostic was rewritten: %q", human)
 			}
 		})
+	}
+}
+
+func TestNormalizeTestNotesPreservesScriptMarksAndEmoji(t *testing.T) {
+	// App Store Connect accepts these marks (verified live on a TestFlight
+	// localization text field); removing them corrupts the text.
+	tests := []struct {
+		name  string
+		notes string
+	}{
+		{name: "hindi", notes: "हिंदी में परीक्षण करें"},
+		{name: "thai", notes: "ที่นี่ ทดสอบ"},
+		{name: "hebrew niqqud", notes: "שָׁלוֹם"},
+		{name: "arabic harakat", notes: "مَرْحَبًا"},
+		{name: "cyrillic titlo", notes: "а҃ ok"},
+		{name: "emoji variation selector", notes: "Love ❤️"},
+		{name: "keycap emoji", notes: "Press 1️⃣"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			normalization, err := NormalizeTestNotes(tt.notes)
+			if err != nil {
+				t.Fatalf("NormalizeTestNotes(%q) error = %v", tt.notes, err)
+			}
+			want := norm.NFC.String(tt.notes)
+			if normalization.Notes != want {
+				t.Fatalf("NormalizeTestNotes(%q) = %q, want %q", tt.notes, normalization.Notes, want)
+			}
+			if normalization.RemovedCombiningMarks {
+				t.Fatalf("NormalizeTestNotes(%q) reported removed combining marks", tt.notes)
+			}
+		})
+	}
+}
+
+func TestNormalizeTestNotesDropsGenericCombiningDiacritics(t *testing.T) {
+	// Marks from the generic combining-diacritic blocks that survive NFC are
+	// rejected by App Store Connect ("Text contains invalid characters/formats").
+	tests := []struct {
+		notes string
+		want  string
+	}{
+		{notes: "q́ test", want: "q test"},
+		{notes: "a᪰ b", want: "a b"},
+		{notes: "x⃗ vec", want: "x vec"},
+		{notes: "ok᷀ go", want: "ok go"},
+		{notes: "ok︠ go", want: "ok go"},
+	}
+	for _, tt := range tests {
+		normalization, err := NormalizeTestNotes(tt.notes)
+		if err != nil {
+			t.Fatalf("NormalizeTestNotes(%q) error = %v", tt.notes, err)
+		}
+		if normalization.Notes != tt.want || !normalization.RemovedCombiningMarks {
+			t.Fatalf("NormalizeTestNotes(%q) = %#v, want %q with RemovedCombiningMarks", tt.notes, normalization, tt.want)
+		}
 	}
 }
