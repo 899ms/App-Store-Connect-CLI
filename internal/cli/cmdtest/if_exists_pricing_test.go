@@ -113,11 +113,53 @@ func TestPricingAvailabilityCreateIfExistsUpdateRoutesToTheEditPath(t *testing.T
 			t.Fatalf("unexpected PATCH %+v; both territories already matched", req)
 		}
 	}
-	if !strings.Contains(stderr, "updated it in place") || !strings.Contains(stderr, "--if-exists update") {
-		t.Fatalf("stderr = %q, want the update outcome", stderr)
+	// Nothing changed, so the diagnostic must not claim an in-place update.
+	if strings.Contains(stderr, "updated it in place") {
+		t.Fatalf("stderr = %q, must not claim an update when every territory already matched", stderr)
+	}
+	if !strings.Contains(stderr, "every requested territory already matched; left unchanged (--if-exists update)") {
+		t.Fatalf("stderr = %q, want the no-op update outcome", stderr)
 	}
 	if !strings.Contains(stderr, "Updated 0 territories") {
 		t.Fatalf("stderr = %q, want the edit path's own territory summary", stderr)
+	}
+}
+
+func TestPricingAvailabilityCreateIfExistsUpdatePatchesChangedTerritories(t *testing.T) {
+	// USA is unavailable, so --available true must PATCH it through the edit
+	// path; GBR already matches.
+	territoriesBefore := `{"data":[{"type":"territoryAvailabilities","id":"ta-usa","attributes":{"available":false},"relationships":{"territory":{"data":{"type":"territories","id":"USA"}}}},{"type":"territoryAvailabilities","id":"ta-gbr","attributes":{"available":true},"relationships":{"territory":{"data":{"type":"territories","id":"GBR"}}}}],"links":{}}`
+	patched := false
+	_, stderr, _, runErr := runIfExistsCommand(t, availabilityCreateArgs("--if-exists", "update"),
+		func(req ifExistsRequest) (*http.Response, error) {
+			switch {
+			case req.Method == http.MethodGet && req.Path == "/v1/territories":
+				return jsonResponse(http.StatusOK, territoryCatalog)
+			case req.Method == http.MethodPost && req.Path == "/v2/appAvailabilities":
+				return jsonResponse(http.StatusConflict, availabilityExists409)
+			case req.Method == http.MethodGet && req.Path == "/v1/apps/app-1/appAvailabilityV2":
+				return jsonResponse(http.StatusOK, existingAvailability)
+			case req.Method == http.MethodGet && req.Path == "/v2/appAvailabilities/availability-1/territoryAvailabilities":
+				if patched {
+					return jsonResponse(http.StatusOK, existingTerritoryAvailabilities)
+				}
+				return jsonResponse(http.StatusOK, territoriesBefore)
+			case req.Method == http.MethodPatch && req.Path == "/v1/territoryAvailabilities/ta-usa":
+				patched = true
+				return jsonResponse(http.StatusOK, `{"data":{"type":"territoryAvailabilities","id":"ta-usa","attributes":{"available":true}}}`)
+			default:
+				t.Fatalf("unexpected request %s %s", req.Method, req.Path)
+				return nil, nil
+			}
+		})
+	if runErr != nil {
+		t.Fatalf("run error: %v", runErr)
+	}
+	if !patched {
+		t.Fatal("expected the edit path to PATCH the USA territory availability")
+	}
+	if !strings.Contains(stderr, "updated it in place (--if-exists update)") {
+		t.Fatalf("stderr = %q, want the update outcome", stderr)
 	}
 }
 

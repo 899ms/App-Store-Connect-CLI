@@ -860,7 +860,7 @@ bootstrap, keeps failing.`,
 				resp = existing
 				outcome := "left unchanged"
 				if ifExistsMode == shared.IfExistsUpdate {
-					updated, updateErr := shared.ApplyTerritoryAvailabilityUpdate(requestCtx, client, shared.TerritoryAvailabilityUpdateRequest{
+					updated, changedTerritories, updateErr := shared.ApplyTerritoryAvailabilityUpdate(requestCtx, client, shared.TerritoryAvailabilityUpdateRequest{
 						AppID:                             resolvedAppID,
 						Territories:                       territories,
 						Available:                         availableValue,
@@ -871,7 +871,12 @@ bootstrap, keeps failing.`,
 						return updateErr
 					}
 					resp = updated
-					outcome = "updated it in place"
+					// An update that changed no territory left the record as
+					// it was, so the diagnostic must not claim an update.
+					outcome = "every requested territory already matched; left unchanged"
+					if changedTerritories > 0 {
+						outcome = "updated it in place"
+					}
 				}
 				fmt.Fprintf(os.Stderr, "pricing availability create: app %s already has availability %s; %s (--if-exists %s)\n",
 					resolvedAppID, existing.Data.ID, outcome, ifExistsMode)

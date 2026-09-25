@@ -127,8 +127,10 @@ codes is listed.
    `shared.ApplyTerritoryAvailabilityUpdate`. Apple exposes no update operation
    for `availableInNewTerritories`, so on `update` that flag is only verified
    against the existing policy and a mismatch fails; `--territory` and
-   `--available` are applied. `skip` still pays for the territory-catalog fetch
-   the create performs before the POST.
+   `--available` are applied. When every requested territory already matches,
+   `update` issues no PATCH and its diagnostic says the record was left
+   unchanged. `skip` still pays for the territory-catalog fetch the create
+   performs before the POST.
 4. `if-exists-capabilities`: `bundle-ids capabilities add` and `review items
    add` (`skip` only).
 

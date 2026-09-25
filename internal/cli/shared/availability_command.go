@@ -731,13 +731,15 @@ type TerritoryAvailabilityUpdateRequest struct {
 }
 
 // ApplyTerritoryAvailabilityUpdate applies request to an app's existing
-// availability record and returns Apple's response. It is the same code path
+// availability record and returns Apple's response together with the number of
+// territories whose availability actually changed (0 when every requested
+// territory already matched). It is the same code path
 // "asc pricing availability edit" runs, exported so a create-style command can
 // route --if-exists update to it instead of duplicating the update logic.
-func ApplyTerritoryAvailabilityUpdate(ctx context.Context, client *asc.Client, request TerritoryAvailabilityUpdateRequest) (*asc.AppAvailabilityV2Response, error) {
-	resp, _, err := executeTerritoryAvailabilityUpdate(ctx, client, availabilityUpdateRequest(request))
+func ApplyTerritoryAvailabilityUpdate(ctx context.Context, client *asc.Client, request TerritoryAvailabilityUpdateRequest) (*asc.AppAvailabilityV2Response, int, error) {
+	resp, summary, err := executeTerritoryAvailabilityUpdate(ctx, client, availabilityUpdateRequest(request))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return resp, nil
+	return resp, summary.UpdatedTerritories, nil
 }
