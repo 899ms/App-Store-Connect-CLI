@@ -9,32 +9,77 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 )
 
-// Apple's 409 body when the capability is already enabled on the bundle ID.
+// Synthetic existence 409 for POST /v1/bundleIdCapabilities. It could not be
+// recorded: live against app 6759231657's bundle ID on 2026-09-15 and
+// 2026-09-25, re-adding an enabled API-creatable capability (IN_APP_PURCHASE)
+// returned HTTP 201 with the existing resource instead of a 409. The codes are
+// kept defensively and the read-back stays the decisive check.
 const capabilityExists409 = `{"errors":[{"id":"3c7e1f92-6b4d-4a58-9c2e-8d1f0a3b5c74","status":"409","code":"ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE","title":"The provided entity includes an attribute with a value that has already been used","detail":"The capability is already enabled for this bundle ID.","source":{"pointer":"/data/attributes/capabilityType"}}]}`
 
-// Apple's 409 for a capability type it will not accept. Not an existence
-// conflict, so it must keep failing without a read-back.
-const capabilityTypeRejected409 = `{"errors":[{"status":"409","code":"ENTITY_ERROR.ATTRIBUTE.TYPE","title":"An attribute value has invalid type","detail":"The capability type is not supported for this bundle ID."}]}`
+// Apple's 409 for a capability type the API will not create, recorded live
+// against app 6759231657's bundle ID (the type was already enabled there
+// through the portal). The Expected-one-of list is abbreviated. Not an
+// existence conflict, so it must keep failing without a read-back.
+const capabilityTypeRejected409 = `{"errors":[{"id":"032ccc48-fe85-44e8-bd80-c41f0ec7ec69","status":"409","code":"ENTITY_ERROR.ATTRIBUTE.TYPE","title":"An attribute in the provided entity has the wrong type","detail":"'PRIVATE_CLOUD_COMPUTE' is not a valid value for the attribute 'capabilityType'. Expected one of: 'ICLOUD', 'IN_APP_PURCHASE', 'GAME_CENTER', 'PUSH_NOTIFICATIONS'"}]}`
+
+// Apple's 201 when an enabled API-creatable capability is added again,
+// recorded live against app 6759231657's bundle ID (links trimmed): Apple is
+// already idempotent here and answers with the existing resource.
+const capabilityDuplicateCreated201 = `{"data":{"type":"bundleIdCapabilities","id":"bundle-1_IN_APP_PURCHASE","attributes":{"capabilityType":"IN_APP_PURCHASE"},"relationships":{"bundleId":{"data":{"type":"bundleIds","id":"bundle-1"}}}}}`
 
 const existingCapabilities = `{"data":[{"type":"bundleIdCapabilities","id":"cap-icloud","attributes":{"capabilityType":"ICLOUD","settings":[]}},{"type":"bundleIdCapabilities","id":"cap-push","attributes":{"capabilityType":"PUSH_NOTIFICATIONS"}}],"links":{}}`
 
 const noCapabilities = `{"data":[],"links":{}}`
 
-// Apple's 409 body when the item is already on the review submission.
+// Synthetic existence 409 for POST /v1/reviewSubmissionItems. It could not be
+// recorded: the only review submissions a live run may create cannot be
+// canceled while READY_FOR_REVIEW, and the disposable app has no reviewable
+// item to attach. The codes are kept defensively and the read-back stays the
+// decisive check.
 const reviewItemExists409 = `{"errors":[{"id":"9e4b2a17-3d8c-4f61-a5b0-7c2e1d9f8a43","status":"409","code":"ENTITY_ERROR.RELATIONSHIP.INVALID","title":"The provided entity includes a relationship with an invalid value","detail":"The appStoreVersion is already included in a review submission.","source":{"pointer":"/data/relationships/appStoreVersion"}}]}`
 
-// A 409 that is not an existence conflict and must keep failing.
-const reviewItemState409 = `{"errors":[{"status":"409","code":"STATE_ERROR","title":"The request cannot be fulfilled because of the state of another resource.","detail":"The review submission is no longer editable."}]}`
+// Apple's 409 when the linked version cannot be reviewed, recorded live
+// against app 6759231657 on 2026-09-25 (associated errors omitted). Not an
+// existence conflict, so it must keep failing without a read-back.
+const reviewItemState409 = `{"errors":[{"status":"409","code":"STATE_ERROR.ENTITY_STATE_INVALID","title":"appStoreVersions with id 'version-1' is not in valid state.","detail":"This resource cannot be reviewed, please check associated errors to see why."}]}`
 
 const existingReviewItems = `{"data":[{"type":"reviewSubmissionItems","id":"item-1","attributes":{"state":"READY_FOR_REVIEW"},"relationships":{"appStoreVersion":{"data":{"type":"appStoreVersions","id":"version-1"}}}}],"links":{}}`
 
-// An item list whose appStoreVersion relationship is present but null, the
-// shape Apple uses for a type the item does not carry.
 // The requested version is on the submission, but as a REMOVED (detached)
 // historical item, which is not proof the item is present.
 const reviewItemsRemovedVersion = `{"data":[{"type":"reviewSubmissionItems","id":"item-removed","attributes":{"state":"REMOVED"},"relationships":{"appStoreVersion":{"data":{"type":"appStoreVersions","id":"version-1"}}}}],"links":{}}`
 
+// An item list whose inAppPurchaseVersion relationship is present but null,
+// the shape Apple uses for a type the item does not carry.
 const reviewItemsOtherVersion = `{"data":[{"type":"reviewSubmissionItems","id":"item-9","attributes":{"state":"READY_FOR_REVIEW"},"relationships":{"appStoreVersion":{"data":{"type":"appStoreVersions","id":"version-other"}},"inAppPurchaseVersion":{"data":null}}}],"links":{}}`
+
+// Live, Apple answers a duplicate add of an API-creatable capability with 201,
+// so --if-exists never engages: Apple's envelope is printed as-is, with no
+// read-back and no diagnostic.
+func TestCapabilitiesAddIfExistsSkipPassesThroughAppleIdempotentCreate(t *testing.T) {
+	stdout, stderr, seen, runErr := runIfExistsCommand(t, []string{
+		"bundle-ids", "capabilities", "add", "--bundle", "bundle-1",
+		"--capability", "IN_APP_PURCHASE", "--if-exists", "skip", "--output", "json",
+	}, func(req ifExistsRequest) (*http.Response, error) {
+		if req.Method == http.MethodPost && req.Path == "/v1/bundleIdCapabilities" {
+			return jsonResponse(http.StatusCreated, capabilityDuplicateCreated201)
+		}
+		t.Fatalf("unexpected request %s %s", req.Method, req.Path)
+		return nil, nil
+	})
+	if runErr != nil {
+		t.Fatalf("run error: %v", runErr)
+	}
+	if len(seen) != 1 {
+		t.Fatalf("requests = %+v, want only the POST", seen)
+	}
+	if !strings.Contains(stdout, `"id":"bundle-1_IN_APP_PURCHASE"`) {
+		t.Fatalf("stdout = %q, want Apple's 201 envelope", stdout)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want no --if-exists diagnostic", stderr)
+	}
+}
 
 func TestCapabilitiesAddIfExistsSkipReturnsExistingCapability(t *testing.T) {
 	stdout, stderr, seen, runErr := runIfExistsCommand(t, []string{
