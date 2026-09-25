@@ -1529,3 +1529,34 @@ func TestGenerateManualExportOptionsReportsResolverReasonWhenNoProfileMatches(t 
 		t.Fatalf("error should contain only sanitized resolver warnings and errors: %q", message)
 	}
 }
+
+func TestGenerateManualExportOptionsReleaseTestingDiagnosticOmitsAppClip(t *testing.T) {
+	archivePath := writeExportOptionsTestArchive(t, "TEAM123")
+	originalReader := readArchiveExportInfoFn
+	originalGenerator := generateBitriseApplicationExportOptionsFn
+	readArchiveExportInfoFn = func(string) (exportoptionsgenerator.ArchiveInfo, error) {
+		return exportoptionsgenerator.ArchiveInfo{
+			AppBundleID:     "com.example.demo",
+			AppClipBundleID: "com.example.demo.clip",
+			EntitlementsByBundleID: map[string]plistutil.PlistData{
+				"com.example.demo":      {},
+				"com.example.demo.clip": {},
+			},
+		}, nil
+	}
+	generateBitriseApplicationExportOptionsFn = func(exportoptionsgenerator.ArchiveInfo, legacyexportoptions.Method, exportoptionsgenerator.Opts) (legacyexportoptions.ExportOptions, error) {
+		return legacyexportoptions.NewNonAppStoreOptions(legacyexportoptions.MethodAdHoc), nil
+	}
+	t.Cleanup(func() {
+		readArchiveExportInfoFn = originalReader
+		generateBitriseApplicationExportOptionsFn = originalGenerator
+	})
+
+	_, err := generateManualExportOptions(t.Context(), archivePath, "TEAM123", exportOptionsMethodReleaseTesting)
+	if err == nil {
+		t.Fatal("expected missing profile mapping error")
+	}
+	if !strings.Contains(err.Error(), "bundle IDs com.example.demo for method") || strings.Contains(err.Error(), "com.example.demo.clip") {
+		t.Fatalf("release-testing diagnostic must list only exported targets, got %q", err.Error())
+	}
+}

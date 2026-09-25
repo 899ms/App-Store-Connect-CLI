@@ -89,6 +89,11 @@ func generateManualExportOptions(ctx context.Context, archivePath, teamID, metho
 			return err
 		}
 		for bundleID := range archiveInfo.EntitlementsByBundleID {
+			// Bitrise drops the App Clip target from non-App-Store exports,
+			// so it never needs a matching profile for release-testing.
+			if method == exportOptionsMethodReleaseTesting && bundleID == archiveInfo.AppClipBundleID {
+				continue
+			}
 			bundleIDs = append(bundleIDs, bundleID)
 		}
 		var generateErr error
