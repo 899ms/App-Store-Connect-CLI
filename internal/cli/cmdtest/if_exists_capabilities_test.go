@@ -43,15 +43,15 @@ const reviewItemExists409 = `{"errors":[{"id":"9e4b2a17-3d8c-4f61-a5b0-7c2e1d9f8
 // existence conflict, so it must keep failing without a read-back.
 const reviewItemState409 = `{"errors":[{"status":"409","code":"STATE_ERROR.ENTITY_STATE_INVALID","title":"appStoreVersions with id 'version-1' is not in valid state.","detail":"This resource cannot be reviewed, please check associated errors to see why."}]}`
 
-const existingReviewItems = `{"data":[{"type":"reviewSubmissionItems","id":"item-1","attributes":{"state":"READY_FOR_REVIEW"},"relationships":{"appStoreVersion":{"data":{"type":"appStoreVersions","id":"version-1"}}}}],"links":{}}`
+const existingReviewItems = `{"data":[{"type":"reviewSubmissionItems","id":"item-1","attributes":{"state":"READY_FOR_REVIEW"},"relationships":{"appStoreVersion":{"data":{"type":"appStoreVersions","id":"version-1"}}}}],"links":{"self":"https://api.appstoreconnect.apple.com/v1/reviewSubmissions/submission-1/items"}}`
 
 // The requested version is on the submission, but as a REMOVED (detached)
 // historical item, which is not proof the item is present.
-const reviewItemsRemovedVersion = `{"data":[{"type":"reviewSubmissionItems","id":"item-removed","attributes":{"state":"REMOVED"},"relationships":{"appStoreVersion":{"data":{"type":"appStoreVersions","id":"version-1"}}}}],"links":{}}`
+const reviewItemsRemovedVersion = `{"data":[{"type":"reviewSubmissionItems","id":"item-removed","attributes":{"state":"REMOVED"},"relationships":{"appStoreVersion":{"data":{"type":"appStoreVersions","id":"version-1"}}}}],"links":{"self":"https://api.appstoreconnect.apple.com/v1/reviewSubmissions/submission-1/items"}}`
 
 // An item list whose inAppPurchaseVersion relationship is present but null,
 // the shape Apple uses for a type the item does not carry.
-const reviewItemsOtherVersion = `{"data":[{"type":"reviewSubmissionItems","id":"item-9","attributes":{"state":"READY_FOR_REVIEW"},"relationships":{"appStoreVersion":{"data":{"type":"appStoreVersions","id":"version-other"}},"inAppPurchaseVersion":{"data":null}}}],"links":{}}`
+const reviewItemsOtherVersion = `{"data":[{"type":"reviewSubmissionItems","id":"item-9","attributes":{"state":"READY_FOR_REVIEW"},"relationships":{"appStoreVersion":{"data":{"type":"appStoreVersions","id":"version-other"}},"inAppPurchaseVersion":{"data":null}}}],"links":{"self":"https://api.appstoreconnect.apple.com/v1/reviewSubmissions/submission-1/items"}}`
 
 // Live, Apple answers a duplicate add of an API-creatable capability with 201,
 // so --if-exists never engages: Apple's envelope is printed as-is, with no
@@ -396,5 +396,33 @@ func TestReviewItemsAddIfExistsSkipStillFailsWhenReadBackFindsAnotherItem(t *tes
 	}
 	if len(seen) != 2 {
 		t.Fatalf("requests = %+v, want POST then the read-back GET", seen)
+	}
+}
+
+// The read-back is mutation evidence: a malformed document that still carries
+// a matching item (here an errors member next to data) must not turn the
+// original 409 into success.
+func TestReviewItemsAddIfExistsSkipRejectsMalformedReadBack(t *testing.T) {
+	malformed := `{"errors":[],"data":[{"type":"reviewSubmissionItems","id":"item-1","attributes":{"state":"READY_FOR_REVIEW"},"relationships":{"appStoreVersion":{"data":{"type":"appStoreVersions","id":"version-1"}}}}],"links":{"self":"https://api.appstoreconnect.apple.com/v1/reviewSubmissions/submission-1/items"}}`
+	stdout, _, _, runErr := runIfExistsCommand(t, []string{
+		"review", "items-add", "--submission", "submission-1",
+		"--item-type", "appStoreVersions", "--item-id", "version-1",
+		"--if-exists", "skip", "--output", "json",
+	}, func(req ifExistsRequest) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodPost && req.Path == "/v1/reviewSubmissionItems":
+			return jsonResponse(http.StatusConflict, reviewItemExists409)
+		case req.Method == http.MethodGet && req.Path == "/v1/reviewSubmissions/submission-1/items":
+			return jsonResponse(http.StatusOK, malformed)
+		default:
+			t.Fatalf("unexpected request %s %s", req.Method, req.Path)
+			return nil, nil
+		}
+	})
+	if runErr == nil || !errors.Is(runErr, asc.ErrConflict) {
+		t.Fatalf("run error = %v, want the original conflict when the read-back is malformed", runErr)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want empty", stdout)
 	}
 }

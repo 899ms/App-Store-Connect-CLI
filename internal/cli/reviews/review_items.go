@@ -678,12 +678,15 @@ func findExistingReviewSubmissionItem(
 		asc.WithReviewSubmissionItemsInclude([]string{relationshipName}),
 		asc.WithReviewSubmissionItemsLimit(200),
 	}
-	firstPage, err := client.GetReviewSubmissionItems(ctx, submissionID, opts...)
+	// The read-back is mutation evidence (a match turns the 409 into success),
+	// so every page goes through the strict JSON:API envelope validation the
+	// submit and background-asset preflights use.
+	firstPage, err := client.GetReviewSubmissionItemsStrict(ctx, submissionID, opts...)
 	if err != nil {
 		return nil, false, err
 	}
 	allPages, err := asc.PaginateAll(ctx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-		return client.GetReviewSubmissionItems(ctx, submissionID, asc.WithReviewSubmissionItemsNextURL(nextURL))
+		return client.GetReviewSubmissionItemsStrict(ctx, submissionID, asc.WithReviewSubmissionItemsNextURL(nextURL))
 	})
 	if err != nil {
 		return nil, false, err
