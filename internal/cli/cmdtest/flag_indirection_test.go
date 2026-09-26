@@ -1,6 +1,7 @@
 package cmdtest
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,33 @@ import (
 
 	cmd "github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
 )
+
+func TestFlagIndirectionPreservesRootFlagsAndSearchTerminator(t *testing.T) {
+	resetCmdtestState()
+	setCmdtestHome(t)
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+	t.Setenv("ASC_TEST_LIMIT", "1")
+	t.Setenv("ASC_TEST_MISSING_PROFILE", "")
+	t.Setenv("ASC_TEST_MISSING_QUERY", "")
+	var code int
+	stdout, stderr := captureOutput(t, func() {
+		code = cmd.Run([]string{
+			"--read-only", "search", "--profile", "@env:ASC_TEST_MISSING_PROFILE",
+			"--limit", "@env:ASC_TEST_LIMIT", "--output", "json",
+			"--", "--limit", "@env:ASC_TEST_MISSING_QUERY",
+		}, "1.2.3")
+	})
+	if code != cmd.ExitSuccess || stderr != "" {
+		t.Fatalf("code=%d stderr=%q stdout=%q", code, stderr, stdout)
+	}
+	var response searchResponse
+	if err := json.Unmarshal([]byte(stdout), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Query != "--limit @env:ASC_TEST_MISSING_QUERY" {
+		t.Fatalf("search query = %q, want literal tokens after --", response.Query)
+	}
+}
 
 func installIndirectionTransport(t *testing.T, method, path, response string) *[]string {
 	t.Helper()

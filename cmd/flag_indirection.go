@@ -54,7 +54,7 @@ func isIndirectionExcluded(name string, isRootFlag bool) bool {
 // the resolved command chain receives its @env:NAME or @file:PATH value before
 // flag parsing. The result has the same token count and structure as args:
 // only value tokens change, so structural analyses of the original args stay
-// valid and resolved values never flow into diagnostics.
+// valid. Typed flag validation may quote an invalid resolved value.
 //
 // Boolean flags, excluded flags, positional arguments, and everything after
 // `--` are untouched. Rewriting stops at the first unknown flag so the
