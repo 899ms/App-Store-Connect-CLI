@@ -237,6 +237,21 @@ asc screenshots sizes --display-type "APP_IPHONE_65"
 Upload screenshots to App Store Connect:
 
 ```bash  theme={null}
+# Upload one locale without looking up a localization ID
+asc screenshots upload --app "123456789" \
+  --version "1.2.3" \
+  --locale "en-US" \
+  --path "./screenshots/en-US" \
+  --device-type "IPHONE_65"
+
+# Replace only en-US's iPhone 6.5" set (other locales are untouched)
+asc screenshots upload --app "123456789" \
+  --version "1.2.3" \
+  --locale "en-US" \
+  --path "./screenshots/en-US" \
+  --device-type "IPHONE_65" \
+  --replace --confirm
+
 # Upload single file
 asc screenshots upload --version-localization "LOC_ID" \
   --path "./screenshot.png" \
@@ -266,7 +281,19 @@ asc screenshots upload --app "123456789" \
   --device-type "IPHONE_65"
 ```
 
-For app/version fan-out uploads, structure `--path` with locale directories such as
+With `--locale`, `--path` points directly at that locale's screenshot file or
+directory, the same way `--version-localization` uploads read it. `--locale`
+takes exactly one locale, and `--version-id` works in place of `--version`.
+The version must already have a localization for that locale; otherwise the
+command fails and lists the version's locales. `--locale` cannot be combined
+with `--version-localization` or `--resume`.
+
+App-scoped uploads (`--app` with `--version` or `--version-id`) print the
+fan-out JSON result: `appId`, `version`, `versionId`, `platform`,
+`displayType`, and a `localizations` array. With `--locale` that array has one
+entry. `--version-localization` uploads print the single-localization result.
+
+Without `--locale`, for app/version fan-out uploads, structure `--path` with locale directories such as
 `./screenshots/en-US/iphone/*.png` and `./screenshots/fr-FR/iphone/*.png`.
 Each locale directory is matched against the remote App Store version
 localizations, and only files matching the selected `--device-type` are
@@ -302,12 +329,12 @@ as cleaned up, so retrying the same artifact is safe.
 
 ```bash  theme={null}
 # iPhone set (required)
-asc screenshots upload --version-localization "LOC_ID" \
+asc screenshots upload --app "123456789" --version "1.2.3" --locale "en-US" \
   --path "./screenshots/iphone" \
   --device-type "IPHONE_65"
 
 # iPad set (for iPad apps)
-asc screenshots upload --version-localization "LOC_ID" \
+asc screenshots upload --app "123456789" --version "1.2.3" --locale "en-US" \
   --path "./screenshots/ipad" \
   --device-type "IPAD_PRO_3GEN_129"
 
