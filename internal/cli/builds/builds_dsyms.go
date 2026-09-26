@@ -2,6 +2,8 @@ package builds
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -70,9 +72,10 @@ Build selection (one of):
 --version latest is the same selector as --latest. --version live uses the
 newest READY_FOR_SALE or PREORDER_READY_FOR_SALE App Store version. Pass
 --platform when more than one platform is live. --min-version and
---after-uploaded-date select every matching build. File names stay
-bundleId-version-buildNumber.dSYM.zip. An existing file of the same size is
-skipped. --wait polls build bundles until a dSYM URL appears; a timeout exits
+--after-uploaded-date select every matching build. Single-build file names stay
+bundleId-version-buildNumber.dSYM.zip. Bulk selectors append the build ID
+to prevent collisions across platforms. An existing file is skipped only when
+its size and SHA-256 match the remote artifact. --wait polls build bundles until a dSYM URL appears; a timeout exits
 1 with diagnostic dsym_not_ready and a partial receipt.
 
 Examples:
@@ -189,7 +192,7 @@ func downloadDSYMSelection(ctx context.Context, client *asc.Client, selection ds
 		if err := os.MkdirAll(dirValue, 0o755); err != nil {
 			return fmt.Errorf("builds dsyms: failed to create output directory: %w", err)
 		}
-		saved, err := saveDSYMBundles(ctx, downloadable, target, dirValue, selection.Wait || selection.Multi)
+		saved, err := saveDSYMBundles(ctx, downloadable, target, dirValue, selection.Wait || selection.Multi, selection.Multi)
 		files = append(files, saved...)
 		if err != nil {
 			downloadErr = err
@@ -278,12 +281,19 @@ func loadDSYMBundles(ctx context.Context, client *asc.Client, buildID string) ([
 	return bundles, nil
 }
 
-func saveDSYMBundles(ctx context.Context, bundles []dsymBundleInfo, target dsymTarget, dirValue string, useUploadTimeout bool) ([]asc.DSYMDownloadFile, error) {
+func saveDSYMBundles(ctx context.Context, bundles []dsymBundleInfo, target dsymTarget, dirValue string, useUploadTimeout, multi bool) ([]asc.DSYMDownloadFile, error) {
 	downloadable := filterBundlesWithDSYM(bundles)
 	files := make([]asc.DSYMDownloadFile, 0, len(downloadable))
 	used := map[string]struct{}{}
 	for i, bundle := range downloadable {
-		fileName := uniqueDSYMFileName(dsymFileName(bundle.BundleID, target.AppVersion, target.BuildNumber, target.ID, i), target.ID, used)
+		fileName := dsymFileName(bundle.BundleID, target.AppVersion, target.BuildNumber, target.ID, i)
+		// Bulk selectors can span platforms that reuse bundle IDs and build
+		// numbers. Include the immutable build ID so files remain distinct
+		// even when a later invocation selects a different set of builds.
+		if multi {
+			fileName = strings.TrimSuffix(fileName, ".dSYM.zip") + "-" + target.ID + ".dSYM.zip"
+		}
+		fileName = uniqueDSYMFileName(fileName, target.ID, used)
 		filePath := filepath.Join(dirValue, fileName)
 		size, sum, skipped, err := saveOneDSYM(ctx, *bundle.DSYMURL, filePath, useUploadTimeout)
 		if err != nil {
@@ -344,14 +354,14 @@ func saveOneDSYM(ctx context.Context, rawURL, destPath string, useUploadTimeout 
 	}
 	defer cancel()
 	if exists {
-		length, known, err := dsymContentLength(downloadCtx, rawURL)
+		length, remoteSum, err := hashRemoteDSYM(downloadCtx, rawURL)
 		if err != nil {
 			return 0, "", false, err
 		}
-		if known && length == size {
+		if length == size && remoteSum == sum {
 			return size, sum, true, nil
 		}
-		return 0, "", false, fmt.Errorf("output file already exists with a different size")
+		return 0, "", false, fmt.Errorf("output file already exists with different content")
 	}
 	written, err := downloadDSYM(downloadCtx, rawURL, destPath)
 	if err != nil {
@@ -364,32 +374,34 @@ func saveOneDSYM(ctx context.Context, rawURL, destPath string, useUploadTimeout 
 	return written, sum, false, nil
 }
 
-func dsymContentLength(ctx context.Context, rawURL string) (int64, bool, error) {
+func hashRemoteDSYM(ctx context.Context, rawURL string) (int64, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return 0, false, err
+		return 0, "", urlsanitize.NewTransportError("create dSYM content request", urlsanitize.RedactURLHostForError(rawURL), err)
 	}
 	client := dsymHTTPClient
 	if client == nil {
 		client = &http.Client{}
 	}
 	safeClient := *client
-	safeClient.CheckRedirect = func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
+	safeClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := safeClient.Do(req)
 	if err != nil {
-		return 0, false, urlsanitize.NewTransportError("dSYM size request", urlsanitize.RedactURLHostForError(rawURL), err)
+		return 0, "", urlsanitize.NewTransportError("dSYM content request", urlsanitize.RedactURLHostForError(rawURL), err)
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return 0, false, fmt.Errorf("download returned HTTP %d", resp.StatusCode)
+		return 0, "", fmt.Errorf("download returned HTTP %d", resp.StatusCode)
 	}
-	if resp.ContentLength < 0 {
-		return 0, false, nil
+	digest := sha256.New()
+	size, err := io.Copy(digest, resp.Body)
+	if err != nil {
+		return 0, "", urlsanitize.NewTransportError("read dSYM content", urlsanitize.RedactURLHostForError(rawURL), err)
 	}
-	return resp.ContentLength, true, nil
+	if resp.ContentLength >= 0 && size != resp.ContentLength {
+		return 0, "", fmt.Errorf("downloaded size does not match Content-Length")
+	}
+	return size, hex.EncodeToString(digest.Sum(nil)), nil
 }
 
 func filterBundlesWithDSYM(bundles []dsymBundleInfo) []dsymBundleInfo {

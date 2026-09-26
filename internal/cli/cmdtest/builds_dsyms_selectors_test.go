@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -11,8 +12,34 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
+
+func TestBuildsDSYMExistingFileMalformedSignedURLIsRedacted(t *testing.T) {
+	setupAuth(t)
+	outputDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outputDir, "com.example.app-42.dSYM.zip"), []byte("existing"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restoreTransport(t)
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path == "/v1/builds/build-1" && req.URL.RawQuery == "" {
+			return dsymJSON(`{"data":{"type":"builds","id":"build-1","attributes":{"version":"42","processingState":"VALID"}}}`), nil
+		}
+		if req.URL.Path != "/v1/builds/build-1" || req.URL.Query().Get("include") != "buildBundles" {
+			t.Fatalf("unexpected request: %s", req.URL.Path)
+		}
+		return dsymJSON(`{"data":{"type":"builds","id":"build-1","attributes":{"version":"42"}},"included":[{"type":"buildBundles","id":"bundle","attributes":{"bundleId":"com.example.app","dSYMUrl":"https://downloads.example.com/bad\u007f.zip?X-Amz-Signature=secret-sentinel"}}]}`), nil
+	})
+	stdout, stderr, err := runDSYMErr(t, "builds", "dsyms", "--build-id", "build-1", "--output-dir", outputDir)
+	if err == nil {
+		t.Fatal("expected malformed URL error")
+	}
+	if strings.Contains(err.Error()+stderr+stdout, "secret-sentinel") {
+		t.Fatalf("signed URL leaked: err=%v stderr=%q stdout=%q", err, stderr, stdout)
+	}
+}
 
 func TestBuildsDSYMExactVersionDownloadsNewestMatchingBuild(t *testing.T) {
 	setupAuth(t)
@@ -266,5 +293,71 @@ func dsymJSON(body string) *http.Response {
 		StatusCode: http.StatusOK,
 		Body:       io.NopCloser(strings.NewReader(body)),
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
+	}
+}
+
+func TestBuildsDSYMAllKeepsSameNamedPlatformArtifactsSeparate(t *testing.T) {
+	setupAuth(t)
+	outputDir := filepath.Join(t.TempDir(), "dsyms")
+	restoreTransport(t)
+	onlyMac := false
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.URL.Path == "/v1/builds":
+			if onlyMac {
+				return dsymJSON(`{"data":[{"type":"builds","id":"mac","attributes":{"version":"42","uploadedDate":"2026-03-01T00:00:00Z"},"relationships":{"preReleaseVersion":{"data":{"id":"prv-mac"}}}}],"included":[{"type":"preReleaseVersions","id":"prv-mac","attributes":{"version":"1.0","platform":"MAC_OS"}}],"links":{}}`), nil
+			}
+			return dsymJSON(`{"data":[
+    {"type":"builds","id":"ios","attributes":{"version":"42","uploadedDate":"2026-03-02T00:00:00Z"},"relationships":{"preReleaseVersion":{"data":{"id":"prv-ios"}}}},
+    {"type":"builds","id":"mac","attributes":{"version":"42","uploadedDate":"2026-03-01T00:00:00Z"},"relationships":{"preReleaseVersion":{"data":{"id":"prv-mac"}}}}
+   ],"included":[
+    {"type":"preReleaseVersions","id":"prv-ios","attributes":{"version":"1.0","platform":"IOS"}},
+    {"type":"preReleaseVersions","id":"prv-mac","attributes":{"version":"1.0","platform":"MAC_OS"}}
+   ],"links":{}}`), nil
+		case strings.HasPrefix(req.URL.Path, "/v1/builds/"):
+			id := strings.TrimPrefix(req.URL.Path, "/v1/builds/")
+			return dsymJSON(`{"data":{"type":"builds","id":"` + id + `"},"included":[{"type":"buildBundles","id":"bundle-` + id + `","attributes":{"bundleId":"com.example.app","dSYMUrl":"https://downloads.example.com/` + id + `"}}]}`), nil
+		case req.URL.Host == "downloads.example.com":
+			data := strings.TrimPrefix(req.URL.Path, "/")
+			return &http.Response{StatusCode: http.StatusOK, ContentLength: int64(len(data)), Header: http.Header{"Content-Length": {"3"}}, Body: io.NopCloser(strings.NewReader(data))}, nil
+		default:
+			t.Fatalf("unexpected request: %s", req.URL.String())
+			return nil, nil
+		}
+	})
+	stdout, _ := runDSYM(t, outputDir, "builds", "dsyms", "--app", "123456789", "--all", "--output", "json")
+	var result asc.DSYMDownloadResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Files) != 2 {
+		t.Fatalf("files = %#v", result.Files)
+	}
+	paths := map[string]bool{}
+	var macPath string
+	for _, file := range result.Files {
+		if paths[file.FilePath] {
+			t.Fatalf("different builds share output file %s", file.FilePath)
+		}
+		paths[file.FilePath] = true
+		if file.BuildID == "mac" {
+			macPath = file.FilePath
+		}
+		data, err := os.ReadFile(file.FilePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(data) != file.BuildID || file.SHA256 != sha256Hex(file.BuildID) || file.Skipped {
+			t.Fatalf("build %s received data %q, receipt %#v", file.BuildID, data, file)
+		}
+	}
+	// Selecting only one platform later must keep the same build-specific path.
+	onlyMac = true
+	stdout, _ = runDSYM(t, outputDir, "builds", "dsyms", "--app", "123456789", "--all", "--platform", "MAC_OS", "--output", "json")
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Files) != 1 || result.Files[0].FilePath != macPath || !result.Files[0].Skipped || result.Files[0].SHA256 != sha256Hex("mac") {
+		t.Fatalf("repeat download reused the wrong artifact: %#v", result.Files)
 	}
 }

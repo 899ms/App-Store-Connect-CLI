@@ -1,6 +1,11 @@
 package builds
 
 import (
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -65,5 +70,42 @@ func TestCompareMarketingVersions(t *testing.T) {
 	got, err = compareMarketingVersions("1.1.9", "1.2.0")
 	if err != nil || got >= 0 {
 		t.Fatalf("1.1.9 vs 1.2.0 = %d, %v", got, err)
+	}
+}
+
+func TestSaveSingleDSYMVerifiesExistingFileContent(t *testing.T) {
+	for _, remote := range []string{"mac", "ios"} {
+		t.Run(remote, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "com.example.app-1.0-42.dSYM.zip")
+			if err := os.WriteFile(path, []byte("ios"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Length", "3")
+				_, _ = io.WriteString(w, remote)
+			}))
+			defer server.Close()
+			target := dsymTarget{ID: "build", AppVersion: "1.0", BuildNumber: "42"}
+			bundles := []dsymBundleInfo{{BundleID: "com.example.app", DSYMURL: &server.URL}}
+			files, err := saveDSYMBundles(t.Context(), bundles, target, dir, false, false)
+			if remote != "ios" {
+				if err == nil || !strings.Contains(err.Error(), "already exists") {
+					t.Fatalf("different single-build artifact was trusted: files=%#v err=%v", files, err)
+				}
+				if len(files) != 0 {
+					t.Fatalf("unexpected download receipt: %#v", files)
+				}
+			} else if err != nil || len(files) != 1 || !files[0].Skipped {
+				t.Fatalf("identical existing artifact was not reused: files=%#v err=%v", files, err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != "ios" {
+				t.Fatalf("existing file changed to %q", data)
+			}
+		})
 	}
 }

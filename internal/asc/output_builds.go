@@ -16,6 +16,9 @@ type BuildUploadResult struct {
 	Uploaded            *bool             `json:"uploaded,omitempty"`
 	ChecksumVerified    *bool             `json:"checksumVerified,omitempty"`
 	SourceFileChecksums *Checksums        `json:"sourceFileChecksums,omitempty"`
+	// BuildID is the build resource created from this upload, set once the
+	// command resolves it (--wait, --test-notes, or --verify-timeout).
+	BuildID string `json:"buildId,omitempty"`
 }
 
 // BuildBetaGroupsUpdateResult represents CLI output for build beta group updates.
@@ -79,6 +82,7 @@ type BuildExpireAllFailure struct {
 type BuildExpireAllResult struct {
 	DryRun              bool                    `json:"dryRun"`
 	AppID               string                  `json:"appId"`
+	Version             *string                 `json:"version,omitempty"`
 	OlderThan           *string                 `json:"olderThan,omitempty"`
 	KeepLatest          *int                    `json:"keepLatest,omitempty"`
 	SelectedCount       int                     `json:"selectedCount"`
@@ -336,6 +340,10 @@ func buildUploadResultRows(result *BuildUploadResult) ([]string, [][]string) {
 	if result.ChecksumVerified != nil {
 		headers = append(headers, "Checksum Verified")
 		values = append(values, fmt.Sprintf("%t", *result.ChecksumVerified))
+	}
+	if result.BuildID != "" {
+		headers = append(headers, "Build ID")
+		values = append(values, result.BuildID)
 	}
 	return headers, [][]string{values}
 }
