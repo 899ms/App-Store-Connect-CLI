@@ -214,3 +214,57 @@ func TestReadOnlyRefusesConfirmedDeleteBeforeAnyRequest(t *testing.T) {
 		t.Fatalf("stderr = %q, want %q", stderr, want)
 	}
 }
+
+func TestReadOnlyRawAPITransport(t *testing.T) {
+	for _, source := range []string{"environment", "flag"} {
+		for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPatch, http.MethodDelete} {
+			t.Run(source+"/"+method, func(t *testing.T) {
+				setupAuth(t)
+				t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+				t.Setenv(readonly.EnvVar, "")
+				var args []string
+				refusalSource := "--read-only"
+				if source == "environment" {
+					t.Setenv(readonly.EnvVar, "1")
+					refusalSource = readonly.EnvVar
+				} else {
+					args = append(args, "--read-only")
+				}
+				path := "/v1/betaGroups/group-1"
+				if method == http.MethodGet {
+					path = "/v1/apps"
+				}
+				if method == http.MethodPost {
+					path = "/v1/betaGroups"
+				}
+				args = append(args, "api", method, path)
+				if method != http.MethodGet {
+					args = append(args, "--confirm")
+				}
+				if method == http.MethodPost || method == http.MethodPatch {
+					args = append(args, "--body", `{"data":{}}`)
+				}
+				requests := 0
+				installDefaultTransport(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					requests++
+					if req.Method != http.MethodGet {
+						t.Errorf("mutation reached transport: %s %s", req.Method, req.URL.Path)
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"data":[]}`))}, nil
+				}))
+				var code int
+				stdout, stderr := captureOutput(t, func() { code = cmd.Run(args, "1.0.0") })
+				if method == http.MethodGet {
+					if code != cmd.ExitSuccess || requests != 1 || strings.TrimSpace(stdout) != `{"data":[]}` {
+						t.Fatalf("read result: code=%d requests=%d stdout=%q stderr=%q", code, requests, stdout, stderr)
+					}
+					return
+				}
+				want := "Error: " + refusalSource + " is set; refusing " + method + " " + path + "\n"
+				if code != cmd.ExitReadOnly || requests != 0 || stdout != "" || stderr != want {
+					t.Fatalf("mutation result: code=%d requests=%d stdout=%q stderr=%q, want %q", code, requests, stdout, stderr, want)
+				}
+			})
+		}
+	}
+}

@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 	webcore "github.com/rudrankriyam/App-Store-Connect-CLI/internal/web"
 )
 
@@ -700,6 +702,160 @@ func TestWebReviewIAPsAttachRefusesIAPOutsideApp(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), `in-app purchase "9000000001" was not found under app "123456789"`) {
 		t.Fatalf("expected app-scoping error, got %v", err)
+	}
+}
+
+func TestWebReviewIAPsAttachRejectsAmbiguousSelectorBeforeMutation(t *testing.T) {
+	_ = stubWebProgressLabels(t)
+
+	origResolveSession := resolveSessionFn
+	t.Cleanup(func() { resolveSessionFn = origResolveSession })
+
+	postCalls := 0
+	resolveSessionFn = func(ctx context.Context, appleID, password, twoFactorCode string) (*webcore.AuthSession, string, error) {
+		return &webcore.AuthSession{
+			Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				switch {
+				case req.Method == http.MethodGet && req.URL.Path == "/iris/v1/apps/123456789/inAppPurchases":
+					body := `{"data":[{"id":"iap-1","type":"inAppPurchases","attributes":{"productId":"com.example.duplicate","referenceName":"First"}},{"id":"iap-2","type":"inAppPurchases","attributes":{"productId":"com.example.duplicate","referenceName":"Second"}}],"links":{"next":""}}`
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+				case req.Method == http.MethodPost:
+					postCalls++
+					t.Fatalf("ambiguous selector must not attach: %s", req.URL.Path)
+					return nil, nil
+				default:
+					t.Fatalf("unexpected request: %s %s", req.Method, req.URL.Path)
+					return nil, nil
+				}
+			})},
+		}, "cache", nil
+	}
+
+	cmd := WebReviewIAPsAttachCommand()
+	if err := cmd.FlagSet.Parse([]string{"--app", "123456789", "--iap-id", "com.example.duplicate", "--confirm"}); err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	err := cmd.Exec(context.Background(), nil)
+	if err == nil {
+		t.Fatal("expected ambiguous selector error")
+	}
+	if !strings.Contains(err.Error(), `2 in-app purchases match "com.example.duplicate" by product ID; pass --iap-id with one of:`) {
+		t.Fatalf("expected ambiguity diagnostic, got %v", err)
+	}
+	for _, want := range []string{"iap-1", "com.example.duplicate", "First", "iap-2", "Second", "Use the Iris resource ID to disambiguate"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("expected %q in bounded ambiguity diagnostic, got %v", want, err)
+		}
+	}
+	diagnostic, ok := shared.DiagnosticFromError(err)
+	if !ok || diagnostic.Code != shared.DiagnosticInvalidInput || diagnostic.Parameter != "--iap-id" {
+		t.Fatalf("diagnostic = %+v, found=%t, want invalid_input for --iap-id", diagnostic, ok)
+	}
+	if postCalls != 0 {
+		t.Fatalf("expected no attach request, got %d", postCalls)
+	}
+}
+
+func TestReviewIAPAmbiguousSelectionBoundsProviderText(t *testing.T) {
+	recoveryID := "iap-recovery-id-" + strings.Repeat("9", shared.AmbiguousDiagnosticTextLimit+32)
+	providerText := strings.Repeat("界", shared.AmbiguousDiagnosticTextLimit)
+	providerInvalidUTF8 := string([]byte{'r', 'e', 'f', 0xff, 'e', 'r', 'e', 'n', 'c', 'e'})
+	err := reviewIAPAmbiguousSelectionError(&webcore.ReviewIAPAmbiguousError{
+		Selector: "com.example.duplicate",
+		Field:    "product ID",
+		Matches: []webcore.ReviewIAP{
+			{ID: recoveryID, ProductID: providerText + "\nproduct-tail", ReferenceName: providerInvalidUTF8},
+			{ID: "iap-2", ProductID: "com.example.duplicate", ReferenceName: "Second"},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected an ambiguity error")
+	}
+	message := err.Error()
+	if !utf8.ValidString(message) {
+		t.Fatalf("ambiguity diagnostic must remain valid UTF-8: %q", message)
+	}
+	if strings.Contains(message, recoveryID) {
+		t.Fatalf("displayed recovery ID should be bounded: %q", message)
+	}
+	if !strings.Contains(message, recoveryID[:len("iap-recovery-id-")]) {
+		t.Fatalf("bounded recovery ID should retain useful context: %q", message)
+	}
+	if strings.Contains(message, "product-tail") || strings.Contains(message, "\x1b") || strings.Contains(message, "\nref") {
+		t.Fatalf("provider text must be bounded and terminal-safe: %q", message)
+	}
+	if !strings.Contains(message, "ref�erence") {
+		t.Fatalf("invalid provider UTF-8 should be replaced while retaining context: %q", message)
+	}
+	var structured *shared.AmbiguousSelectionError
+	if !errors.As(err, &structured) || len(structured.Candidates) != 2 || structured.Candidates[0].ID != recoveryID {
+		t.Fatalf("structured ambiguity must retain exact recovery candidates: %#v", structured)
+	}
+	if structured.Candidates[0].Label != providerText+"\nproduct-tail" || structured.Candidates[0].Extra != providerInvalidUTF8 {
+		t.Fatalf("structured ambiguity must retain provider fields for machine consumers: %#v", structured.Candidates[0])
+	}
+	if structured.Description != `"com.example.duplicate" by product ID` || structured.Flag != "--iap-id" {
+		t.Fatalf("structured ambiguity lost selector semantics: %#v", structured)
+	}
+}
+
+func TestWebReviewIAPsAttachRejectsMissingOrWrongTypeBeforeMutation(t *testing.T) {
+	_ = stubWebProgressLabels(t)
+
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "missing",
+			body: `{"data":[],"links":{"next":""}}`,
+			want: `was not found under app`,
+		},
+		{
+			name: "wrong type",
+			body: `{"data":[{"id":"sub-1","type":"subscriptions","attributes":{"productId":"com.example.wrong"}}],"links":{"next":""}}`,
+			want: `unexpected resource type`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			origResolveSession := resolveSessionFn
+			t.Cleanup(func() { resolveSessionFn = origResolveSession })
+
+			postCalls := 0
+			resolveSessionFn = func(ctx context.Context, appleID, password, twoFactorCode string) (*webcore.AuthSession, string, error) {
+				return &webcore.AuthSession{
+					Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+						if req.Method == http.MethodPost {
+							postCalls++
+							t.Fatalf("%s selector must not attach: %s", tc.name, req.URL.Path)
+						}
+						if req.Method != http.MethodGet || req.URL.Path != "/iris/v1/apps/123456789/inAppPurchases" {
+							t.Fatalf("unexpected request: %s %s", req.Method, req.URL.Path)
+						}
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     http.Header{"Content-Type": []string{"application/json"}},
+							Body:       io.NopCloser(strings.NewReader(tc.body)),
+							Request:    req,
+						}, nil
+					})},
+				}, "cache", nil
+			}
+
+			cmd := WebReviewIAPsAttachCommand()
+			if err := cmd.FlagSet.Parse([]string{"--app", "123456789", "--iap-id", tc.name, "--confirm"}); err != nil {
+				t.Fatalf("parse error: %v", err)
+			}
+			err := cmd.Exec(context.Background(), nil)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q error, got %v", tc.want, err)
+			}
+			if postCalls != 0 {
+				t.Fatalf("expected no attach request, got %d", postCalls)
+			}
+		})
 	}
 }
 

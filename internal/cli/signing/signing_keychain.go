@@ -33,7 +33,7 @@ type signingKeychainInstallDeps struct {
 	SecurityAvailable         bool
 	Now                       func() time.Time
 	AcquireLock               func(context.Context) (func() error, error)
-	CreateKeychain            func(context.Context, string, []byte) error
+	CreateKeychain            func(context.Context, string, []byte) (bool, error)
 	ImportIdentity            func(context.Context, string, []byte, []byte, []byte, string) error
 	KeychainSearchList        func(context.Context) ([]string, error)
 	SetKeychainSearchList     func(context.Context, []string) error
@@ -50,13 +50,21 @@ var (
 func SigningKeychainCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("keychain", flag.ExitOnError)
 	return &ffcli.Command{
-		Name:        "keychain",
-		ShortUsage:  "asc signing keychain <subcommand> [flags]",
-		ShortHelp:   "Manage dedicated local signing keychains.",
-		LongHelp:    "Manage dedicated local signing keychains without changing the default keychain.",
-		FlagSet:     fs,
-		UsageFunc:   shared.DefaultUsageFunc,
-		Subcommands: []*ffcli.Command{SigningKeychainInstallCommand()},
+		Name:       "keychain",
+		ShortUsage: "asc signing keychain <subcommand> [flags]",
+		ShortHelp:  "Manage dedicated local signing keychains.",
+		LongHelp:   "Manage dedicated local signing keychains without changing the default keychain.",
+		FlagSet:    fs,
+		UsageFunc:  shared.DefaultUsageFunc,
+		Subcommands: []*ffcli.Command{
+			SigningKeychainListCommand(),
+			SigningKeychainInstallCommand(),
+			SigningKeychainUnlockCommand(),
+			SigningKeychainLockCommand(),
+			SigningKeychainSetTimeoutCommand(),
+			SigningKeychainSetPartitionListCommand(),
+			SigningKeychainDeleteCommand(),
+		},
 		Exec: func(context.Context, []string) error {
 			return flag.ErrHelp
 		},
@@ -252,26 +260,46 @@ func executeSigningKeychainInstallWith(ctx context.Context, options signingKeych
 		}
 		return primary
 	}
-	if err := deps.CreateKeychain(ctx, resolvedKeychainPath, keychainPassword); err != nil {
-		return nil, fmt.Errorf("signing keychain install: create keychain: %w", err)
+	created, err = deps.CreateKeychain(ctx, resolvedKeychainPath, keychainPassword)
+	if err != nil {
+		return nil, rollback(fmt.Errorf("signing keychain install: create keychain: %w", err))
 	}
-	created = true
-	if !options.AddToSearchList {
+	removedSearchEntry := false
+	if !options.AddToSearchList && searchListHadPath {
 		if err := deps.RemoveKeychainSearchEntry(ctx, resolvedKeychainPath); err != nil {
 			return nil, rollback(fmt.Errorf("signing keychain install: isolate keychain: %w", err))
+		}
+		removedSearchEntry = true
+	}
+	if !searchListHadPath || removedSearchEntry {
+		paths := make([]string, 0, len(originalSearchList)+1)
+		staged := false
+		for _, path := range originalSearchList {
+			if path == resolvedKeychainPath {
+				if !staged {
+					paths = append(paths, resolvedKeychainPath)
+					staged = true
+				}
+				continue
+			}
+			paths = append(paths, path)
+		}
+		if !staged {
+			paths = append(paths, resolvedKeychainPath)
+		}
+		if err := deps.SetKeychainSearchList(ctx, paths); err != nil {
+			return nil, rollback(fmt.Errorf("signing keychain install: stage keychain search list: %w", err))
 		}
 	}
 	if err := deps.ImportIdentity(ctx, resolvedKeychainPath, keychainPassword, identityData, identityPassword, identity.CertificateSHA1); err != nil {
 		return nil, rollback(fmt.Errorf("signing keychain install: import identity: %w", err))
 	}
 
-	searchListUpdated := false
-	if options.AddToSearchList && !searchListHadPath {
-		paths := append(originalSearchList, resolvedKeychainPath)
-		if err := deps.SetKeychainSearchList(ctx, paths); err != nil {
-			return nil, rollback(fmt.Errorf("signing keychain install: update keychain search list: %w", err))
+	searchListUpdated := options.AddToSearchList && !searchListHadPath
+	if !options.AddToSearchList {
+		if err := deps.RemoveKeychainSearchEntry(ctx, resolvedKeychainPath); err != nil {
+			return nil, rollback(fmt.Errorf("signing keychain install: isolate keychain: %w", err))
 		}
-		searchListUpdated = true
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, rollback(fmt.Errorf("signing keychain install: %w", err))

@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 	webcore "github.com/rudrankriyam/App-Store-Connect-CLI/internal/web"
 	webref "github.com/rudrankriyam/App-Store-Connect-CLI/internal/web/reference"
@@ -40,6 +42,246 @@ func TestWrapWebAuthCapabilitiesErrorFormatsLookupFailures(t *testing.T) {
 	err = wrapWebAuthCapabilitiesError("missing", webcore.ErrAPIKeyRolesUnresolved)
 	if err == nil || !strings.Contains(err.Error(), "exact roles could not be resolved") {
 		t.Fatalf("unexpected unresolved error: %v", err)
+	}
+}
+
+func TestWrapWebAuthCapabilitiesSessionErrorDistinguishesMissingAndExpired(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		want     string
+		dontWant string
+	}{
+		{
+			name:     "missing session",
+			err:      shared.NewErrorWithCause(errors.New("--apple-id is required when no cached web session is available"), errNoCachedWebSession),
+			want:     "no cached web session is available",
+			dontWant: "expired",
+		},
+		{
+			name:     "expired session",
+			err:      webcore.ErrCachedSessionExpired,
+			want:     "cached web session expired",
+			dontWant: "no cached web session",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := wrapWebAuthCapabilitiesSessionError(tt.err)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %q diagnostic, got %v", tt.want, err)
+			}
+			if strings.Contains(err.Error(), tt.dontWant) {
+				t.Fatalf("did not expect %q in diagnostic: %v", tt.dontWant, err)
+			}
+			if tt.name == "expired session" && !strings.Contains(err.Error(), "asc web auth login") {
+				t.Fatalf("expected login recovery guidance, got %v", err)
+			}
+			if !errors.Is(err, tt.err) {
+				t.Fatalf("expected diagnostic to preserve its cause, got %v", err)
+			}
+		})
+	}
+}
+
+func TestWebAuthCapabilitiesMissingSessionPreservesUsageDiagnostic(t *testing.T) {
+	origResolveSession := resolveSessionFn
+	t.Cleanup(func() { resolveSessionFn = origResolveSession })
+
+	resolveSessionFn = func(context.Context, string, string, string) (*webcore.AuthSession, string, error) {
+		return nil, "", shared.NewErrorWithCause(
+			shared.UsageError("--apple-id is required when no cached web session is available"),
+			errNoCachedWebSession,
+		)
+	}
+
+	cmd := WebAuthCapabilitiesCommand()
+	if err := cmd.FlagSet.Parse([]string{"--key-id", "KEY", "--output", "json"}); err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	var execErr error
+	stdout, stderr := captureOutput(t, func() {
+		execErr = cmd.Exec(context.Background(), nil)
+	})
+	if !errors.Is(execErr, flag.ErrHelp) {
+		t.Fatalf("expected usage error, got %v", execErr)
+	}
+	if got := shared.ClassifyUsageError(execErr); got != shared.UsageErrorMissingRequired {
+		t.Fatalf("usage classification = %q, want %q", got, shared.UsageErrorMissingRequired)
+	}
+	if stdout != "" {
+		t.Fatalf("expected empty stdout, got %q", stdout)
+	}
+	wantStderr := "Error: --apple-id is required when no cached web session is available\n"
+	if stderr != wantStderr {
+		t.Fatalf("stderr = %q, want one diagnostic %q", stderr, wantStderr)
+	}
+}
+
+func TestWebAuthCapabilitiesExpiredSessionGetsCommandDiagnostic(t *testing.T) {
+	origResolveSession := resolveSessionFn
+	t.Cleanup(func() { resolveSessionFn = origResolveSession })
+
+	resolveSessionFn = func(context.Context, string, string, string) (*webcore.AuthSession, string, error) {
+		return nil, "", webcore.ErrCachedSessionExpired
+	}
+
+	cmd := WebAuthCapabilitiesCommand()
+	if err := cmd.FlagSet.Parse([]string{"--key-id", "KEY", "--output", "json"}); err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	err := cmd.Exec(context.Background(), nil)
+	if err == nil || !strings.Contains(err.Error(), "cached web session expired") {
+		t.Fatalf("expected expired-session diagnostic, got %v", err)
+	}
+	if !errors.Is(err, webcore.ErrCachedSessionExpired) {
+		t.Fatalf("expected expired-session cause, got %v", err)
+	}
+}
+
+func TestWrapWebAuthCapabilitiesErrorDistinguishesUnauthorizedAndForbidden(t *testing.T) {
+	unauthorizedCause := &webcore.APIError{
+		Status:         401,
+		AppleRequestID: "request-401",
+		CorrelationKey: "correlation-401",
+	}
+	unauthorized := wrapWebAuthCapabilitiesError("KEY", unauthorizedCause)
+	if unauthorized == nil || !strings.Contains(unauthorized.Error(), "web session expired") {
+		t.Fatalf("expected expired-session diagnostic, got %v", unauthorized)
+	}
+	if strings.Contains(unauthorized.Error(), "not permitted") {
+		t.Fatalf("did not expect permission diagnostic for 401: %v", unauthorized)
+	}
+	for _, detail := range []string{"request-401", "correlation-401", "web api error"} {
+		if strings.Contains(unauthorized.Error(), detail) {
+			t.Fatalf("did not expect API detail %q in 401 recovery guidance: %v", detail, unauthorized)
+		}
+	}
+	var preservedUnauthorized *webcore.APIError
+	if !errors.As(unauthorized, &preservedUnauthorized) || preservedUnauthorized != unauthorizedCause {
+		t.Fatalf("expected 401 cause to remain available for classification, got %v", unauthorized)
+	}
+
+	forbiddenCause := &webcore.APIError{
+		Status:         403,
+		AppleRequestID: "request-403",
+		CorrelationKey: "correlation-403",
+	}
+	forbidden := wrapWebAuthCapabilitiesError("KEY", forbiddenCause)
+	if forbidden == nil || !strings.Contains(forbidden.Error(), "capability discovery is not permitted") {
+		t.Fatalf("expected permission diagnostic, got %v", forbidden)
+	}
+	if strings.Contains(forbidden.Error(), "expired") {
+		t.Fatalf("did not expect expired-session diagnostic for 403: %v", forbidden)
+	}
+	for _, detail := range []string{"request-403", "correlation-403", "web api error"} {
+		if strings.Contains(forbidden.Error(), detail) {
+			t.Fatalf("did not expect API detail %q in 403 recovery guidance: %v", detail, forbidden)
+		}
+	}
+	var preservedForbidden *webcore.APIError
+	if !errors.As(forbidden, &preservedForbidden) || preservedForbidden != forbiddenCause {
+		t.Fatalf("expected 403 cause to remain available for classification, got %v", forbidden)
+	}
+}
+
+func TestWrapWebAuthCapabilitiesErrorPreservesNonAuthAPIDetails(t *testing.T) {
+	for _, status := range []int{422, 500} {
+		t.Run(fmt.Sprintf("status_%d", status), func(t *testing.T) {
+			cause := &webcore.APIError{
+				Status:         status,
+				AppleRequestID: fmt.Sprintf("request-%d", status),
+				CorrelationKey: fmt.Sprintf("correlation-%d", status),
+			}
+
+			err := wrapWebAuthCapabilitiesError("KEY", cause)
+			if err == nil || !strings.Contains(err.Error(), "capability discovery is unavailable") {
+				t.Fatalf("expected high-level discovery diagnostic, got %v", err)
+			}
+			for _, detail := range []string{
+				fmt.Sprintf("web api error (status %d)", status),
+				fmt.Sprintf("request_id=request-%d", status),
+				fmt.Sprintf("correlation_key=correlation-%d", status),
+			} {
+				if !strings.Contains(err.Error(), detail) {
+					t.Fatalf("expected API detail %q, got %v", detail, err)
+				}
+			}
+			var preserved *webcore.APIError
+			if !errors.As(err, &preserved) || preserved != cause {
+				t.Fatalf("expected API cause to remain available for classification, got %v", err)
+			}
+		})
+	}
+}
+
+func TestWrapWebAuthCapabilitiesErrorKeepsHostileAPICauseStructured(t *testing.T) {
+	requestID := "request\x1b[31m\n" + strings.Repeat("é", 200) + string([]byte{0xff})
+	correlationKey := "correlation\u202e" + strings.Repeat("c", 400)
+	cause := &webcore.APIError{
+		Status:         422,
+		AppleRequestID: requestID,
+		CorrelationKey: correlationKey,
+	}
+
+	err := wrapWebAuthCapabilitiesError("KEY", cause)
+	if err == nil {
+		t.Fatal("expected wrapped API error")
+	}
+	if message := err.Error(); !utf8.ValidString(message) || asc.HasInterpretedTerminalSequence(message) {
+		t.Fatalf("wrapped human diagnostic is not terminal-safe UTF-8: %q", message)
+	}
+	var preserved *webcore.APIError
+	if !errors.As(err, &preserved) || preserved != cause {
+		t.Fatalf("expected exact API cause pointer, got %#v", preserved)
+	}
+	if preserved.AppleRequestID != requestID || preserved.CorrelationKey != correlationKey || preserved.HTTPStatusCode() != 422 {
+		t.Fatalf("structured API details changed: %#v", preserved)
+	}
+}
+
+func TestWebAuthCapabilitiesErrorsDoNotExposeSessionMaterial(t *testing.T) {
+	secret := "cookie=secret-cookie token=secret-token sessionPayload=secret-session"
+	err := wrapWebAuthCapabilitiesError("KEY", fmt.Errorf("lookup failed: %s", secret))
+	if err == nil || !strings.Contains(err.Error(), "capability discovery is unavailable") {
+		t.Fatalf("expected unavailable diagnostic, got %v", err)
+	}
+	for _, value := range []string{"secret-cookie", "secret-token", "secret-session"} {
+		if strings.Contains(err.Error(), value) {
+			t.Fatalf("diagnostic exposed sensitive value %q: %v", value, err)
+		}
+	}
+}
+
+func TestWebAuthCapabilitiesTextLookalikeDoesNotBypassSessionRedaction(t *testing.T) {
+	cause := errors.New("cached web session expired: token=secret-token")
+	err := wrapWebAuthCapabilitiesSessionError(cause)
+	if err == nil || !strings.Contains(err.Error(), "unable to establish a web session") {
+		t.Fatalf("expected generic session diagnostic, got %v", err)
+	}
+	if strings.Contains(err.Error(), "secret-token") {
+		t.Fatalf("diagnostic exposed session material: %v", err)
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("expected underlying cause to remain available for classification, got %v", err)
+	}
+}
+
+func TestWebAuthCapabilitiesEmptyCapabilitySetOutputsEmptyArray(t *testing.T) {
+	payload, err := json.Marshal(webAuthCapabilitiesResult{
+		KeyID:        "KEY",
+		Kind:         "team",
+		Roles:        []string{},
+		Capabilities: convertWebAuthCapabilities(nil),
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error: %v", err)
+	}
+	if !strings.Contains(string(payload), `"capabilities":[]`) {
+		t.Fatalf("expected explicit empty capability result, got %s", payload)
 	}
 }
 
@@ -311,7 +553,7 @@ func TestWebAuthCapabilitiesAuthResolutionOutputsJSON(t *testing.T) {
 	}
 }
 
-func TestWebAuthCapabilitiesUnauthorizedLookupGetsWebHint(t *testing.T) {
+func TestWebAuthCapabilitiesUnauthorizedLookupGetsExpiredSessionDiagnostic(t *testing.T) {
 	labels := stubWebProgressLabels(t)
 
 	origResolveSession := resolveSessionFn
@@ -348,11 +590,78 @@ func TestWebAuthCapabilitiesUnauthorizedLookupGetsWebHint(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "web session is unauthorized or expired") {
-		t.Fatalf("expected web auth hint, got %v", err)
+	if !strings.Contains(err.Error(), "web session expired") {
+		t.Fatalf("expected expired-session diagnostic, got %v", err)
 	}
 	if !strings.Contains(err.Error(), "asc web auth login") {
 		t.Fatalf("expected login guidance, got %v", err)
+	}
+	if len(*labels) != 1 || (*labels)[0] != "Loading exact API key roles" {
+		t.Fatalf("unexpected progress labels: %#v", *labels)
+	}
+}
+
+func TestWebAuthCapabilitiesNonAuthAPIFailureRetainsRequestDetails(t *testing.T) {
+	labels := stubWebProgressLabels(t)
+
+	origResolveSession := resolveSessionFn
+	origNewClient := newWebAuthClientFn
+	origLookup := lookupWebAuthKeyFn
+	origResolveRef := resolveWebAuthRefFn
+	t.Cleanup(func() {
+		resolveSessionFn = origResolveSession
+		newWebAuthClientFn = origNewClient
+		lookupWebAuthKeyFn = origLookup
+		resolveWebAuthRefFn = origResolveRef
+	})
+
+	resolveSessionFn = func(ctx context.Context, appleID, password, twoFactorCode string) (*webcore.AuthSession, string, error) {
+		return &webcore.AuthSession{}, "cache", nil
+	}
+	newWebAuthClientFn = func(session *webcore.AuthSession) *webcore.Client {
+		return &webcore.Client{}
+	}
+	cause := &webcore.APIError{
+		Status:         500,
+		AppleRequestID: "request-command-500",
+		CorrelationKey: "correlation-command-500",
+	}
+	lookupWebAuthKeyFn = func(ctx context.Context, client *webcore.Client, keyID string) (*webcore.APIKeyRoleLookup, error) {
+		return nil, cause
+	}
+	resolveWebAuthRefFn = func(kind string, codes []string) (*webref.View, error) {
+		t.Fatal("did not expect reference resolution on failed lookup")
+		return nil, nil
+	}
+
+	cmd := WebAuthCapabilitiesCommand()
+	if err := cmd.FlagSet.Parse([]string{"--key-id", "39MX87M9Y4", "--output", "json"}); err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	var execErr error
+	stdout, stderr := captureOutput(t, func() {
+		execErr = cmd.Exec(context.Background(), nil)
+	})
+	if execErr == nil {
+		t.Fatal("expected error, got nil")
+	}
+	for _, detail := range []string{
+		"capability discovery is unavailable",
+		"web api error (status 500)",
+		"request_id=request-command-500",
+		"correlation_key=correlation-command-500",
+	} {
+		if !strings.Contains(execErr.Error(), detail) {
+			t.Fatalf("expected command error detail %q, got %v", detail, execErr)
+		}
+	}
+	if stdout != "" || stderr != "" {
+		t.Fatalf("expected no direct command output, got stdout=%q stderr=%q", stdout, stderr)
+	}
+	var preserved *webcore.APIError
+	if !errors.As(execErr, &preserved) || preserved != cause {
+		t.Fatalf("expected API cause to remain available for classification, got %v", execErr)
 	}
 	if len(*labels) != 1 || (*labels)[0] != "Loading exact API key roles" {
 		t.Fatalf("unexpected progress labels: %#v", *labels)

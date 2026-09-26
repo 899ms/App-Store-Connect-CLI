@@ -1092,8 +1092,13 @@ func TestIAPValidationErrors(t *testing.T) {
 		},
 		{
 			name:    "iap review-screenshots update missing screenshot-id",
-			args:    []string{"iap", "review-screenshots", "update", "--file", "./review.png"},
+			args:    []string{"iap", "review-screenshots", "update", "--checksum", "HASH"},
 			wantErr: "--screenshot-id is required",
+		},
+		{
+			name:    "iap review-screenshots update missing update flags",
+			args:    []string{"iap", "review-screenshots", "update", "--screenshot-id", "SHOT_ID"},
+			wantErr: "at least one update flag is required",
 		},
 		{
 			name:    "iap review-screenshots delete missing confirm",
@@ -4259,7 +4264,7 @@ func TestAppsUpdateValidationErrors(t *testing.T) {
 		{
 			name:    "apps update missing fields",
 			args:    []string{"apps", "update", "--id", "APP_ID"},
-			wantErr: "Error: --bundle-id, --primary-locale, or --content-rights is required",
+			wantErr: "Error: at least one update field is required (--bundle-id, --primary-locale, --content-rights, --subscription-status-url, --sandbox-subscription-status-url)",
 		},
 		{
 			name:    "apps update invalid content rights",

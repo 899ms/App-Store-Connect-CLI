@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -110,11 +111,17 @@ func GenerateJWT(keyID, issuerID string, privateKey *ecdsa.PrivateKey) (string, 
 // Mutating requests are throttled and retried only when App Store Connect
 // rejects them with 429; see isRateLimitRejection.
 func (c *Client) do(ctx context.Context, method, path string, body io.Reader) ([]byte, error) {
+	return c.doWithHTTPClient(ctx, method, path, body, c.httpClient)
+}
+
+// doWithHTTPClient preserves the shared request/retry behavior while allowing
+// narrowly scoped callers to override only the HTTP client's redirect policy.
+func (c *Client) doWithHTTPClient(ctx context.Context, method, path string, body io.Reader, httpClient *http.Client) ([]byte, error) {
 	if err := validateMutatingRequestTarget(method, path); err != nil {
 		return nil, err
 	}
 
-	request, err := c.replayableRequest(method, path, body)
+	request, err := c.replayableRequestWithHTTPClient(method, path, body, httpClient)
 	if err != nil {
 		return nil, err
 	}
@@ -130,6 +137,48 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader) ([
 	}
 
 	return request(ctx)
+}
+
+// doAppBuildUploadsRead retries the app-scoped Build Upload API only after a
+// separate app read proves that the parent exists. Apple returns the same 404
+// shape for a transient build-upload propagation failure and a permanently
+// invalid app ID, so status and error detail alone cannot classify it safely.
+func (c *Client) doAppBuildUploadsRead(ctx context.Context, appID, path string) ([]byte, error) {
+	request, err := c.replayableRequest(http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// The request path, not the caller's original appID, determines whether
+	// this is an app-scoped endpoint. A top-level continuation URL must keep
+	// the normal detail-based classification for missing upload resources.
+	appID = appIDFromBuildUploadsPath(path)
+	retryOpts := ResolveRetryOptions()
+	appVerified := false
+	return withRetry(ctx, func() ([]byte, error) {
+		data, requestErr := request(ctx)
+		if requestErr == nil || !isAppBuildUploadsNotFound(requestErr) {
+			return data, requestErr
+		}
+		if appID == "" || retryOpts.MaxRetries == 0 {
+			return nil, requestErr
+		}
+		if !appVerified {
+			_, verifyErr := c.doOnce(ctx, http.MethodGet, fmt.Sprintf("/v1/apps/%s", appID), nil, c.httpClient)
+			if verifyErr != nil {
+				if IsNotFound(verifyErr) {
+					return nil, requestErr
+				}
+				return nil, appBuildUploadsVerificationError(appID, verifyErr)
+			}
+			appVerified = true
+		}
+		return nil, &RetryableError{Err: requestErr}
+	}, retryOpts, IsRetryable)
+}
+
+func appBuildUploadsVerificationError(appID string, err error) error {
+	return fmt.Errorf("verify app %q before retrying build uploads: %w", appID, err)
 }
 
 // doIdempotentMutation performs an explicitly idempotent mutating request with
@@ -165,6 +214,10 @@ func (c *Client) doMutation(ctx context.Context, request func(context.Context) (
 // replayableRequest buffers the request body so every attempt sends the
 // identical payload from a fresh reader.
 func (c *Client) replayableRequest(method, path string, body io.Reader) (func(context.Context) ([]byte, error), error) {
+	return c.replayableRequestWithHTTPClient(method, path, body, c.httpClient)
+}
+
+func (c *Client) replayableRequestWithHTTPClient(method, path string, body io.Reader, httpClient *http.Client) (func(context.Context) ([]byte, error), error) {
 	var bodyBytes []byte
 	if body != nil {
 		var err error
@@ -179,7 +232,7 @@ func (c *Client) replayableRequest(method, path string, body io.Reader) (func(co
 		if bodyBytes != nil {
 			reader = bytes.NewReader(bodyBytes)
 		}
-		return c.doOnce(requestCtx, method, path, reader)
+		return c.doOnce(requestCtx, method, path, reader, httpClient)
 	}, nil
 }
 
@@ -252,7 +305,7 @@ func deriveMutatingRequestContext(ctx context.Context, requestTimeout time.Durat
 	}
 }
 
-func (c *Client) doOnce(ctx context.Context, method, path string, body io.Reader) ([]byte, error) {
+func (c *Client) doOnce(ctx context.Context, method, path string, body io.Reader, httpClient *http.Client) ([]byte, error) {
 	start := time.Now()
 	debugSettings := resolveDebugSettings()
 
@@ -271,7 +324,7 @@ func (c *Client) doOnce(ctx context.Context, method, path string, body io.Reader
 		)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := httpClient.Do(req)
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -313,6 +366,11 @@ func (c *Client) doOnce(ctx context.Context, method, path string, body io.Reader
 		}
 
 		if err := ParseErrorWithStatus(respBody, resp.StatusCode); err != nil {
+			if isIntermittentBuildUploadsNotFound(method, path, err) {
+				// No Retry-After accompanies the flake; the shared exponential
+				// backoff (1s/2s/4s by default) and retry budget apply.
+				return nil, &RetryableError{Err: err}
+			}
 			return nil, err
 		}
 		return nil, fmt.Errorf("API request failed with status %d", resp.StatusCode)
@@ -359,6 +417,82 @@ func isRetryableHTTPStatus(statusCode int) bool {
 	default:
 		return false
 	}
+}
+
+// isBuildUploadsPath reports whether path targets the top-level Build Upload
+// API family (/v1/buildUploads and /v1/buildUploadFiles).
+// Apple intermittently answers reads on these endpoints with 404 NOT_FOUND for
+// resources that exist (fastlane/fastlane#29908), so reads there are allowed
+// a bounded retry that no other 404 receives. Full next-page URLs are matched
+// on their path component.
+func isBuildUploadsPath(path string) bool {
+	segments := apiPathSegments(path)
+	if len(segments) < 2 || segments[0] != "v1" {
+		return false
+	}
+	switch segments[1] {
+	case "buildUploads", "buildUploadFiles":
+		return true
+	}
+	return false
+}
+
+// isIntermittentBuildUploadsNotFound reports whether err is the 404 NOT_FOUND
+// flake Apple emits on Build Upload API reads: the app relationship is
+// reported missing for an app that exists. Only reads are eligible, and only
+// when the missing resource is the app. The detail on /v1/buildUploads* and
+// /v1/buildUploadFiles* must name resource type 'apps'; a genuinely missing
+// upload or file id ("no resource of type 'buildUploads'") and all app-scoped
+// 404s are surfaced unchanged without consuming the retry budget.
+func isIntermittentBuildUploadsNotFound(method, path string, err error) bool {
+	if !shouldRetryMethod(method) || !isBuildUploadsPath(path) {
+		return false
+	}
+	apiErr, ok := errors.AsType[*APIError](err)
+	if !ok || apiErr.StatusCode != http.StatusNotFound || !strings.EqualFold(apiErr.Code, "NOT_FOUND") {
+		return false
+	}
+	return notFoundNamesAppResource(apiErr)
+}
+
+func isAppBuildUploadsNotFound(err error) bool {
+	apiErr, ok := errors.AsType[*APIError](err)
+	return ok && apiErr.StatusCode == http.StatusNotFound && strings.EqualFold(apiErr.Code, "NOT_FOUND")
+}
+
+func appIDFromBuildUploadsPath(path string) string {
+	segments := apiPathSegments(path)
+	if len(segments) == 4 && segments[0] == "v1" && segments[1] == "apps" && segments[3] == "buildUploads" {
+		return strings.TrimSpace(segments[2])
+	}
+	if len(segments) == 5 && segments[0] == "v1" && segments[1] == "apps" && segments[3] == "relationships" && segments[4] == "buildUploads" {
+		return strings.TrimSpace(segments[2])
+	}
+	return ""
+}
+
+// notFoundNamesAppResource reports whether a NOT_FOUND detail names the apps
+// resource type, e.g. "There is no resource of type 'apps' with id '123'".
+func notFoundNamesAppResource(apiErr *APIError) bool {
+	return appResourceNotFoundDetail.MatchString(apiErr.Detail)
+}
+
+var appResourceNotFoundDetail = regexp.MustCompile(`(?i)resource of type ['"‘’“”]?apps['"‘’“”]?(?:\s|$)`)
+
+// apiPathSegments returns the path segments of an API path or absolute URL,
+// without the query string.
+func apiPathSegments(path string) []string {
+	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+		parsed, err := url.Parse(path)
+		if err != nil {
+			return nil
+		}
+		path = parsed.Path
+	}
+	if idx := strings.IndexByte(path, '?'); idx >= 0 {
+		path = path[:idx]
+	}
+	return strings.Split(strings.Trim(path, "/"), "/")
 }
 
 // sanitizeAuthHeader redacts the JWT token from Authorization header for logging.
@@ -652,7 +786,7 @@ func (c *Client) doStream(ctx context.Context, path string, accept string) (*htt
 		req.Header.Set("Accept", accept)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := doStreamingRequest(c.httpClient, req)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -676,8 +810,7 @@ func (c *Client) doStreamNoAuth(ctx context.Context, rawURL, accept string) (*ht
 		req.Header.Set("Accept", accept)
 	}
 
-	client := clientWithoutRedirects(c.httpClient)
-	resp, err := client.Do(req)
+	resp, err := doStreamingRequest(clientWithoutRedirects(c.httpClient), req)
 	if err != nil {
 		return nil, newSanitizedNoAuthStreamError("download request", rawURL, err)
 	}
@@ -726,12 +859,22 @@ func ParseErrorWithStatus(body []byte, statusCode int) error {
 
 	if err := json.Unmarshal(body, &errResp); err == nil && len(errResp.Errors) > 0 {
 		associatedErrors := parseAssociatedErrors(errResp.Errors[0].Meta)
+		allCodes := make([]string, 0, len(errResp.Errors))
+		allDetails := make([]string, 0, len(errResp.Errors))
+		for _, entry := range errResp.Errors {
+			if code := strings.TrimSpace(entry.Code); code != "" {
+				allCodes = append(allCodes, code)
+			}
+			allDetails = append(allDetails, entry.Detail)
+		}
 		return &APIError{
 			Code:             errResp.Errors[0].Code,
 			Title:            errResp.Errors[0].Title,
 			Detail:           errResp.Errors[0].Detail,
 			StatusCode:       statusCode,
 			AssociatedErrors: associatedErrors,
+			AllCodes:         allCodes,
+			AllDetails:       allDetails,
 			Remediation:      remediationForAPIError(errResp.Errors[0].Code),
 		}
 	}

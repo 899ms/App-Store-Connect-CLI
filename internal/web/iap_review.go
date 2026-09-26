@@ -63,11 +63,11 @@ func decodeReviewIAP(resource jsonAPIResource) ReviewIAP {
 // FindReviewIAP finds a single app-scoped IAP through the private web flow.
 //
 // The caller may pass either the iris IAP resource ID (a UUID, distinct from
-// the numeric public-REST-API in-app purchase ID) or the product ID
-// (e.g. `com.example.pro.lifetime`). The product-ID match exists because
-// the public REST API surfaces a numeric ID that does not match the iris
-// resource's ID, and users typically know either the iris UUID or the
-// product ID — not both.
+// the numeric public-REST-API in-app purchase ID), the product ID
+// (e.g. `com.example.pro.lifetime`), or the exact current reference name. The
+// product-ID match exists because the public REST API surfaces a numeric ID
+// that does not match the iris resource's ID, and users typically know either
+// the iris UUID, product ID, or display name — not all three.
 func (c *Client) FindReviewIAP(ctx context.Context, appID, iapID string) (ReviewIAP, bool, error) {
 	appID = strings.TrimSpace(appID)
 	if appID == "" {
@@ -85,7 +85,8 @@ func (c *Client) FindReviewIAP(ctx context.Context, appID, iapID string) (Review
 
 	nextPath := queryPath("/apps/"+url.PathEscape(appID)+"/inAppPurchases", query)
 	visited := map[string]struct{}{}
-	var productIDMatch *ReviewIAP
+	productIDMatches := make([]ReviewIAP, 0, 1)
+	referenceNameMatches := make([]ReviewIAP, 0, 1)
 
 	for nextPath != "" {
 		if _, seen := visited[nextPath]; seen {
@@ -103,13 +104,18 @@ func (c *Client) FindReviewIAP(ctx context.Context, appID, iapID string) (Review
 			return ReviewIAP{}, false, fmt.Errorf("failed to parse review iaps response: %w", err)
 		}
 		for _, resource := range payload.Data {
+			if resourceType := strings.TrimSpace(resource.Type); !strings.EqualFold(resourceType, "inAppPurchases") {
+				return ReviewIAP{}, false, fmt.Errorf("failed to parse review iaps response: unexpected resource type %q", resource.Type)
+			}
 			decoded := decodeReviewIAP(resource)
 			if decoded.ID == iapID {
 				return decoded, true, nil
 			}
-			if productIDMatch == nil && decoded.ProductID == iapID {
-				match := decoded
-				productIDMatch = &match
+			if decoded.ProductID == iapID {
+				appendUniqueReviewIAPMatch(&productIDMatches, decoded)
+			}
+			if strings.EqualFold(strings.TrimSpace(decoded.ReferenceName), iapID) {
+				appendUniqueReviewIAPMatch(&referenceNameMatches, decoded)
 			}
 		}
 
@@ -126,11 +132,55 @@ func (c *Client) FindReviewIAP(ctx context.Context, appID, iapID string) (Review
 		}
 	}
 
-	if productIDMatch != nil {
-		return *productIDMatch, true, nil
+	if len(productIDMatches) > 1 {
+		return ReviewIAP{}, false, ambiguousReviewIAPSelectorError(iapID, "product ID", productIDMatches)
+	}
+	if len(productIDMatches) == 1 {
+		return productIDMatches[0], true, nil
+	}
+	if len(referenceNameMatches) > 1 {
+		return ReviewIAP{}, false, ambiguousReviewIAPSelectorError(iapID, "reference name", referenceNameMatches)
+	}
+	if len(referenceNameMatches) == 1 {
+		return referenceNameMatches[0], true, nil
 	}
 
 	return ReviewIAP{}, false, nil
+}
+
+func appendUniqueReviewIAPMatch(matches *[]ReviewIAP, candidate ReviewIAP) {
+	for _, existing := range *matches {
+		if strings.TrimSpace(existing.ID) == strings.TrimSpace(candidate.ID) {
+			return
+		}
+	}
+	*matches = append(*matches, candidate)
+}
+
+// ReviewIAPAmbiguousError reports that a selector matched more than one IAP.
+// Matches remain available to the CLI so it can render bounded, terminal-safe
+// recovery details without making this web client depend on CLI packages.
+type ReviewIAPAmbiguousError struct {
+	Selector string
+	Field    string
+	Matches  []ReviewIAP
+}
+
+func (e *ReviewIAPAmbiguousError) Error() string {
+	return fmt.Sprintf(
+		"%q matches %d in-app purchases by %s",
+		strings.TrimSpace(e.Selector),
+		len(e.Matches),
+		strings.TrimSpace(e.Field),
+	)
+}
+
+func ambiguousReviewIAPSelectorError(selector, field string, matches []ReviewIAP) error {
+	return &ReviewIAPAmbiguousError{
+		Selector: selector,
+		Field:    field,
+		Matches:  matches,
+	}
 }
 
 // CreateInAppPurchaseSubmission attaches a non-renewing in-app purchase to the
@@ -178,7 +228,9 @@ func (c *Client) CreateInAppPurchaseSubmission(ctx context.Context, iapID string
 	if strings.TrimSpace(payload.Data.ID) == "" {
 		return ReviewIAPSubmission{}, fmt.Errorf("failed to parse iap submission response: missing submission id")
 	}
-	if payload.Data.Type != "" && payload.Data.Type != "inAppPurchaseSubmissions" {
+	if submissionType := strings.TrimSpace(payload.Data.Type); submissionType == "" {
+		return ReviewIAPSubmission{}, fmt.Errorf("failed to parse iap submission response: missing submission resource type")
+	} else if submissionType != "inAppPurchaseSubmissions" {
 		return ReviewIAPSubmission{}, fmt.Errorf("failed to parse iap submission response: unexpected resource type %q", payload.Data.Type)
 	}
 
@@ -186,10 +238,13 @@ func (c *Client) CreateInAppPurchaseSubmission(ctx context.Context, iapID string
 		ID:                            strings.TrimSpace(payload.Data.ID),
 		SubmitWithNextAppStoreVersion: boolAttr(payload.Data.Attributes, "submitWithNextAppStoreVersion"),
 	}
-	if ref := firstRelationshipRef(payload.Data, "inAppPurchaseV2"); ref != nil {
-		result.InAppPurchaseID = strings.TrimSpace(ref.ID)
+	relationshipID, relationshipPresent, err := validateReviewSubmissionRelationship(payload.Data, "inAppPurchaseV2", "inAppPurchases", iapID)
+	if err != nil {
+		return ReviewIAPSubmission{}, fmt.Errorf("failed to parse iap submission response: %w", err)
 	}
-	if result.InAppPurchaseID == "" {
+	if relationshipPresent {
+		result.InAppPurchaseID = relationshipID
+	} else {
 		result.InAppPurchaseID = iapID
 	}
 	return result, nil

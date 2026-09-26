@@ -157,7 +157,8 @@
               "commands/migrate",
               "commands/system-status",
               "commands/completion",
-              "commands/telemetry"
+              "commands/telemetry",
+              "commands/api"
             ]
           }
         ]
