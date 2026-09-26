@@ -37,6 +37,17 @@ func TestParseDSYMSelectionVersionLatestMatchesLatestFlag(t *testing.T) {
 	}
 }
 
+func TestParseDSYMSelectionRejectsMalformedExactVersions(t *testing.T) {
+	for _, version := range []string{"foo", "1..2", "-1.2"} {
+		t.Run(version, func(t *testing.T) {
+			_, err := parseDSYMSelection(dsymFlagInput{AppID: "123", Version: version})
+			if err == nil || !strings.Contains(err.Error(), "--version must be a dotted numeric version") {
+				t.Fatalf("error = %v, want invalid exact version", err)
+			}
+		})
+	}
+}
+
 func TestParseDSYMSelectionRejectsTimeoutWithoutWait(t *testing.T) {
 	_, err := parseDSYMSelection(dsymFlagInput{
 		BuildID:    "build-1",

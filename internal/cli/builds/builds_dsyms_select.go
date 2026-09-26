@@ -133,6 +133,11 @@ func parseDSYMSelection(input dsymFlagInput) (dsymSelection, error) {
 		selection.All = true
 		selection.Multi = true
 	}
+	if selection.selectsByMarketingVersion() && selection.Resolve.Version != "" {
+		if _, err := parseMarketingVersion(selection.Resolve.Version); err != nil {
+			return dsymSelection{}, shared.UsageErrorf("builds dsyms: --version must be a dotted numeric version (got %q)", selection.Resolve.Version)
+		}
+	}
 
 	if err := validateDSYMSelection(selection, input.TimeoutSet, input.PollSet, input.Timeout, input.PollInterval); err != nil {
 		return dsymSelection{}, err
